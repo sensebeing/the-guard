@@ -33,7 +33,7 @@ def _write_exec(path: Path, content: str) -> None:
 class ArchitectureReviewTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._saved_active = os.environ.pop("ALTER_ARCH_REVIEW_ACTIVE", None)
-        self._saved_session_mode = os.environ.pop("GUARD_WORKTREE_SESSION_MODE", None)
+        self._saved_session_mode = os.environ.pop("THE_GUARD_SESSION_MODE", None)
 
     def tearDown(self) -> None:
         if self._saved_active is not None:
@@ -41,9 +41,9 @@ class ArchitectureReviewTestCase(unittest.TestCase):
         else:
             os.environ.pop("ALTER_ARCH_REVIEW_ACTIVE", None)
         if self._saved_session_mode is not None:
-            os.environ["GUARD_WORKTREE_SESSION_MODE"] = self._saved_session_mode
+            os.environ["THE_GUARD_SESSION_MODE"] = self._saved_session_mode
         else:
-            os.environ.pop("GUARD_WORKTREE_SESSION_MODE", None)
+            os.environ.pop("THE_GUARD_SESSION_MODE", None)
 
     def _init_repo(self, tmp_dir: Path) -> tuple[Path, Path]:
         origin = tmp_dir / "origin.git"

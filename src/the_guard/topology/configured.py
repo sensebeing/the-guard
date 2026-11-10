@@ -3,6 +3,7 @@ import ast
 import fnmatch
 import re
 from ..finding import Finding
+from .rules import _line_exempts_rule
 
 
 def in_scope(path, prefixes):
@@ -28,13 +29,15 @@ def check_configured(path, text, base_text, changed_lines, config):
     topology = config.topology
     prefix = config.rule_id_prefix
     spans = sql_spans(text, path)
+    lines = text.splitlines()
     touched = lambda start, end: changed_lines is None or bool(changed_lines.intersection(range(start, end + 1)))
     for rule in topology.get('exclusive_sql_owners', []):
         if path in rule['owners']:
             continue
+        rule_id = rule.get('rule_id', prefix+'single-source-of-truth')
         pattern = sql_pattern(rule['table'])
         for start, end, value in spans:
-            if pattern.search(value) and touched(start, end):
+            if pattern.search(value) and touched(start, end) and not _line_exempts_rule(lines[start-1], rule_id, exempt_tag=config.exempt_tag):
                 findings.append(Finding(rule.get('rule_id', prefix+'single-source-of-truth'), path, start, rule.get('message', f"SQL for '{rule['table']}' belongs exclusively to {rule['owners']}")))
     retired = topology.get('retired_tables', [])
     if isinstance(retired, dict):
@@ -47,17 +50,23 @@ def check_configured(path, text, base_text, changed_lines, config):
             current_count = sum(len(pattern.findall(value)) for _, _, value in spans)
             base_count = sum(len(pattern.findall(value)) for _, _, value in sql_spans(base_text or '', path))
             if current_count >= base_count:
-                for start, end, value in spans:
-                    if pattern.search(value) and touched(start, end):
-                        findings.append(Finding(rule.get('rule_id', prefix+'data-modeling'), path, start, f"Retired table '{table}' is delete-only ({base_count} -> {current_count} SQL references)."))
+                rule_id = rule.get('rule_id', prefix+'data-modeling')
+                for number, line in enumerate(lines, 1):
+                    if not touched(number, number) or line.lstrip().startswith(('#', '//', '--')):
+                        continue
+                    if _line_exempts_rule(line, rule_id, exempt_tag=config.exempt_tag):
+                        continue
+                    if pattern.search(line):
+                        findings.append(Finding(rule_id, path, number, f"Retired table '{table}' is delete-only ({base_count} -> {current_count} SQL references)."))
                         break
     for rule in topology.get('forbidden_patterns', []):
         if not in_scope(path, rule.get('scope_prefixes', [''])):
             continue
+        rule_id = rule.get('rule_id', prefix+'single-source-of-truth')
         expression = rule['literal_or_regex']
         pattern = re.compile(re.escape(expression) if rule.get('literal', False) else expression)
         for number, line in enumerate(text.splitlines(), 1):
-            if touched(number, number) and not line.lstrip().startswith(('#', '//')) and pattern.search(line):
+            if touched(number, number) and not line.lstrip().startswith(('#', '//')) and pattern.search(line) and not _line_exempts_rule(line, rule_id, exempt_tag=config.exempt_tag):
                 findings.append(Finding(rule.get('rule_id', prefix+'single-source-of-truth'), path, number, rule.get('message', f'Forbidden dependency pattern: {expression}')))
     imports = []
     if path.endswith('.py'):
@@ -86,9 +95,10 @@ def check_configured(path, text, base_text, changed_lines, config):
         if not in_scope(path, rule.get('scope_prefixes', [rule.get('from', '')])):
             continue
         forbidden = rule.get('imports', rule.get('forbidden_imports', [rule.get('to', '')]))
+        rule_id = rule.get('rule_id', prefix+'service-boundaries')
         reported_lines = set()
         for number, name in imports:
-            if number not in reported_lines and touched(number, number) and any(p and (name == p or name.startswith(p+'.') or name.startswith(p+'/')) for p in forbidden):
+            if number not in reported_lines and touched(number, number) and not _line_exempts_rule(lines[number-1], rule_id, exempt_tag=config.exempt_tag) and any(p and (name == p or name.startswith(p+'.') or name.startswith(p+'/')) for p in forbidden):
                 reported_lines.add(number)
                 findings.append(Finding(rule.get('rule_id', prefix+'service-boundaries'), path, number, rule.get('message', f'Forbidden import across module boundary: {name}')))
-    return list(dict.fromkeys(findings))
+    return sorted(dict.fromkeys(findings), key=lambda finding: (finding.line, finding.rule_id, finding.message))

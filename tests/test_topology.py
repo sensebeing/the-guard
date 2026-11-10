@@ -5,7 +5,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from the_guard.config import load_config
+from the_guard.config import GuardConfig, load_config
+from the_guard.topology.configured import check_configured
 from the_guard.topology import run_topology_guard, discover_topology
 from the_guard.topology.python import _check_python_file
 from the_guard.topology.swift import _check_swift_file
@@ -105,5 +106,35 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(api['boundary_docs'],['packages/api/AGENTS.md'])
         self.assertNotIn('exclusive_sql_owners',discover_topology(self.root))
 
-if __name__=='__main__':
-    unittest.main()
+
+    def test_configured_exemptions_and_retired_changed_line_precision(self):
+        config = GuardConfig(exempt_tag='custom-exempt', topology={
+            'exclusive_sql_owners': [{'table': 'owned', 'owners': ['src/owner.py']}],
+            'retired_tables': [{'tables': ['old']}],
+            'forbidden_patterns': [{'literal_or_regex': '/reverse', 'literal': True}],
+            'forbidden_imports': [{'imports': ['internal']}],
+            'module_boundaries': [{'from': 'src/', 'to': 'private'}],
+        })
+        text = '\n'.join([
+            'import internal # custom-exempt guard.service-boundaries: approved fixture boundary',
+            'import private # custom-exempt guard.service-boundaries: approved fixture boundary',
+            'query = "SELECT * FROM owned" # custom-exempt guard.single-source-of-truth: approved owner projection',
+            'endpoint = "/reverse" # custom-exempt guard.single-source-of-truth: approved fixture boundary',
+            'query = """',
+            '-- SELECT * FROM old',
+            'SELECT * FROM old -- custom-exempt guard.data-modeling: approved fixture boundary',
+            'SELECT * FROM old',
+            '"""',
+        ])
+        findings = check_configured('src/api.py', text, None, None, config)
+        self.assertEqual([(f.line, f.rule_id) for f in findings], [(8, 'guard.data-modeling')])
+        self.assertEqual(check_configured('src/api.py', text, text, {5, 9}, config), [])
+        self.assertEqual([f.line for f in check_configured('src/api.py', text, text, {8}, config)], [8])
+
+    def test_configured_findings_follow_source_order(self):
+        config = GuardConfig(topology={
+            'retired_tables': [{'tables': ['old']}],
+            'forbidden_patterns': [{'literal_or_regex': '/reverse'}],
+        })
+        findings = check_configured('src/api.py', 'endpoint = "/reverse"\nquery = "SELECT * FROM old"', None, None, config)
+        self.assertEqual([f.line for f in findings], [1, 2])

@@ -12,9 +12,15 @@ from .distill import distill
 from .init import initialize
 from .hooks import edit_guard, main_push_gate
 from .review.cli import main as review_main
+from .review.repository import resolve_base_ref
 
 
 def changed_files(root, base):
+    if subprocess.run(['git', 'rev-parse', '--verify', '--quiet', base], cwd=root, capture_output=True).returncode:
+        try:
+            base = resolve_base_ref(root, 'main')
+        except RuntimeError:
+            base = 'HEAD'
     proc = subprocess.run(['git','diff','--name-only','-z',base,'--'],cwd=root,capture_output=True,check=True)
     untracked = subprocess.run(['git','ls-files','--others','--exclude-standard','-z'],cwd=root,capture_output=True,check=True)
     return sorted(set(p.decode('utf-8') for p in (proc.stdout+untracked.stdout).split(b'\0') if p))
@@ -76,7 +82,7 @@ def main(argv=None):
         else:
             for f in findings:
                 print(f'{f.path}:{f.line}: {f.rule_id}: {f.message}')
-            print('NO-GO' if findings else 'GO')
+            print('## The Guard: NO-GO' if findings else '## The Guard: GO')
         return 2 if findings else 0
     except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
         print(f'guard: {exc}',file=sys.stderr)

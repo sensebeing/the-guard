@@ -43,3 +43,8 @@ def run_topology_guard(root, changed_files, base='origin/main', config=None):
 
 run_architecture_topology_guard = run_topology_guard
 __all__ = ['run_topology_guard', 'discover_topology']
+
+
+def topology_guard_touched(changed_files):
+    """Configured constraints can apply to any changed source or configuration."""
+    return bool(changed_files)

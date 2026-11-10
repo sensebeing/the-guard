@@ -163,7 +163,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
         provider_env = _build_provider_env({"PATH": "/usr/bin", "CLAUDECODE": "1"})
         self.assertEqual(provider_env.get("ALTER_ARCH_REVIEW_ACTIVE"), "1")
-        self.assertEqual(provider_env.get("GUARD_WORKTREE_SESSION_MODE"), "readonly")
+        self.assertEqual(provider_env.get("THE_GUARD_SESSION_MODE"), "readonly")
         self.assertNotIn("CLAUDECODE", provider_env)
 
     def test_pure_documentation_diff_is_exempt(self) -> None:

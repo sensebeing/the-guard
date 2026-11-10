@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from the_guard.cli import main
+from the_guard.cli import main, changed_files
 from the_guard.config import GuardConfig, load_config
 from the_guard.hooks import install_hooks, main_push_gate
 from the_guard.init import initialize
@@ -129,7 +129,10 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(main([*argv,'--repo-root',str(self.root)]),code)
             self.assertNotEqual(out.getvalue(),'')
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(main(['check','--base','absent','--repo-root',str(self.root)]),3)
+            self.assertEqual(main(['check','--base','absent','--repo-root',str(self.root)]),2)
 
-if __name__=='__main__':
-    unittest.main()
+    def test_missing_remote_base_uses_local_main_or_head(self):
+        self.write('new.py', 'value = 1\n')
+        self.assertEqual(changed_files(self.root, 'origin/main'), ['new.py'])
+        self.git('branch', '-D', 'main')
+        self.assertEqual(changed_files(self.root, 'origin/main'), ['new.py'])

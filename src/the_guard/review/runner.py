@@ -514,8 +514,8 @@ def _build_provider_env(env: dict[str, str]) -> dict[str, str]:
     child_env = {
         **env,
         "ALTER_ARCH_REVIEW_ACTIVE": "1",
-        "GUARD_ARCH_REVIEW_ACTIVE": "1",
-        "GUARD_WORKTREE_SESSION_MODE": "readonly",
+        "THE_GUARD_REVIEW_ACTIVE": "1",
+        "THE_GUARD_SESSION_MODE": "readonly",
         "ALTER_WORKTREE_SESSION_MODE": "readonly",
     }
     child_env.pop("CLAUDECODE", None)

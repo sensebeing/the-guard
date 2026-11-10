@@ -198,6 +198,7 @@ SWIFT_WRITE_METHOD_PREFIXES = (
 
 
 
-def _line_exempts_rule(line: str, rule_id: str) -> bool:
-    match = EXEMPT_RE.search(line)
+def _line_exempts_rule(line: str, rule_id: str, exempt_tag: str | None = None) -> bool:
+    pattern = re.compile(re.escape(exempt_tag) + r"\s+([a-z][a-z0-9_.-]+):\s+(.{8,})") if exempt_tag else EXEMPT_RE
+    match = pattern.search(line)
     return bool(match and match.group(1).split(".", 1)[-1] == rule_id.split(".", 1)[-1])

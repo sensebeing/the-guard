@@ -1,10 +1,10 @@
 """CLI for review execution, receipt verification and provider discovery."""
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from .contract import PROVIDERS
-from .environment import review_environment
 from .engine import run_architecture_review
 from .provider import probe_environment, resolve_provider_order
 from .repository import collect_review_scope, resolve_or_carry_forward_receipt
@@ -59,24 +59,34 @@ def main(argv=None):
             print(json.dumps(result,indent=2))
             return 0 if result.get('preferred_provider') else 3
         if args.command=='check-push':
-            if review_environment().get('ALTER_ARCH_REVIEW_ACTIVE') == '1':
+            if os.environ.get('THE_GUARD_REVIEW_ACTIVE') == '1' or os.environ.get('ALTER_ARCH_REVIEW_ACTIVE') == '1':
                 return 0
             scope = collect_review_scope(root,main_branch=main_branch)
-            receipt = None if scope.is_exempt else resolve_or_carry_forward_receipt(root,scope,persist=False)
-            if scope.is_exempt or receipt:
-                print('EXEMPT' if scope.is_exempt else 'VERIFIED')
+            if scope.is_exempt:
+                print(f'EXEMPT (digest={scope.patch_digest[:12]})')
                 return 0
-            print('NO-GO: no matching receipt. Run guard review; fix all related findings or submit evidence with --note, then retry.',file=sys.stderr)
+            receipt = resolve_or_carry_forward_receipt(root,scope,persist=False)
+            if receipt is not None:
+                print(f'VERIFIED (provider={receipt.get("provider", "unknown")}, digest={scope.patch_digest[:12]})')
+                return 0
+            sys.stderr.write(f'## Architecture Review Gate: NO-GO (missing receipt for patch_digest={scope.patch_digest[:12]})\n\nRun `guard review`; fix all related findings or submit evidence with --note, then retry the push.\n')
             return 2
         result = run_architecture_review(root,main_branch=main_branch,explicit_provider=args.provider,reprobe=args.reprobe,force=args.force,reviewer_note=args.note)
-        print(f'Architecture Review: {result.verdict}\nprovider: {result.provider}\nmode: {result.mode}\npatch_digest: {result.patch_digest}\nsummary: {result.summary}\nlog_path: {result.log_path}')
-        for finding in result.blocking_findings:
-            print(f'{finding.file}:{finding.line} [{finding.rule_id} | {finding.finding_origin}] {finding.issue}\nRequired fix: {finding.required_fix}')
-        if result.verdict!='GO':
-            print('Address the complete pattern across the diff; do not leave transitional shells. Commit fixes or provide factual --note rebuttal evidence and rerun review.',file=sys.stderr)
+        lines = [f'## Architecture Review: {result.verdict}', '', f'- provider: {result.provider}', f'- mode: {result.mode}', f'- patch_digest: {result.patch_digest[:12]}']
+        if result.session_id:
+            lines.append(f'- session_id: {result.session_id}')
+        if result.log_path:
+            lines.append(f'- log_path: {result.log_path}')
+        lines.append(f'- summary: {result.summary}')
+        if result.verdict != 'GO':
+            lines.extend([f'- blocking_findings: {len(result.blocking_findings)}', ''])
+            for index, finding in enumerate(result.blocking_findings, 1):
+                lines.append(f'{index}. [{finding.rule_id} | {finding.finding_origin}] {finding.file}:{finding.line}\n   - Issue: {finding.issue}\n   - Required fix: {finding.required_fix}')
+            lines.extend(['', '## Action Required (Do Not Pause Agent Loop)', 'Address the complete pattern across the diff; do not leave transitional shells. Commit fixes or provide factual --note rebuttal evidence and rerun `guard review`.'])
+        print('\n'.join(lines), file=sys.stdout if result.verdict == 'GO' else sys.stderr)
         return 0 if result.verdict=='GO' else 2
     except PolicyError as exc:
-        print(f'NO-GO: policy error: {exc}',file=sys.stderr)
+        sys.stderr.write(f'## Architecture Review: NO-GO\n\n- policy error: {exc}\n')
         return 2
     except (OSError,ValueError,RuntimeError) as exc:
         print(f'CHECKER_UNAVAILABLE: {exc}',file=sys.stderr)
