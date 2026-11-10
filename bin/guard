@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+if sys.version_info < (3, 11):
+    raise SystemExit('the-guard requires Python 3.11 or newer')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from the_guard.cli import main
+raise SystemExit(main())

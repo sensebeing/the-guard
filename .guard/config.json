@@ -1,0 +1,116 @@
+{
+  "manifest_file": "AGENTS.md",
+  "manifest_tag": "the-guard-policy",
+  "detail_manifest_ref": "AGENTS.md#engineering-quality-policy",
+  "topology": {
+    "modules": [
+      {
+        "path": "src/the_guard",
+        "languages": [
+          "Python"
+        ],
+        "boundary_docs": [
+          "src/the_guard/README.md"
+        ],
+        "imports": [
+          "__future__",
+          "argparse",
+          "ast",
+          "collections.abc",
+          "config",
+          "configured",
+          "contract",
+          "dataclasses",
+          "datetime",
+          "difflib",
+          "discovery",
+          "distill",
+          "engine",
+          "environment",
+          "finding",
+          "fnmatch",
+          "git",
+          "git_helpers",
+          "hashlib",
+          "hooks",
+          "init",
+          "json",
+          "os",
+          "pathlib",
+          "policy",
+          "posixpath",
+          "prompt",
+          "provider",
+          "python",
+          "re",
+          "repository",
+          "review.cli",
+          "review.repository",
+          "rules",
+          "runner",
+          "selectors",
+          "session",
+          "shlex",
+          "shutil",
+          "subprocess",
+          "swift",
+          "sys",
+          "time",
+          "tomllib",
+          "topology",
+          "topology.discovery",
+          "typing",
+          "uuid"
+        ],
+        "dependencies": []
+      },
+      {
+        "path": "tests",
+        "languages": [
+          "Python"
+        ],
+        "boundary_docs": [],
+        "imports": [
+          "__future__",
+          "architecture_review_support",
+          "contextlib",
+          "io",
+          "json",
+          "os",
+          "pathlib",
+          "subprocess",
+          "sys",
+          "tempfile",
+          "textwrap",
+          "the_guard.cli",
+          "the_guard.config",
+          "the_guard.distill",
+          "the_guard.hooks",
+          "the_guard.init",
+          "the_guard.policy",
+          "the_guard.review.engine",
+          "the_guard.review.environment",
+          "the_guard.review.prompt",
+          "the_guard.review.provider",
+          "the_guard.review.repository",
+          "the_guard.review.runner",
+          "the_guard.review.session",
+          "the_guard.topology",
+          "the_guard.topology.git",
+          "the_guard.topology.python",
+          "the_guard.topology.swift",
+          "unittest",
+          "unittest.mock"
+        ],
+        "dependencies": [
+          "src/the_guard"
+        ]
+      }
+    ]
+  },
+  "review": {
+    "extra_reviewable_paths": [
+      "docs/engineering-quality/rules/**"
+    ]
+  }
+}

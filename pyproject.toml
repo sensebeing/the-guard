@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "the-guard"
+version = "0.1.0"
+description = "Configurable engineering policy, topology ratchets and independent pre-merge agent review"
+requires-python = ">=3.11"
+license = "MIT"
+readme = "README.md"
+authors = [{name = "SenseBeing"}]
+dependencies = []
+
+[project.scripts]
+guard = "the_guard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+the_guard = ["presets/rules/*.md"]
