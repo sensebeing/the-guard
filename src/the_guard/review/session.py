@@ -195,7 +195,7 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
 
 def review_logs_dir(common_dir: Path, env: dict[str, str] | None = None) -> Path:
     eff_env = review_environment(env)
-    override = eff_env.get("ALTER_ARCH_REVIEW_LOG_DIR", "").strip()
+    override = eff_env.get("THE_GUARD_REVIEW_LOG_DIR", "").strip()
     if override:
         return Path(override)
     return common_dir / "arch-review-logs"

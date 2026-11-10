@@ -281,9 +281,9 @@ def _run_streaming_cmd(
     stdin_text: str | None = None,
     run_logger: ReviewRunLogger | None = None,
 ) -> tuple[int, str, str]:
-    stall_limit = float(review_environment(env).get("ALTER_ARCH_REVIEW_STALL_SECONDS") or DEFAULT_STALL_TIMEOUT_SECONDS)
-    heartbeat_sec = float(review_environment(env).get("ALTER_ARCH_REVIEW_HEARTBEAT_SECONDS") or DEFAULT_HEARTBEAT_SECONDS)
-    max_runaway_limit = float(review_environment(env).get("ALTER_ARCH_REVIEW_MAX_SECONDS") or DEFAULT_MAX_RUNAWAY_SECONDS)
+    stall_limit = float(review_environment(env).get("THE_GUARD_REVIEW_STALL_SECONDS") or DEFAULT_STALL_TIMEOUT_SECONDS)
+    heartbeat_sec = float(review_environment(env).get("THE_GUARD_REVIEW_HEARTBEAT_SECONDS") or DEFAULT_HEARTBEAT_SECONDS)
+    max_runaway_limit = float(review_environment(env).get("THE_GUARD_REVIEW_MAX_SECONDS") or DEFAULT_MAX_RUNAWAY_SECONDS)
 
     proc = subprocess.Popen(
         cmd,
@@ -513,10 +513,8 @@ def _verify_reviewed_head_sha(verdict_payload: dict[str, Any], expected_head_sha
 def _build_provider_env(env: dict[str, str]) -> dict[str, str]:
     child_env = {
         **env,
-        "ALTER_ARCH_REVIEW_ACTIVE": "1",
         "THE_GUARD_REVIEW_ACTIVE": "1",
         "THE_GUARD_SESSION_MODE": "readonly",
-        "ALTER_WORKTREE_SESSION_MODE": "readonly",
     }
     child_env.pop("CLAUDECODE", None)
     return child_env

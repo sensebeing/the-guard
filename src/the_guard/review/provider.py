@@ -19,7 +19,7 @@ from .session import UTC
 
 def _config_file_path(repo_root: Path, env: dict[str, str] | None = None) -> Path:
     eff_env = review_environment(env)
-    override = eff_env.get("ALTER_ARCH_REVIEW_CONFIG", "").strip()
+    override = eff_env.get("THE_GUARD_REVIEW_CONFIG", "").strip()
     if override:
         return Path(override)
     home = Path(eff_env.get("HOME", str(Path.home())))
@@ -111,8 +111,8 @@ def resolve_provider_model_config(
 ) -> tuple[str, str]:
     eff_env = review_environment(env)
     settings = _normalize_provider_models((config_payload or {}).get("provider_models")).get(provider, {})
-    model = eff_env.get("ALTER_ARCH_REVIEW_MODEL", "").strip() or settings.get("model", "")
-    effort = eff_env.get("ALTER_ARCH_REVIEW_EFFORT", "").strip() or settings.get("effort", "")
+    model = eff_env.get("THE_GUARD_REVIEW_MODEL", "").strip() or settings.get("model", "")
+    effort = eff_env.get("THE_GUARD_REVIEW_EFFORT", "").strip() or settings.get("effort", "")
     return model, effort
 
 
@@ -168,7 +168,7 @@ def resolve_provider_order(
     env: dict[str, str] | None = None,
 ) -> tuple[list[tuple[str, str]], dict[str, Any]]:
     eff_env = review_environment(env)
-    forced = (explicit_provider or eff_env.get("ALTER_ARCH_REVIEW_PROVIDER", "")).strip()
+    forced = (explicit_provider or eff_env.get("THE_GUARD_REVIEW_PROVIDER", "")).strip()
     cfg_path = _config_file_path(repo_root, eff_env)
 
     cached = {} if reprobe else _load_config(cfg_path)

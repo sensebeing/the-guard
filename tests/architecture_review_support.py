@@ -32,14 +32,14 @@ def _write_exec(path: Path, content: str) -> None:
 
 class ArchitectureReviewTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self._saved_active = os.environ.pop("ALTER_ARCH_REVIEW_ACTIVE", None)
+        self._saved_active = os.environ.pop("THE_GUARD_REVIEW_ACTIVE", None)
         self._saved_session_mode = os.environ.pop("THE_GUARD_SESSION_MODE", None)
 
     def tearDown(self) -> None:
         if self._saved_active is not None:
-            os.environ["ALTER_ARCH_REVIEW_ACTIVE"] = self._saved_active
+            os.environ["THE_GUARD_REVIEW_ACTIVE"] = self._saved_active
         else:
-            os.environ.pop("ALTER_ARCH_REVIEW_ACTIVE", None)
+            os.environ.pop("THE_GUARD_REVIEW_ACTIVE", None)
         if self._saved_session_mode is not None:
             os.environ["THE_GUARD_SESSION_MODE"] = self._saved_session_mode
         else:

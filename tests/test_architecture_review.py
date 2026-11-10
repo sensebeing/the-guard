@@ -162,7 +162,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertLess(cmd.index("-m"), positional_index)
 
         provider_env = _build_provider_env({"PATH": "/usr/bin", "CLAUDECODE": "1"})
-        self.assertEqual(provider_env.get("ALTER_ARCH_REVIEW_ACTIVE"), "1")
+        self.assertEqual(provider_env.get("THE_GUARD_REVIEW_ACTIVE"), "1")
         self.assertEqual(provider_env.get("THE_GUARD_SESSION_MODE"), "readonly")
         self.assertNotIn("CLAUDECODE", provider_env)
 
@@ -328,7 +328,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             base_env = {
                 "PATH": f"{fake_bin}:/usr/bin:/bin",
                 "HOME": str(fake_home),
-                "ALTER_ARCH_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
                 "AGY_ARGV_FILE": str(argv_record),
             }
             probe_environment(
@@ -379,7 +379,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "print(json.dumps({'type': 'step', 'bytes': len(data)}))",
             ],
             cwd=REPO_ROOT,
-            env={**os.environ, "ALTER_ARCH_REVIEW_HEARTBEAT_SECONDS": "0.05"},
+            env={**os.environ, "THE_GUARD_REVIEW_HEARTBEAT_SECONDS": "0.05"},
             stdin_text=large_stdin,
         )
         self.assertEqual(rc, 0)
@@ -394,8 +394,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     cwd=REPO_ROOT,
                     env={
                         **os.environ,
-                        "ALTER_ARCH_REVIEW_STALL_SECONDS": "0.2",
-                        "ALTER_ARCH_REVIEW_HEARTBEAT_SECONDS": "0.05",
+                        "THE_GUARD_REVIEW_STALL_SECONDS": "0.2",
+                        "THE_GUARD_REVIEW_HEARTBEAT_SECONDS": "0.05",
                     },
                 )
         self.assertIn("stalled with no output", str(ctx.exception))
@@ -416,8 +416,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 cwd=REPO_ROOT,
                 env={
                     **os.environ,
-                    "ALTER_ARCH_REVIEW_MAX_SECONDS": "0.2",
-                    "ALTER_ARCH_REVIEW_STALL_SECONDS": "10",
+                    "THE_GUARD_REVIEW_MAX_SECONDS": "0.2",
+                    "THE_GUARD_REVIEW_STALL_SECONDS": "10",
                 },
             )
         self.assertIn("exceeded runaway safety limit", str(runaway_ctx.exception))
@@ -480,7 +480,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             env = {
                 "PATH": str(fake_bin) + ":/usr/bin:/bin",
                 "HOME": str(fake_home),
-                "ALTER_ARCH_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
             }
 
             probed = probe_environment(repo, env=env)
@@ -526,7 +526,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             ordered, payload = resolve_provider_order(repo, env=env)
             self.assertEqual([provider for provider, _ in ordered], ["codex", "agy"])
             self.assertEqual(payload, persisted)
-            for overrides in ({"explicit_provider": "claude"}, {"env": {**env, "ALTER_ARCH_REVIEW_PROVIDER": "claude"}}):
+            for overrides in ({"explicit_provider": "claude"}, {"env": {**env, "THE_GUARD_REVIEW_PROVIDER": "claude"}}):
                 forced, _ = resolve_provider_order(repo, **{"env": env, **overrides})
                 self.assertEqual([provider for provider, _ in forced], ["claude", "codex", "agy"])
 
@@ -543,7 +543,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 self.assertEqual((call.kwargs["model"], call.kwargs["effort"]), tuple(models[call.args[0]][key] for key in ("model", "effort")))
             with patch("the_guard.review.engine._invoke_provider") as invoke:
                 invoke.return_value = ({"verdict": "GO", "summary": "ok", "blocking_findings": []}, "thread-2", "")
-                result = run_architecture_review(repo, force=True, env={**env, "ALTER_ARCH_REVIEW_MODEL": "override", "ALTER_ARCH_REVIEW_EFFORT": "low"})
+                result = run_architecture_review(repo, force=True, env={**env, "THE_GUARD_REVIEW_MODEL": "override", "THE_GUARD_REVIEW_EFFORT": "low"})
             self.assertEqual((result.verdict, result.provider), ("GO", "codex"))
             self.assertEqual((invoke.call_args.kwargs["model"], invoke.call_args.kwargs["effort"]), ("override", "low"))
 
@@ -556,8 +556,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         payload = {"provider_models": models}
         self.assertEqual(resolve_provider_model_config("agy", payload, {}), ("gemini-4-argon-high", "high"))
         self.assertEqual(resolve_provider_model_config("codex", payload, {}), ("", ""))
-        self.assertEqual(resolve_provider_model_config("agy", payload, {"ALTER_ARCH_REVIEW_MODEL": "override", "ALTER_ARCH_REVIEW_EFFORT": "low"}), ("override", "low"))
-        self.assertEqual(resolve_provider_model_config("agy", payload, {"ALTER_ARCH_REVIEW_MODEL": "override"}), ("override", "high"))
+        self.assertEqual(resolve_provider_model_config("agy", payload, {"THE_GUARD_REVIEW_MODEL": "override", "THE_GUARD_REVIEW_EFFORT": "low"}), ("override", "low"))
+        self.assertEqual(resolve_provider_model_config("agy", payload, {"THE_GUARD_REVIEW_MODEL": "override"}), ("override", "high"))
 
     def test_build_review_prompt_loads_canonical_policy_rules(self) -> None:
         with tempfile.TemporaryDirectory() as td:

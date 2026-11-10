@@ -128,12 +128,11 @@ Each detail file has `id`, `title`, `manifest` frontmatter and a nonempty Markdo
 remain inside the repository. `.guard/config.json`, root agent instructions, policy directories,
 code and skills/prompts are reviewable by default; ordinary prose and lock-only changes are exempt.
 
-Provider settings use the `GUARD_ARCH_REVIEW_` prefix with these suffixes: `CONFIG`, `PROVIDER`,
+Provider settings use the `THE_GUARD_REVIEW_` (or `GUARD_ARCH_REVIEW_`) prefix with these suffixes: `CONFIG`, `PROVIDER`,
 `MODEL`, `EFFORT`, `STALL_SECONDS`, `HEARTBEAT_SECONDS`, `MAX_SECONDS`, `LOG_DIR`, and `ACTIVE`.
-For example, set `GUARD_ARCH_REVIEW_MODEL` to choose a model. `ACTIVE=1` marks an independent
-reviewer session and suppresses recursive CLI check-push invocation; do not set it in developer shells. Equivalent legacy `ALTER_ARCH_REVIEW_*` variables
-are accepted; `GUARD_*` values win. Provider discovery is persisted in
-`~/.config/the-guard/arch-review-agent.json`. Override that location with `GUARD_ARCH_REVIEW_CONFIG`.
+For example, set `THE_GUARD_REVIEW_MODEL` to choose a model. `ACTIVE=1` marks an independent
+reviewer session and suppresses recursive CLI check-push invocation; do not set it in developer shells. Provider discovery is persisted in
+`~/.config/the-guard/arch-review-agent.json`. Override that location with `THE_GUARD_REVIEW_CONFIG`.
 
 ## Topology and distillation
 

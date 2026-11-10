@@ -1,4 +1,4 @@
-"""One environment compatibility boundary; public GUARD keys take precedence."""
+"""Normalize GUARD_ARCH_REVIEW_* aliases into canonical THE_GUARD_REVIEW_* keys."""
 import os
 
 
@@ -6,8 +6,6 @@ def review_environment(env=None):
     result = dict(os.environ if env is None else env)
     for key, value in list(result.items()):
         if key.startswith("GUARD_ARCH_REVIEW_"):
-            result["ALTER_ARCH_REVIEW_" + key[len("GUARD_ARCH_REVIEW_"):]] = value
-    for key, value in list(result.items()):
-        if key.startswith("THE_GUARD_REVIEW_"):
-            result["ALTER_ARCH_REVIEW_" + key[len("THE_GUARD_REVIEW_"):]] = value
+            suffix = key[len("GUARD_ARCH_REVIEW_"):]
+            result.setdefault("THE_GUARD_REVIEW_" + suffix, value)
     return result

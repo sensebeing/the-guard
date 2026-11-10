@@ -60,12 +60,11 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(is_reviewable_path('.guard/config.json',config))
         self.assertFalse(is_reviewable_path('docs/guide.md',config))
 
-    def test_all_public_environment_keys_override_legacy(self):
+    def test_all_public_environment_keys_normalize_aliases(self):
         names=('ACTIVE','CONFIG','PROVIDER','MODEL','EFFORT','STALL_SECONDS','HEARTBEAT_SECONDS','MAX_SECONDS','LOG_DIR')
-        original={**{'GUARD_ARCH_REVIEW_'+name:'public' for name in names}, **{'ALTER_ARCH_REVIEW_'+name:'old' for name in names}}
+        original={'GUARD_ARCH_REVIEW_'+name:'public' for name in names}
         result=review_environment(original)
-        self.assertEqual({result['ALTER_ARCH_REVIEW_'+name] for name in names},{'public'})
-        self.assertEqual(original['ALTER_ARCH_REVIEW_MODEL'],'old')
+        self.assertEqual({result['THE_GUARD_REVIEW_'+name] for name in names},{'public'})
 
     def test_malformed_findings_cannot_become_a_clean_verdict(self):
         for findings in (None, {}, [None], [{}], 'not a list'):

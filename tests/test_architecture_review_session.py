@@ -94,7 +94,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             env = {
                 "PATH": f"{fake_bin}:/usr/bin:/bin",
                 "HOME": str(fake_home),
-                "ALTER_ARCH_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
                 "CLAUDE_CALLS_FILE": str(calls_file),
             }
 
@@ -239,7 +239,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 env = {
                     "PATH": f"{fake_bin}:/usr/bin:/bin",
                     "HOME": str(fake_home),
-                    "ALTER_ARCH_REVIEW_CONFIG": str(cfg_file),
+                    "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
                     "AGY_CALLS_FILE": str(calls_file),
                 }
 
@@ -380,7 +380,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             env = {
                 "PATH": f"{fake_bin}:/usr/bin:/bin",
                 "HOME": str(fake_home),
-                "ALTER_ARCH_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
                 "CLAUDE_CALLS_FILE": str(calls_file),
             }
 
@@ -622,7 +622,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             env = {
                 "PATH": f"{fake_bin}:/usr/bin:/bin",
                 "HOME": str(fake_home),
-                "ALTER_ARCH_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
             }
 
             result = run_architecture_review(repo, env=env)

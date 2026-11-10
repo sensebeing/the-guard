@@ -59,7 +59,7 @@ def main(argv=None):
             print(json.dumps(result,indent=2))
             return 0 if result.get('preferred_provider') else 3
         if args.command=='check-push':
-            if os.environ.get('THE_GUARD_REVIEW_ACTIVE') == '1' or os.environ.get('ALTER_ARCH_REVIEW_ACTIVE') == '1':
+            if os.environ.get('THE_GUARD_REVIEW_ACTIVE') == '1' or os.environ.get('GUARD_ARCH_REVIEW_ACTIVE') == '1':
                 return 0
             scope = collect_review_scope(root,main_branch=main_branch)
             if scope.is_exempt:
