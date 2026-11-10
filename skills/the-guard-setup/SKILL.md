@@ -14,10 +14,10 @@ For day-to-day checks, reviews, and rebuttals after onboarding, use [the-guard](
 Inspect existing agent instructions, policy manifests, module owner documents and hook configuration.
 If the user has not already chosen, ask which mode they want:
 
-1. **Core (recommended)** — four universal architecture and organization rules.
-2. **Full** — fourteen rules spanning data, execution, tools, agents, UI and tests.
-3. **Distill** — derive tailored rules and topology from current code and owner contracts.
-4. **Hybrid** — core rules plus codebase-distilled topology and domain constraints.
+1. **Core (recommended)**: four universal architecture and organization rules.
+2. **Full**: fourteen rules spanning data, execution, tools, agents, UI, and tests.
+3. **Distill**: derive tailored rules and topology from current code and owner contracts.
+4. **Hybrid**: core rules plus codebase-distilled topology and domain constraints.
 
 Use [preset-catalog.md](references/preset-catalog.md) to explain tradeoffs. For distill or hybrid,
 read [distillation-guide.md](references/distillation-guide.md). Do not treat existing technical debt
@@ -25,8 +25,10 @@ as an approved standard or invent module ownership from directory names.
 
 ## Install and align
 
-Check Python >= 3.11 and `guard --help`. If the CLI is not installed, use the project's supported
-local installation (`python3 -m pip install /path/to/the-guard`) or its `bin/guard` launcher.
+Check Python >= 3.11 and `guard --help`. If the CLI is not installed, install it from GitHub
+(`uv tool install git+https://github.com/sensebeing/the-guard` or
+`python3 -m pip install git+https://github.com/sensebeing/the-guard`), from a local checkout
+(`python3 -m pip install /path/to/the-guard`), or run its `bin/guard` launcher.
 Installation has no external runtime dependencies; independent review also needs Git and a locally
 installed/authenticated `codex`, `claude` or `agy` CLI.
 

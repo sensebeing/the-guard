@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from the_guard import __version__
 from the_guard.cli import main, changed_files
@@ -261,6 +262,10 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_plugin_and_agent_manifests_match_package_metadata(self):
         repo_root = Path(__file__).resolve().parents[1]
+        pyproject = tomllib.loads(
+            (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(pyproject["project"]["version"], __version__)
         claude_plugin = json.loads(
             (repo_root / ".claude-plugin/plugin.json").read_text(encoding="utf-8")
         )
