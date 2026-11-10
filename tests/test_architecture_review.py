@@ -350,7 +350,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
             fake_home = tmp / "home"
             fake_bin = fake_home / ".local/bin"
-            cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
             argv_record = tmp / "agy_argv.json"
             (fake_home / ".gemini/antigravity-cli").mkdir(parents=True)
 
@@ -517,7 +517,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
             fake_home = tmp / "home"
             fake_bin = fake_home / ".local/bin"
-            cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
 
             (fake_home / ".claude").mkdir(parents=True)
             (fake_home / ".gemini/antigravity-cli").mkdir(parents=True)

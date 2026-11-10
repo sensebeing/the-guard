@@ -130,9 +130,6 @@ def is_reviewable_path(rel_path: str, config: GuardConfig | None = None) -> bool
         for p in settings.get("extra_reviewable_paths", [])
     ):
         return True
-    if any(rel_path.startswith(p) for p in settings.get("reviewable_prefixes", [])):
-        return True
-    cfg = config or GuardConfig()
     policy_prefixes = (
         *POLICY_REVIEWABLE_PREFIXES,
         cfg.detail_dir.rstrip("/") + "/",

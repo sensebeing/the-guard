@@ -231,3 +231,8 @@ class ConfigurationTests(unittest.TestCase):
             "func load() async {\n    await api.fetchItem(id: 1)\n    await api.fetchItem(id: 1) // custom-note guard.database-query-efficiency: intentional consistency probe\n}\n",
         )
         self.assertEqual(run_topology_guard(self.root, ["src/api.swift"]), [])
+
+    def test_changed_files_excludes_deleted_paths_but_retains_new_paths(self):
+        self.git("rm", "AGENTS.md")
+        self.write("new.py", "value = 1\n")
+        self.assertEqual(changed_files(self.root, "HEAD"), ["new.py"])

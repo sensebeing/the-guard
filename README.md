@@ -57,10 +57,9 @@ by requiring arbitrary edits. Prompts bind all reads to Git snapshots, including
 No tests, builds, writes or delegated agents are requested inside review sessions.
 
 Review receipts use Git stable patch IDs. Identical patches survive rebase; carry-forward additionally
-checks each changed file's patch when upstream context changes. Receipts and sessions live under the
-Git common directory in `the-guard-receipts/` and `arch-review-sessions/`. Logs are bounded and
-include prompts, streamed events and results. Existing `the-guard-receipt/v1` receipts remain readable;
-new receipts use `the-guard-receipt/v1`.
+checks each changed file's patch when upstream context changes. Receipts, sessions and bounded logs live under the
+Git common directory in `the-guard-receipts/`, `the-guard-sessions/` and `the-guard-logs/`,
+using the `the-guard-receipt/v1`, `the-guard-session/v1` and `the-guard-log-meta/v1` schemas.
 
 Receipts are trusted local workflow evidence, not cryptographic attestations or server-side protection.
 Review audits committed snapshots; uncommitted changes are not included. The pre-push hook checks the
@@ -131,7 +130,7 @@ Provider settings use the `THE_GUARD_REVIEW_` prefix with these suffixes: `CONFI
 `MODEL`, `EFFORT`, `STALL_SECONDS`, `HEARTBEAT_SECONDS`, `MAX_SECONDS`, `LOG_DIR`, and `ACTIVE`.
 For example, set `THE_GUARD_REVIEW_MODEL` to choose a model. `ACTIVE=1` marks an independent
 reviewer session and suppresses recursive CLI check-push invocation; do not set it in developer shells. Provider discovery is persisted in
-`~/.config/the-guard/arch-review-agent.json`. Override that location with `THE_GUARD_REVIEW_CONFIG`.
+`~/.config/the-guard/review-agent.json`. Override that location with `THE_GUARD_REVIEW_CONFIG`.
 
 ## Topology and distillation
 

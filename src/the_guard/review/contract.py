@@ -42,7 +42,7 @@ def build_agy_readonly_settings(common_dir: Path | None = None) -> str:
     )
 
 
-CONFIG_SCHEMA = "arch-review-agent-config/v1"
+CONFIG_SCHEMA = "the-guard-agent-config/v1"
 DEFAULT_HEARTBEAT_SECONDS = 15.0
 DEFAULT_STALL_TIMEOUT_SECONDS = 900.0
 DEFAULT_MAX_RUNAWAY_SECONDS = 3600.0

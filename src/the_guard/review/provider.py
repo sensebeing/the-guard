@@ -21,12 +21,12 @@ def _config_file_path(repo_root: Path, env: dict[str, str] | None = None) -> Pat
     if override:
         return Path(override)
     home = Path(eff_env.get("HOME", str(Path.home())))
-    candidate = home / ".config" / "the-guard" / "arch-review-agent.json"
+    candidate = home / ".config" / "the-guard" / "review-agent.json"
     try:
         candidate.parent.mkdir(parents=True, exist_ok=True)
         return candidate
     except OSError:
-        return git_common_dir(repo_root) / "arch-review-agent.json"
+        return git_common_dir(repo_root) / "the-guard-review-agent.json"
 
 
 def _find_provider_binary(provider: str, env: dict[str, str]) -> str | None:

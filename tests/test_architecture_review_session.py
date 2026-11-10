@@ -58,7 +58,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
 
             fake_home = tmp / "home"
             fake_bin = fake_home / ".local/bin"
-            cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
             calls_file = tmp / "claude_calls.jsonl"
             (fake_home / ".claude").mkdir(parents=True)
 
@@ -230,7 +230,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
 
                 fake_home = tmp / "home"
                 fake_bin = fake_home / ".local/bin"
-                cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
+                cfg_file = fake_home / ".config/the-guard/review-agent.json"
                 calls_file = tmp / "agy_calls.jsonl"
                 (fake_home / ".gemini/antigravity-cli").mkdir(parents=True)
 
@@ -414,11 +414,11 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
 
             fake_home = tmp / "home"
             fake_bin = fake_home / ".local/bin"
-            cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
             calls_file = tmp / "claude_rebuttal_calls.jsonl"
             (fake_home / ".claude").mkdir(parents=True)
             (fake_home / ".claude.json").write_text(
-                '{"oauthAccount": {"emailAddress": "dev@sensebeing.ai"}}',
+                '{"oauthAccount": {"emailAddress": "dev@example.invalid"}}',
                 encoding="utf-8",
             )
 
@@ -746,10 +746,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
 
             fake_home = tmp / "home"
             fake_bin = fake_home / ".local/bin"
-            cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
             (fake_home / ".claude").mkdir(parents=True)
             (fake_home / ".claude.json").write_text(
-                '{"oauthAccount": {"emailAddress": "dev@sensebeing.ai"}}',
+                '{"oauthAccount": {"emailAddress": "dev@example.invalid"}}',
                 encoding="utf-8",
             )
             (fake_home / ".gemini/antigravity-cli").mkdir(parents=True)

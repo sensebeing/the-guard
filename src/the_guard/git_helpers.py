@@ -319,7 +319,7 @@ def changed_files(
     reference = resolve_changed_base(root, base, main_branch=main_branch)
     outputs = []
     for args in (
-        ["diff", "--name-only", "-z", reference, "--"],
+        ["diff", "--name-only", "--diff-filter=ACMRT", "-z", reference, "--"],
         ["ls-files", "--others", "--exclude-standard", "-z"],
     ):
         result = subprocess.run(

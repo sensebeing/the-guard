@@ -115,7 +115,7 @@ def load_review_session(
     common_dir: Path, worktree_path: Path, branch: str
 ) -> ReviewSessionState | None:
     key = worktree_session_key(worktree_path, branch)
-    path = common_dir / "arch-review-sessions" / f"{key}.json"
+    path = common_dir / "the-guard-sessions" / f"{key}.json"
     if not path.is_file():
         return None
     try:
@@ -175,7 +175,7 @@ def _prune_directory_files(directory: Path, pattern: str, max_keep: int) -> None
 
 
 def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
-    sessions_dir = common_dir / "arch-review-sessions"
+    sessions_dir = common_dir / "the-guard-sessions"
     key = worktree_session_key(Path(state.worktree_path), state.branch)
     path = sessions_dir / f"{key}.json"
     sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -210,7 +210,7 @@ def review_logs_dir(common_dir: Path, env: dict[str, str] | None = None) -> Path
     override = eff_env.get("THE_GUARD_REVIEW_LOG_DIR", "").strip()
     if override:
         return Path(override)
-    return common_dir / "arch-review-logs"
+    return common_dir / "the-guard-logs"
 
 
 class ReviewRunLogger:

@@ -705,8 +705,8 @@ def _invoke_provider(
             raise
 
     if provider == "codex":
-        schema_file = common_dir / "arch-review-schema.tmp.json"
-        out_file = common_dir / f"arch-review-out-{os.getpid()}.tmp.json"
+        schema_file = common_dir / "the-guard-schema.tmp.json"
+        out_file = common_dir / f"the-guard-out-{os.getpid()}.tmp.json"
         schema_file.write_text(schema_str, encoding="utf-8")
         try:
             cmd = _build_provider_cmd(
