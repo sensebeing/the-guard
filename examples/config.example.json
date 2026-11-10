@@ -1,0 +1,153 @@
+{
+  "manifest_file": "AGENTS.md",
+  "manifest_tag": "the-guard-policy",
+  "manifest_schema": "the-guard-policy/v1",
+  "detail_dir": "docs/standards/rules",
+  "detail_manifest_ref": "AGENTS.md#engineering-quality-policy",
+  "rule_id_prefix": "guard.",
+  "exempt_tag": "guard-exempt",
+  "main_branch": "main",
+  "module_doc_roots": [
+    "services",
+    "packages",
+    "apps"
+  ],
+  "review": {
+    "project_title": "Commerce platform",
+    "reviewable_extensions": [
+      ".py",
+      ".ts",
+      ".tsx"
+    ],
+    "reviewable_prefixes": [
+      "infra/"
+    ],
+    "extra_reviewable_paths": [
+      "docs/architecture/**"
+    ],
+    "service_config_roots": [
+      "services",
+      "packages",
+      "apps"
+    ]
+  },
+  "topology": {
+    "python_prod_prefixes": [
+      "services/",
+      "packages/"
+    ],
+    "swift_prod_prefixes": [
+      "apps/ios/"
+    ],
+    "modules": [
+      {
+        "path": "services/orders",
+        "languages": [
+          "Python"
+        ],
+        "boundary_docs": [
+          "services/orders/README.md"
+        ],
+        "dependencies": [
+          "packages/contracts"
+        ]
+      },
+      {
+        "path": "services/billing",
+        "languages": [
+          "Python"
+        ],
+        "boundary_docs": [
+          "services/billing/README.md"
+        ],
+        "dependencies": [
+          "packages/contracts"
+        ]
+      },
+      {
+        "path": "packages/contracts",
+        "languages": [
+          "Python"
+        ],
+        "boundary_docs": [
+          "packages/contracts/README.md"
+        ],
+        "dependencies": []
+      },
+      {
+        "path": "apps/web",
+        "languages": [
+          "TypeScript"
+        ],
+        "boundary_docs": [
+          "apps/web/README.md"
+        ],
+        "dependencies": []
+      }
+    ],
+    "forbidden_imports": [
+      {
+        "from": "services/billing/",
+        "to": "orders.storage",
+        "rule_id": "guard.service-boundaries",
+        "message": "Use the public orders API; storage belongs to the orders service."
+      },
+      {
+        "from": "services/orders/",
+        "to": "billing.storage",
+        "rule_id": "guard.service-boundaries",
+        "message": "Use the public billing API; storage belongs to the billing service."
+      },
+      {
+        "from": "packages/contracts/",
+        "imports": [
+          "orders",
+          "billing"
+        ],
+        "rule_id": "guard.service-boundaries",
+        "message": "Shared contracts must not depend on service implementations."
+      }
+    ],
+    "exclusive_sql_owners": [
+      {
+        "table": "orders",
+        "owners": [
+          "services/orders/storage/orders.py"
+        ],
+        "rule_id": "guard.single-source-of-truth",
+        "message": "Access orders through the orders storage owner."
+      },
+      {
+        "table": "invoices",
+        "owners": [
+          "services/billing/storage/invoices.py"
+        ],
+        "rule_id": "guard.single-source-of-truth",
+        "message": "Access invoices through the billing storage owner."
+      }
+    ],
+    "retired_tables": [
+      {
+        "scope_prefixes": [
+          "services/",
+          "packages/"
+        ],
+        "tables": [
+          "legacy_order_status"
+        ],
+        "rule_id": "guard.data-modeling"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "scope_prefixes": [
+          "apps/web/"
+        ],
+        "literal_or_regex": "/internal/order-storage",
+        "literal": true,
+        "rule_id": "guard.service-boundaries",
+        "message": "Consume the public order projection instead of internal storage endpoints."
+      }
+    ]
+  }
+}

@@ -12,7 +12,32 @@ AI 已经让“写代码”不再是门槛，真正的门槛变成了**信任**�
 
 `the-guard` 把团队的架构原则直接装进代码仓库——在 AI 动笔前注入边界契约，在改代码时用确定性拓扑棘轮拦截违规，在合入前自动拉起另一个独立 Agent 做对抗式架构审查。
 
-[English](README.md) · [快速开始](#快速开始) · [日常工作流](#日常工作流) · [配置参考](#配置参考) · [接入技能](skills/the-guard-setup/SKILL.md)
+[English](README.md) · [快速开始](#快速开始) · [预设与规则](#四档预设与-14-条工程质量规范) · [日常工作流](#日常工作流) · [配置参考](#配置参考) · [接入技能](skills/the-guard-setup/SKILL.md) · [日常技能](skills/the-guard/SKILL.md)
+
+## 30 秒上手：复制给你的 Agent
+
+把下面这段话粘贴给 Claude Code、Codex、Cursor、Antigravity 或 Orca：
+
+```text
+请为当前仓库接入 the-guard，保留我已有的指令和钩子。
+
+1. 检查 `python3 --version`（要求 Python >= 3.11）和 `command -v guard`。
+   如果尚未安装 `guard`，将 https://github.com/sensebeing/the-guard.git 克隆到 ~/the-guard
+   （已有检出则用 `git -C ~/the-guard pull --ff-only` 更新），然后运行
+   `python3 -m pip install -e ~/the-guard` 安装（也可以直接使用 `~/the-guard/bin/guard`）。
+2. 将 `~/the-guard/skills/the-guard` 和 `~/the-guard/skills/the-guard-setup`
+   以符号链接注册到已存在的 `~/.agents/skills/`、`~/.claude/skills/`、
+   `~/.gemini/config/skills/` 目录，保留已有文件。
+   阅读 `~/the-guard/skills/the-guard-setup/SKILL.md`。
+3. 检查当前仓库的 `AGENTS.md`、`CLAUDE.md`、模块文档和 `.guard/config.json`，
+   运行 `guard probe`，确认本机可用的审查 Agent（`codex`、`claude`、`agy`）。
+4. 询问我希望采用哪种接入模式（`core`、`full`、`distill` 或 `hybrid`），
+   以及是否安装本地 Git `pre-push` 门禁（`--with-hooks`）。
+5. 初始化选定的预设或提炼后的策略，运行 `guard topology sync` 和
+   `guard check --policy-only`，最后给我一份简明的日常操作速查表。
+```
+
+如果 `guard` 已安装在其他位置，请先定位源码检出目录（或克隆到 `~/the-guard`），供第 2 步注册技能。使用直接启动器时，将后续命令中的 `guard` 替换为 `~/the-guard/bin/guard`。
 
 ## 为什么做这个工具
 
@@ -76,6 +101,41 @@ guard init --preset full --with-hooks
 - **full**：完整 14 条生产级工程质量规则。
 - **distill**：先运行 `guard distill` 扫描现有代码库，由 Agent 提炼贴合项目现状的专属规则。
 - **hybrid**：核心预设规则 + 基于代码库提炼的模块拓扑约束。
+
+## 四档预设与 14 条工程质量规范
+
+| 模式 | 适用场景 | 包含内容 |
+| --- | --- | --- |
+| `core` | **推荐默认 — 4 条规则** | 不依赖技术栈的通用架构不变量：唯一真源、架构简洁、服务边界、代码组织。 |
+| `full` | **生产全栈 — 14 条规则** | 全部 4 条核心规则，再加 10 条专项规则，覆盖数据建模、SQL 与调用拓扑效率、事件驱动执行、过程附属信息分离、禁止静默兜底、前端设计系统消费、Agent/Skill/Prompt 合同、LLM 输入与合同质量、工具 Schema 编写及常驻测试质量。 |
+| `distill` | **从代码库提炼** | `guard distill` 检查现有模块、工具链与有界代码样本，由 Agent 提炼贴合代码库的规则。 |
+| `hybrid` | **核心规则 + 代码库拓扑** | 4 条核心规则，加上从代码库提炼的模块边界、SQL 表归属与退役表棘轮。 |
+
+`core` 和 `full` 是 `guard init --preset` 的内置选项；`distill` 与 `hybrid` 是由 Agent 引导的接入模式。扫描结果提供证据，不自动授予归属：执行项目专属边界约束前，先确认 Owner。
+
+### 核心预设（4 条）
+
+| 规则 | 守护领域 | 核心不变量 |
+| --- | --- | --- |
+| `guard.architecture-simplicity`<br>[架构简洁](src/the_guard/presets/rules/architecture-simplicity.md) | 职责归属与写收敛 | 每项职责与写入决策只有一个明确 Owner；在写入时收敛，读取直接消费权威结果，不加写锁、不反查重算；删除被替代的机制，不叠加防御性复查。 |
+| `guard.single-source-of-truth`<br>[唯一真源](src/the_guard/presets/rules/single-source-of-truth.md) | 权威状态与单轨切流 | 每条业务规则、状态机、词表和过滤条件只有一个可执行定义；同一次变更完成读切流与旧逻辑删除，不保留双轨兜底读取。 |
+| `guard.service-boundaries`<br>[服务边界](src/the_guard/presets/rules/service-boundaries.md) | 模块边界契约 | 各模块只承担其 Owner 合同声明的职责；共享库和 UI 不复制垂直领域的业务逻辑。 |
+| `guard.code-organization`<br>[代码组织](src/the_guard/presets/rules/code-organization.md) | 职责内聚与无环依赖 | 模块、类、方法职责内聚，依赖无环，导入置于顶层，并删除死代码；不机械拆文件，不通过 MRO 遮蔽同名方法。 |
+
+### 完整预设新增（10 条）
+
+| 规则 | 守护领域 | 核心不变量 |
+| --- | --- | --- |
+| `guard.data-modeling`<br>[数据建模](src/the_guard/presets/rules/data-modeling.md) | Schema 与退役表清理 | Schema 归属明确、语义稳定；派生数据不成为竞争真源；退役表只做删除清理。 |
+| `guard.database-query-efficiency`<br>[数据库查询效率](src/the_guard/presets/rules/database-query-efficiency.md) | 调用扇出、N+1 与锁纪律 | 控制端到端调用扇出与 SQL 成本；单次操作不重复只读拉取，循环内不做 N+1 异步读取，数据库锁内不调用 RPC/LLM；无锁结算采用 CAS 或版本校验。 |
+| `guard.event-driven-execution`<br>[事件驱动执行](src/the_guard/presets/rules/event-driven-execution.md) | 事件驱动与异步队列水位 | 由真实事件或消息驱动执行；异步队列保证单水位发现、逐行终态结算和防饥饿；不使用未经批准的轮询或定时器。 |
+| `guard.process-adjunct-not-truth`<br>[过程附属信息，不是业务真相](src/the_guard/presets/rules/process-adjunct-not-truth.md) | 业务真源与过程元数据分离 | 构建指纹、提示词版本与运行时元数据属于过程附属信息，不是业务真相；恢复与续跑依据业务义务和安全可重试性。 |
+| `guard.no-silent-fallback`<br>[禁止静默兜底](src/the_guard/presets/rules/no-silent-fallback.md) | 显式失败隔离 | 不编造事实，不用静默默认值掩盖失败；隔离未知部分，只阻断受影响的不安全操作。 |
+| `guard.frontend-product-surface`<br>[前端产品界面](src/the_guard/presets/rules/frontend-product-surface.md) | 设计系统消费链 | 严格遵循 Design System → Components → Pages 的消费方向；业务状态、导航与展示各归其主。 |
+| `guard.agent-skill-prompt`<br>[Agent、Skill 与 Prompt 合同](src/the_guard/presets/rules/agent-skill-prompt.md) | 提示词与运行时门禁对称 | 技能、提示词、工具 Schema 与运行时门禁保持对称；运行时注入确定性上下文，代码执行硬安全门禁，提示词不复制状态机或 Schema。 |
+| `guard.llm-contract-quality`<br>[LLM 输入与合同质量](src/the_guard/presets/rules/llm-contract-quality.md) | 模型输入输出契约 | 模型输入区分已确认事实与候选信息；归一化合法变体，保留解析与拒绝诊断，不猜测身份或业务事实。 |
+| `guard.tool-authoring`<br>[工具编写](src/the_guard/presets/rules/tool-authoring.md) | 扁平工具 Schema 与生命周期 | 每个工具只负责一个领域资源，授权语义一致；使用扁平、按 action 区分的 Schema，不嵌套信封、不用平行数组或开放字典；只暴露意图参数，退役工具端到端删除。 |
+| `guard.test-case-quality`<br>[测试用例质量](src/the_guard/presets/rules/test-case-quality.md) | 高信噪比不变量测试 | 常驻测试守护核心业务不变量并说明失败含义；断言可观察行为，不只验证 mock 调用，也不镜像源码文本。 |
 
 ## 日常工作流
 
@@ -145,30 +205,14 @@ guard review check-push
 
 ## 配置参考
 
-`.guard/config.json` 为可选项——不建配置文件时，`guard` 直接读取 `AGENTS.md` 中的策略清单。需要定制目录、审查范围或声明式拓扑约束时，可在仓库根目录配置 `.guard/config.json`：
+`.guard/config.json` 为可选项——不建配置文件时，`guard` 直接读取 `AGENTS.md` 中的策略清单。需要定制目录、审查范围或声明式拓扑约束时，可在仓库根目录配置 `.guard/config.json`（完整多服务样板见 [examples/config.example.json](examples/config.example.json)）：
 
 ```json
 {
   "manifest_file": "AGENTS.md",
-  "manifest_tag": "the-guard-policy",
-  "manifest_schema": "the-guard-policy/v1",
   "detail_dir": "docs/standards/rules",
-  "detail_manifest_ref": "AGENTS.md#engineering-quality-policy",
-  "rule_id_prefix": "guard.",
-  "exempt_tag": "guard-exempt",
   "main_branch": "main",
-  "module_doc_roots": ["services", "packages", "apps", "modules", "src"],
-  "review": {
-    "project_title": "My project",
-    "reviewable_extensions": [".py", ".swift", ".ts", ".tsx", ".js", ".go", ".rs"],
-    "reviewable_prefixes": ["infra/"],
-    "extra_reviewable_paths": ["docs/architecture/**"],
-    "service_config_roots": ["services", "packages", "apps", "src"]
-  },
   "topology": {
-    "python_prod_prefixes": ["src/", "services/", "packages/", "app/", "apps/"],
-    "swift_prod_prefixes": [""],
-    "modules": [],
     "forbidden_imports": [{"from": "src/ui/", "to": "internal.storage"}],
     "exclusive_sql_owners": [
       {
@@ -247,10 +291,12 @@ guard check --file src/api.py --file app/Screen.swift --json
 
 ```sh
 uv run python -m unittest discover -s tests -v
-uv run guard check --base HEAD
+uv run guard check --base origin/main
 ```
 
 内部包结构与模块职责边界详见 [src/the_guard/README.md](src/the_guard/README.md)。
+
+环境搭建与审查要求见[贡献指南](CONTRIBUTING.md)，私密漏洞报告见[安全政策](SECURITY.md)，版本历史见[变更日志](CHANGELOG.md)。
 
 ## 许可证
 

@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose an improvement to architecture guardrails.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+      description: What concrete workflow or architectural invariant is underserved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired observable outcome and the owner of any new decision.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Could existing rules or configuration address the problem more simply?
+  - type: textarea
+    id: verification
+    attributes:
+      label: Acceptance criteria
+      description: How would you verify the improvement, including legitimate cases it must preserve?

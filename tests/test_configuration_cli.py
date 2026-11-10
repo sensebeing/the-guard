@@ -53,6 +53,27 @@ class ConfigurationTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-m", "change")
 
+    def test_production_example_loads_as_repository_config(self):
+        example = Path(__file__).resolve().parents[1] / "examples/config.example.json"
+        raw = example.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        self.write(".guard/config.json", raw)
+        config = load_config(self.root)
+        self.assertEqual(config.main_branch, "main")
+        self.assertEqual(config.module_doc_roots, tuple(data["module_doc_roots"]))
+        self.assertEqual(config.review, data["review"])
+        self.assertEqual(config.topology, data["topology"])
+        self.assertGreater(len(config.topology["modules"]), 1)
+        owner_path = "services/orders/storage/orders.py"
+        consumer_path = "services/billing/queries.py"
+        query = 'QUERY = "SELECT id FROM orders"\n'
+        self.write(owner_path, query)
+        self.write(consumer_path, query)
+        self.assertEqual(run_topology_guard(self.root, [owner_path]), [])
+        findings = run_topology_guard(self.root, [consumer_path])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].rule_id, "guard.single-source-of-truth")
+
     def test_snapshot_policy_follows_manifest_symlink(self):
         config = json.loads((self.root / ".guard/config.json").read_text())
         config["manifest_file"] = "CLAUDE.md"

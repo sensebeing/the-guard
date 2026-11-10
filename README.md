@@ -12,7 +12,32 @@ AI has made writing code effortless. The real bottleneck today is **trust**: who
 
 `the-guard` embeds your team's architectural principles directly into the repository—guiding coding agents before they write a line of code, catching structural regressions during development, and running an independent adversarial agent review before integration.
 
-[中文文档](README.zh-CN.md) · [Quick start](#quick-start) · [Workflow](#workflow) · [Configuration](#configuration) · [Setup skill](skills/the-guard-setup/SKILL.md)
+[中文文档](README.zh-CN.md) · [Quick start](#quick-start) · [Presets & rules](#presets-and-the-14-engineering-quality-rules) · [Workflow](#workflow) · [Configuration](#configuration) · [Setup skill](skills/the-guard-setup/SKILL.md) · [Daily skill](skills/the-guard/SKILL.md)
+
+## Get started in 30 seconds — paste to your agent
+
+Paste this into Claude Code, Codex, Cursor, Antigravity, or Orca:
+
+```text
+Set up the-guard for this repository while preserving my existing instructions and hooks.
+
+1. Check `python3 --version` (require Python >= 3.11) and `command -v guard`.
+   If `guard` is not installed, clone https://github.com/sensebeing/the-guard.git into ~/the-guard
+   (or update an existing checkout with `git -C ~/the-guard pull --ff-only`), then install it with
+   `python3 -m pip install -e ~/the-guard` (or use `~/the-guard/bin/guard`).
+2. Register the skills by symlinking `~/the-guard/skills/the-guard` and
+   `~/the-guard/skills/the-guard-setup` into `~/.agents/skills/`, `~/.claude/skills/`,
+   and `~/.gemini/config/skills/` if present, preserving existing files.
+   Read `~/the-guard/skills/the-guard-setup/SKILL.md`.
+3. Inspect this repository's `AGENTS.md`, `CLAUDE.md`, module docs, and `.guard/config.json`,
+   and run `guard probe` to check available local review agents (`codex`, `claude`, `agy`).
+4. Ask me which onboarding mode I want (`core`, `full`, `distill`, or `hybrid`) and whether
+   to install the local Git `pre-push` gate (`--with-hooks`).
+5. Initialize the chosen preset or distilled policy, run `guard topology sync` and
+   `guard check --policy-only`, and give me a quick daily workflow cheatsheet.
+```
+
+If `guard` is already installed elsewhere, locate its source checkout (or clone it to `~/the-guard`) for the skills in step 2. With the direct launcher, substitute `~/the-guard/bin/guard` for `guard` below.
 
 ## Why we built it
 
@@ -76,6 +101,41 @@ Register [the-guard-setup](skills/the-guard-setup/SKILL.md) in your agent's skil
 - **full**: All 14 production engineering quality rules.
 - **distill**: Distill architecture rules tailored to your existing codebase (`guard distill`).
 - **hybrid**: Combine core presets with codebase-specific module boundaries.
+
+## Presets and the 14 engineering quality rules
+
+| Mode | Best fit | What you get |
+| --- | --- | --- |
+| `core` | **Recommended default — 4 rules** | Universal architectural invariants: Single Source of Truth, Architecture Simplicity, Service Boundaries, and Code Organization, with zero stack assumptions. |
+| `full` | **Production full-stack — 14 rules** | All 4 Core rules plus 10 specialized rules covering data modeling, SQL and call-topology efficiency, event-driven execution, process-adjunct separation, no silent fallback, frontend design-system consumption, agent/skill/prompt contracts, LLM input/contract quality, tool schema authoring, and resident test quality. |
+| `distill` | **Codebase-derived** | `guard distill` inspects existing modules, tooling, and bounded code samples so your agent can distill rules tailored to your codebase. |
+| `hybrid` | **Core + codebase topology** | The 4 Core rules plus codebase-distilled module boundaries, SQL table owners, and retired-table ratchets. |
+
+`core` and `full` are built-in `guard init --preset` values; `distill` and `hybrid` are agent-guided onboarding modes. Discovery supplies evidence, not approved ownership: confirm codebase-specific boundaries before enforcing them.
+
+### Core preset (4 rules)
+
+| Rule | Focus area | Core invariant |
+| --- | --- | --- |
+| `guard.architecture-simplicity`<br>[Architecture Simplicity](src/the_guard/presets/rules/architecture-simplicity.md) | Ownership & write convergence | One explicit owner per responsibility and write decision; converge on write, read directly without write locks or reverse-fetching; delete replaced mechanisms instead of stacking defensive rechecks. |
+| `guard.single-source-of-truth`<br>[Single Source of Truth](src/the_guard/presets/rules/single-source-of-truth.md) | Canonical state & cutover | One executable definition per business rule, state machine, vocabulary, and filter; complete reader cutover and legacy deletion in the same change without dual-track fallback reads. |
+| `guard.service-boundaries`<br>[Service Boundaries](src/the_guard/presets/rules/service-boundaries.md) | Module boundary contracts | Each module performs only the responsibilities declared in its owner contract; shared libraries and UI never duplicate vertical domain logic. |
+| `guard.code-organization`<br>[Code Organization](src/the_guard/presets/rules/code-organization.md) | Cohesion & acyclic structure | Cohesive module/class/method responsibilities, acyclic dependencies, top-level imports, and dead-code deletion; no mechanical file splitting or MRO method shadowing. |
+
+### Full preset additions (10 rules)
+
+| Rule | Focus area | Core invariant |
+| --- | --- | --- |
+| `guard.data-modeling`<br>[Data Modeling](src/the_guard/presets/rules/data-modeling.md) | Schema & retired tables | Explicit schema owner and stable semantics; derived data never becomes a competing truth; retired tables are delete-only. |
+| `guard.database-query-efficiency`<br>[Database Query Efficiency](src/the_guard/presets/rules/database-query-efficiency.md) | Call fan-out, N+1 & locks | Control end-to-end call fan-out and SQL cost; no duplicate read-only fetches in one action, no N+1 awaited reads in loops, no RPC/LLM calls inside DB locks, and CAS/version checks on lock-free settlement. |
+| `guard.event-driven-execution`<br>[Event-driven Execution](src/the_guard/presets/rules/event-driven-execution.md) | Events, watermarks & queues | Real events or messages drive execution; async work queues guarantee single-watermark discovery, terminal settlement per row, and starvation prevention; no unapproved polling/timers. |
+| `guard.process-adjunct-not-truth`<br>[Process Adjunct, Not Truth](src/the_guard/presets/rules/process-adjunct-not-truth.md) | Business truth vs. metadata | Build fingerprints, prompt versions, and runtime metadata are process adjuncts, not business truth; recovery and continuation rely on business obligations and safe retryability. |
+| `guard.no-silent-fallback`<br>[No Silent Fallback](src/the_guard/presets/rules/no-silent-fallback.md) | Explicit failure handling | Never fabricate facts or mask failures behind silent defaults; isolate unknown parts and block only affected unsafe operations. |
+| `guard.frontend-product-surface`<br>[Frontend Product Surface](src/the_guard/presets/rules/frontend-product-surface.md) | Design system consumption | Strictly follow Design System → Components → Pages consumption; keep business state, navigation, and presentation in their respective owners. |
+| `guard.agent-skill-prompt`<br>[Agent, Skill and Prompt Contracts](src/the_guard/presets/rules/agent-skill-prompt.md) | Prompt & runtime symmetry | Keep skills, prompts, tool schemas, and runtime gates symmetric; runtime injects deterministic context, code enforces hard safety gates, and prompts never copy state machines or schemas. |
+| `guard.llm-contract-quality`<br>[LLM Input and Contract Quality](src/the_guard/presets/rules/llm-contract-quality.md) | Model input & output schemas | Distinguish confirmed facts from candidates in model inputs; normalize valid variants, preserve parse/refusal diagnostics, and never guess identity or business facts. |
+| `guard.tool-authoring`<br>[Tool Authoring](src/the_guard/presets/rules/tool-authoring.md) | Flat tool schemas & lifecycle | One domain resource and homogeneous authorization per tool; flat action-discriminated schemas (no nested envelopes, parallel arrays, or open dicts); expose intent parameters only and remove retired tools end-to-end. |
+| `guard.test-case-quality`<br>[Test Case Quality](src/the_guard/presets/rules/test-case-quality.md) | High-signal invariant tests | Resident tests protect core business invariants and state what failure means; assert observable behavior rather than mock-only calls or source-text mirrors. |
 
 ## Workflow
 
@@ -145,30 +205,14 @@ guard review check-push
 
 ## Configuration
 
-`.guard/config.json` is optional—out of the box, `guard` reads the policy block in `AGENTS.md`. Add `.guard/config.json` when you want custom paths, review scopes, or declarative topology constraints:
+`.guard/config.json` is optional—out of the box, `guard` reads the policy block in `AGENTS.md`. Add `.guard/config.json` when you want custom paths, review scopes, or declarative topology constraints (see the full multi-service [examples/config.example.json](examples/config.example.json)):
 
 ```json
 {
   "manifest_file": "AGENTS.md",
-  "manifest_tag": "the-guard-policy",
-  "manifest_schema": "the-guard-policy/v1",
   "detail_dir": "docs/standards/rules",
-  "detail_manifest_ref": "AGENTS.md#engineering-quality-policy",
-  "rule_id_prefix": "guard.",
-  "exempt_tag": "guard-exempt",
   "main_branch": "main",
-  "module_doc_roots": ["services", "packages", "apps", "modules", "src"],
-  "review": {
-    "project_title": "My project",
-    "reviewable_extensions": [".py", ".swift", ".ts", ".tsx", ".js", ".go", ".rs"],
-    "reviewable_prefixes": ["infra/"],
-    "extra_reviewable_paths": ["docs/architecture/**"],
-    "service_config_roots": ["services", "packages", "apps", "src"]
-  },
   "topology": {
-    "python_prod_prefixes": ["src/", "services/", "packages/", "app/", "apps/"],
-    "swift_prod_prefixes": [""],
-    "modules": [],
     "forbidden_imports": [{"from": "src/ui/", "to": "internal.storage"}],
     "exclusive_sql_owners": [
       {
@@ -247,10 +291,12 @@ Exit codes: `0` pass (`GO` or exempt), `2` blocking policy/topology/review findi
 
 ```sh
 uv run python -m unittest discover -s tests -v
-uv run guard check --base HEAD
+uv run guard check --base origin/main
 ```
 
 See [src/the_guard/README.md](src/the_guard/README.md) for internal package architecture and module boundaries.
+
+See [Contributing](CONTRIBUTING.md) for setup and review requirements, [Security](SECURITY.md) for private vulnerability reporting, and [Changelog](CHANGELOG.md) for release history.
 
 ## License
 

@@ -7,6 +7,7 @@ description: Onboard a repository to the-guard engineering policies, architectur
 
 Align the coding agent before implementation, then enforce independent review at integration.
 Work in the user's chosen repository; do not push, publish, or replace existing hooks implicitly.
+For day-to-day checks, reviews, and rebuttals after onboarding, use [the-guard](../the-guard/SKILL.md).
 
 ## Choose the standard
 

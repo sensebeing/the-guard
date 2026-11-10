@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible problem with the-guard.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "For vulnerabilities, follow SECURITY.md instead of posting details here. Redact secrets and private code from all examples and logs."
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Which the-guard release or commit are you using?
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, and review agent/version if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include the exact command and a minimal, sanitized config or repository example.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exit code and relevant redacted output.
+    validations:
+      required: true
