@@ -159,7 +159,6 @@ def _render_prior_findings_section(session, scope, inc_scope=None, *, reviewer_n
 
 def _snapshot_context(repo_root, scope):
     config = load_config(repo_root, revision=scope.head_sha)
-    sections = [f'Project: {config.review.get("project_title", repo_root.name)}', '## Declared topology', json.dumps(config.topology, indent=2)]
     touched = set()
     for path in scope.reviewable_files:
         parts = PurePosixPath(path).parts
@@ -168,6 +167,10 @@ def _snapshot_context(repo_root, scope):
     for module in config.topology.get('modules', []):
         if any(p.startswith(module['path']+'/') for p in scope.reviewable_files):
             touched.add(module['path'])
+    rendered_topology = dict(config.topology)
+    if 'modules' in rendered_topology:
+        rendered_topology['modules'] = [m for m in rendered_topology['modules'] if m.get('path') in touched]
+    sections = [f'Project: {config.review.get("project_title", repo_root.name)}', '## Declared topology', json.dumps(rendered_topology, indent=2)]
     for module in sorted(touched):
         for name in ('AGENTS.md','CLAUDE.md','README.md'):
             path = module+'/'+name
