@@ -1,0 +1,4 @@
+interface:
+  display_name: "The Guard"
+  short_description: "Run topology checks, independent architecture review, and push verification"
+  default_prompt: "Use $the-guard to check changed files and run an independent architecture review before merge."

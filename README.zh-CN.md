@@ -3,6 +3,8 @@
 [![MIT 许可证](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![零运行时依赖](https://img.shields.io/badge/runtime_dependencies-0-green.svg)](pyproject.toml)
+[![skills.sh](https://img.shields.io/badge/skills.sh-sensebeing%2Fthe--guard-black)](https://skills.sh/sensebeing/the-guard)
+[![GitHub stars](https://img.shields.io/github/stars/sensebeing/the-guard?style=social)](https://github.com/sensebeing/the-guard/stargazers)
 
 **让团队里的每个人，都能放心用 AI 写代码。**
 
@@ -12,6 +14,10 @@
 
 `the-guard` 把团队的架构规则放进仓库：AI 动笔前先读边界契约，改代码时用确定性拓扑棘轮拦截违规，合入前再拉起一个独立 Agent 对已提交代码做对抗式架构审查。
 
+| 没有 `the-guard` | 接入 `the-guard` |
+| --- | --- |
+| 编码 Agent 在前端组件里重算了一遍订单状态规则，或者在报错的查询外包了一层重试。单元测试和 Linter 全部通过，这种偷懒补丁被合入 `main`。 | 编码 Agent 动笔前先读取 `AGENTS.md` 与模块职责文档；开发时 `guard check` 拦截越界导入与 SQL 写归属违规；合入前 `guard review` 拉起独立审查 Agent，依据 `guard.single-source-of-truth` 要求在唯一 Owner 边界内从源头修复。 |
+
 [English](README.md) · [快速开始](#快速开始) · [预设与规则](#四档预设与-14-条工程质量规范) · [日常工作流](#日常工作流) · [配置参考](#配置参考) · [接入技能](skills/the-guard-setup/SKILL.md) · [日常技能](skills/the-guard/SKILL.md)
 
 ## 30 秒上手：复制给你的 Agent
@@ -20,8 +26,9 @@
 
 ```text
 请为当前仓库安装并配置 https://github.com/sensebeing/the-guard。
-将仓库克隆或更新至 ~/the-guard，注册 skills/the-guard 与 skills/the-guard-setup 技能，
-按 skills/the-guard-setup/SKILL.md 引导我选择接入模式（core、full、distill 或 hybrid）并完成 guard check 验证。
+安装 CLI（`uv tool install git+https://github.com/sensebeing/the-guard` 或 `python3 -m pip install git+https://github.com/sensebeing/the-guard`），
+安装技能（`npx skills add sensebeing/the-guard --global --agent '*'` 或从本地检出目录创建软链），
+然后按 skills/the-guard-setup/SKILL.md 引导我选择接入模式（core、full、distill 或 hybrid）并完成 guard check 验证。
 ```
 
 ## 为什么做这个工具
@@ -44,13 +51,28 @@
 
 ### 1. 安装
 
-需 Python 3.11+ 与 Git 环境：
+需 Python 3.11+ 与 Git 环境，可直接从 GitHub 安装 `guard` CLI：
 
 ```sh
-python3 -m pip install /path/to/the-guard
+uv tool install git+https://github.com/sensebeing/the-guard
+# 或使用 pip：
+python3 -m pip install git+https://github.com/sensebeing/the-guard
 ```
 
-也可以直接运行检出目录下的 `/path/to/the-guard/bin/guard`。CLI 无外部运行时依赖；独立架构审查会调用本机已安装并登录的 `codex`、`claude` 或 `agy` CLI。
+为 Claude Code、Codex、Cursor、Gemini CLI、GitHub Copilot 或 Windsurf 安装技能（`$the-guard` 与 `$the-guard-setup`）：
+
+```sh
+npx skills add sensebeing/the-guard --global --agent '*'
+```
+
+在 Claude Code 中也可以通过插件市场安装：
+
+```text
+/plugin marketplace add sensebeing/the-guard
+/plugin install the-guard@the-guard
+```
+
+CLI 无外部运行时依赖；独立架构审查会调用本机已安装并登录的 `codex`、`claude` 或 `agy` CLI。
 
 ### 2. 初始化
 
@@ -72,7 +94,7 @@ guard init --preset full --with-hooks
 
 ### 3. 或通过技能交互式接入
 
-将 [the-guard-setup](skills/the-guard-setup/SKILL.md) 注册到编码 Agent 的技能目录中并调用 `$the-guard-setup`，即可按提示选择 `core`、`full`、`distill` 或 `hybrid` 接入模式。
+在编码 Agent 中调用 `$the-guard-setup`（或 `/the-guard-setup`），即可按提示选择 `core`、`full`、`distill` 或 `hybrid` 接入模式。
 
 ## 四档预设与 14 条工程质量规范
 
@@ -262,6 +284,17 @@ uv run guard check --base origin/main
 ```
 
 内部包结构与模块职责边界见 [src/the_guard/README.md](src/the_guard/README.md)，环境搭建与审查要求见[贡献指南](CONTRIBUTING.md)，私密漏洞报告见[安全政策](SECURITY.md)，版本历史见[变更日志](CHANGELOG.md)。
+
+## 相关开源项目
+
+`the-guard` 是 SenseBeing 面向 AI 原生研发团队开源工具集的组成部分：
+
+| 项目 | 作用 |
+| --- | --- |
+| [the-pilot](https://github.com/sensebeing/the-pilot) | 面向 Orca 编码 Agent 的场景化 Turn Autopilot 与多 Agent 编排引擎。 |
+| [the-dealer](https://github.com/sensebeing/the-dealer) | 同机多 Agent 派发与跨机、跨团队加密 P2P 任务协同节点。 |
+
+如果 `the-guard` 对你们团队用 AI 写代码有帮助，欢迎在 GitHub 点一颗 Star，让更多团队看到它。
 
 ## 许可证
 

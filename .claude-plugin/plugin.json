@@ -1,0 +1,23 @@
+{
+  "name": "the-guard",
+  "description": "Architecture guardrails for teams building with AI: upfront agent contracts, deterministic topology ratchets, and independent adversarial pre-merge review.",
+  "version": "0.1.0",
+  "author": {
+    "name": "SenseBeing",
+    "url": "https://github.com/sensebeing"
+  },
+  "homepage": "https://github.com/sensebeing/the-guard",
+  "repository": "https://github.com/sensebeing/the-guard",
+  "license": "MIT",
+  "keywords": [
+    "architecture",
+    "code-review",
+    "coding-agents",
+    "engineering-policy",
+    "static-analysis"
+  ],
+  "skills": [
+    "./skills/the-guard",
+    "./skills/the-guard-setup"
+  ]
+}

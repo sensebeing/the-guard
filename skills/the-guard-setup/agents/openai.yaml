@@ -1,0 +1,4 @@
+interface:
+  display_name: "The Guard Setup"
+  short_description: "Onboard a repository to the-guard policies, topology ratchets, and review gates"
+  default_prompt: "Use $the-guard-setup to onboard this repository to the-guard engineering policies and topology checks."

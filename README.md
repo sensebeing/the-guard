@@ -3,6 +3,8 @@
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![Zero runtime dependencies](https://img.shields.io/badge/runtime_dependencies-0-green.svg)](pyproject.toml)
+[![skills.sh](https://img.shields.io/badge/skills.sh-sensebeing%2Fthe--guard-black)](https://skills.sh/sensebeing/the-guard)
+[![GitHub stars](https://img.shields.io/github/stars/sensebeing/the-guard?style=social)](https://github.com/sensebeing/the-guard/stargazers)
 
 **Let your whole team build with AI.**
 
@@ -12,6 +14,10 @@ When anyone can generate a working patch with an AI agent, the hard part is keep
 
 `the-guard` puts your team's architecture rules in the repository so coding agents read them before writing code, deterministic checks catch structural regressions during edits, and a separate reviewer agent challenges committed changes before merge.
 
+| Without `the-guard` | With `the-guard` |
+| --- | --- |
+| A coding agent adds an order-status badge by recalculating status rules inside a UI component, or fixes a bug by wrapping a broken query in a retry loop. Unit tests and linters pass, so the shortcut merges into `main`. | The agent reads `AGENTS.md` and module owner docs before editing. `guard check` blocks forbidden imports and SQL ownership violations during edits, and `guard review` runs a separate reviewer agent before merge that cites `guard.single-source-of-truth` and requires a root-cause fix at the owner boundary. |
+
 [中文文档](README.zh-CN.md) · [Quick start](#quick-start) · [Presets & rules](#presets-and-the-14-engineering-quality-rules) · [Workflow](#workflow) · [Configuration](#configuration) · [Setup skill](skills/the-guard-setup/SKILL.md) · [Daily skill](skills/the-guard/SKILL.md)
 
 ## Get started in 30 seconds: paste to your agent
@@ -20,9 +26,9 @@ Paste this into Claude Code, Codex, Cursor, Antigravity, or Orca:
 
 ```text
 Install and set up https://github.com/sensebeing/the-guard for this repository.
-Clone or update ~/the-guard, register skills/the-guard and skills/the-guard-setup,
-then follow skills/the-guard-setup/SKILL.md to help me choose an onboarding mode
-(core, full, distill, or hybrid) and verify guard check.
+Install the CLI (`uv tool install git+https://github.com/sensebeing/the-guard` or `python3 -m pip install git+https://github.com/sensebeing/the-guard`),
+install the skills (`npx skills add sensebeing/the-guard --global --agent '*'` or symlink from a checkout),
+then follow skills/the-guard-setup/SKILL.md to help me choose an onboarding mode (core, full, distill, or hybrid) and verify guard check.
 ```
 
 ## Why we built it
@@ -45,13 +51,28 @@ Tests check behavior, and linters, formatters, and static analyzers catch style 
 
 ### 1. Install
 
-With Python 3.11+ and Git installed:
+Install the `guard` CLI with Python 3.11+ and Git:
 
 ```sh
-python3 -m pip install /path/to/the-guard
+uv tool install git+https://github.com/sensebeing/the-guard
+# or with pip:
+python3 -m pip install git+https://github.com/sensebeing/the-guard
 ```
 
-You can also run `/path/to/the-guard/bin/guard` directly from a checkout. The CLI has no external runtime dependencies. Independent review uses a locally installed `codex`, `claude`, or `agy` CLI.
+Install the agent skills (`$the-guard` and `$the-guard-setup`) for Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, or Windsurf:
+
+```sh
+npx skills add sensebeing/the-guard --global --agent '*'
+```
+
+In Claude Code, you can also install via the plugin marketplace:
+
+```text
+/plugin marketplace add sensebeing/the-guard
+/plugin install the-guard@the-guard
+```
+
+The CLI has no external runtime dependencies. Independent review uses a locally installed `codex`, `claude`, or `agy` CLI.
 
 ### 2. Initialize
 
@@ -71,9 +92,9 @@ To install all 14 rules and enable the local `pre-push` gate:
 guard init --preset full --with-hooks
 ```
 
-### 3. Or use the setup skill
+### 3. Or run the setup skill
 
-Register [the-guard-setup](skills/the-guard-setup/SKILL.md) in your agent's skill directory and invoke `$the-guard-setup` to choose `core`, `full`, `distill`, or `hybrid` interactively.
+Invoke `$the-guard-setup` (or `/the-guard-setup`) in your coding agent to choose `core`, `full`, `distill`, or `hybrid` interactively.
 
 ## Presets and the 14 engineering quality rules
 
@@ -263,6 +284,17 @@ uv run guard check --base origin/main
 ```
 
 See [src/the_guard/README.md](src/the_guard/README.md) for package structure and module boundaries, [Contributing](CONTRIBUTING.md) for setup and review requirements, [Security](SECURITY.md) for vulnerability reporting, and [Changelog](CHANGELOG.md) for release history.
+
+## Related projects
+
+`the-guard` is part of the SenseBeing open-source toolkit for AI-native engineering teams:
+
+| Project | What it does |
+| --- | --- |
+| [the-pilot](https://github.com/sensebeing/the-pilot) | Scene-based Turn Autopilot and multi-agent orchestration for coding agents in Orca. |
+| [the-dealer](https://github.com/sensebeing/the-dealer) | Same-machine multi-agent dispatch and encrypted P2P task collaboration across machines and teams. |
+
+If `the-guard` helps your team build with AI, a star on GitHub helps other teams find it.
 
 ## License
 

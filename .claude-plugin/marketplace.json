@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "the-guard",
+  "owner": {
+    "name": "SenseBeing",
+    "url": "https://github.com/sensebeing"
+  },
+  "description": "Install the-guard skills as a Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "the-guard",
+      "source": "./",
+      "description": "Architecture guardrails for teams building with AI: upfront agent contracts, deterministic topology ratchets, and independent adversarial pre-merge review.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": [
+        "architecture",
+        "code-review",
+        "coding-agents",
+        "engineering-policy",
+        "static-analysis"
+      ]
+    }
+  ]
+}

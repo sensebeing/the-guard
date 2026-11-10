@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from the_guard import __version__
 from the_guard.cli import main, changed_files
 from the_guard.config import GuardConfig, load_config
 from the_guard.hooks import install_hooks, main_push_gate
@@ -257,3 +258,25 @@ class ConfigurationTests(unittest.TestCase):
         self.git("rm", "AGENTS.md")
         self.write("new.py", "value = 1\n")
         self.assertEqual(changed_files(self.root, "HEAD"), ["new.py"])
+
+    def test_plugin_and_agent_manifests_match_package_metadata(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        claude_plugin = json.loads(
+            (repo_root / ".claude-plugin/plugin.json").read_text(encoding="utf-8")
+        )
+        marketplace = json.loads(
+            (repo_root / ".claude-plugin/marketplace.json").read_text(encoding="utf-8")
+        )
+        cursor_plugin = json.loads(
+            (repo_root / ".cursor-plugin/plugin.json").read_text(encoding="utf-8")
+        )
+        for manifest in (claude_plugin, cursor_plugin, marketplace["plugins"][0]):
+            self.assertEqual(manifest["name"], "the-guard")
+            self.assertEqual(manifest["version"], __version__)
+        for rel_skill in ("skills/the-guard", "skills/the-guard-setup"):
+            skill_dir = repo_root / rel_skill
+            self.assertTrue((skill_dir / "SKILL.md").is_file())
+            openai_yaml = (skill_dir / "agents/openai.yaml").read_text(encoding="utf-8")
+            self.assertIn("display_name:", openai_yaml)
+            self.assertIn("default_prompt:", openai_yaml)
+
