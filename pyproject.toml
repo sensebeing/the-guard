@@ -11,6 +11,20 @@ license = "MIT"
 readme = "README.md"
 authors = [{name = "SenseBeing"}]
 dependencies = []
+keywords = ["architecture", "code-review", "engineering-policy", "static-analysis"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/sensebeing/the-guard"
+Repository = "https://github.com/sensebeing/the-guard"
+Issues = "https://github.com/sensebeing/the-guard/issues"
 
 [project.scripts]
 guard = "the_guard.cli:main"

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from .environment import review_environment
-
-from datetime import datetime
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .contract import CONFIG_SCHEMA, PROVIDERS
@@ -18,7 +16,7 @@ from .session import UTC
 
 
 def _config_file_path(repo_root: Path, env: dict[str, str] | None = None) -> Path:
-    eff_env = review_environment(env)
+    eff_env = dict(os.environ if env is None else env)
     override = eff_env.get("THE_GUARD_REVIEW_CONFIG", "").strip()
     if override:
         return Path(override)
@@ -35,7 +33,9 @@ def _find_provider_binary(provider: str, env: dict[str, str]) -> str | None:
     path_var = env.get("PATH", "")
     home = Path(env.get("HOME", str(Path.home())))
     extra = [str(home / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin"]
-    search_path = os.pathsep.join([path_var, *extra]) if path_var else os.pathsep.join(extra)
+    search_path = (
+        os.pathsep.join([path_var, *extra]) if path_var else os.pathsep.join(extra)
+    )
     found = shutil.which(provider, path=search_path)
     return found if found and os.access(found, os.X_OK) else None
 
@@ -65,7 +65,11 @@ def _verify_binary_runs(binary_path: str, env: dict[str, str]) -> bool:
     try:
         return (
             subprocess.run(
-                [binary_path, "--version"], env=env, capture_output=True, timeout=5, check=False
+                [binary_path, "--version"],
+                env=env,
+                capture_output=True,
+                timeout=5,
+                check=False,
             ).returncode
             == 0
         )
@@ -101,7 +105,9 @@ def _load_config(cfg_path: Path) -> dict[str, Any]:
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return data if isinstance(data, dict) and data.get("schema") == CONFIG_SCHEMA else {}
+    return (
+        data if isinstance(data, dict) and data.get("schema") == CONFIG_SCHEMA else {}
+    )
 
 
 def resolve_provider_model_config(
@@ -109,10 +115,16 @@ def resolve_provider_model_config(
     config_payload: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[str, str]:
-    eff_env = review_environment(env)
-    settings = _normalize_provider_models((config_payload or {}).get("provider_models")).get(provider, {})
-    model = eff_env.get("THE_GUARD_REVIEW_MODEL", "").strip() or settings.get("model", "")
-    effort = eff_env.get("THE_GUARD_REVIEW_EFFORT", "").strip() or settings.get("effort", "")
+    eff_env = dict(os.environ if env is None else env)
+    settings = _normalize_provider_models(
+        (config_payload or {}).get("provider_models")
+    ).get(provider, {})
+    model = eff_env.get("THE_GUARD_REVIEW_MODEL", "").strip() or settings.get(
+        "model", ""
+    )
+    effort = eff_env.get("THE_GUARD_REVIEW_EFFORT", "").strip() or settings.get(
+        "effort", ""
+    )
     return model, effort
 
 
@@ -123,10 +135,12 @@ def probe_environment(
     priority_order: list[str] | None = None,
     provider_models: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    eff_env = review_environment(env)
+    eff_env = dict(os.environ if env is None else env)
     cfg_path = _config_file_path(repo_root, eff_env)
     existing = _load_config(cfg_path)
-    order = _normalize_priority_order(existing.get("priority_order") if priority_order is None else priority_order)
+    order = _normalize_priority_order(
+        existing.get("priority_order") if priority_order is None else priority_order
+    )
     if priority_order is not None and not order:
         raise ValueError("priority_order must contain at least one supported provider")
     order = order or list(PROVIDERS)
@@ -138,7 +152,11 @@ def probe_environment(
     binaries: dict[str, str] = {}
     for provider in order:
         binary = _find_provider_binary(provider, eff_env)
-        if binary and _has_provider_credentials(provider, eff_env) and _verify_binary_runs(binary, eff_env):
+        if (
+            binary
+            and _has_provider_credentials(provider, eff_env)
+            and _verify_binary_runs(binary, eff_env)
+        ):
             available.append(provider)
             binaries[provider] = binary
 
@@ -154,7 +172,9 @@ def probe_environment(
         payload["provider_models"] = models
     try:
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        cfg_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
     except OSError:
         pass
     return payload
@@ -167,7 +187,7 @@ def resolve_provider_order(
     reprobe: bool = False,
     env: dict[str, str] | None = None,
 ) -> tuple[list[tuple[str, str]], dict[str, Any]]:
-    eff_env = review_environment(env)
+    eff_env = dict(os.environ if env is None else env)
     forced = (explicit_provider or eff_env.get("THE_GUARD_REVIEW_PROVIDER", "")).strip()
     cfg_path = _config_file_path(repo_root, eff_env)
 
@@ -176,27 +196,48 @@ def resolve_provider_order(
     ordered: list[tuple[str, str]] = []
     if priority:
         preferred = str(cached.get("preferred_provider") or "")
-        binaries = cached.get("provider_binaries") if isinstance(cached.get("provider_binaries"), dict) else {}
-        order = [preferred, *[p for p in priority if p != preferred]] if preferred in priority else priority
+        binaries = (
+            cached.get("provider_binaries")
+            if isinstance(cached.get("provider_binaries"), dict)
+            else {}
+        )
+        order = (
+            [preferred, *[p for p in priority if p != preferred]]
+            if preferred in priority
+            else priority
+        )
         for prov in order:
             bin_path = binaries.get(prov) or _find_provider_binary(prov, eff_env)
-            if isinstance(bin_path, str) and os.access(bin_path, os.X_OK) and _has_provider_credentials(prov, eff_env):
+            if (
+                isinstance(bin_path, str)
+                and os.access(bin_path, os.X_OK)
+                and _has_provider_credentials(prov, eff_env)
+            ):
                 ordered.append((prov, bin_path))
     payload = cached
     if not ordered:
         payload = probe_environment(repo_root, eff_env)
     binaries = payload.get("provider_binaries", {})
     if not ordered:
-        ordered = [(prov, binaries[prov]) for prov in payload.get("available_providers", []) if prov in binaries]
+        ordered = [
+            (prov, binaries[prov])
+            for prov in payload.get("available_providers", [])
+            if prov in binaries
+        ]
     if forced in PROVIDERS:
         forced_bin = binaries.get(forced) or _find_provider_binary(forced, eff_env)
         if forced_bin:
-            ordered = [(forced, forced_bin), *[item for item in ordered if item[0] != forced]]
+            ordered = [
+                (forced, forced_bin),
+                *[item for item in ordered if item[0] != forced],
+            ]
     return ordered, payload
 
 
-def record_working_provider(repo_root: Path, provider: str, binary_path: str, env: dict[str, str] | None = None) -> None:
-    eff_env = review_environment(env)
+def record_working_provider(
+    repo_root: Path, provider: str, binary_path: str, env: dict[str, str] | None = None
+) -> None:
+    eff_env = dict(os.environ if env is None else env)
     cfg_path = _config_file_path(repo_root, eff_env)
     existing = _load_config(cfg_path)
     avail = [provider]
@@ -208,7 +249,8 @@ def record_working_provider(repo_root: Path, provider: str, binary_path: str, en
         bins = {**dict(existing.get("provider_binaries") or {}), provider: binary_path}
     data = {
         "schema": CONFIG_SCHEMA,
-        "priority_order": _normalize_priority_order(existing.get("priority_order")) or list(PROVIDERS),
+        "priority_order": _normalize_priority_order(existing.get("priority_order"))
+        or list(PROVIDERS),
         "preferred_provider": provider,
         "available_providers": avail,
         "provider_binaries": bins,
@@ -219,6 +261,8 @@ def record_working_provider(repo_root: Path, provider: str, binary_path: str, en
         data["provider_models"] = models
     try:
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        cfg_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
     except OSError:
         pass

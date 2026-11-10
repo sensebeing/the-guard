@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,10 +21,20 @@ def build_agy_readonly_settings(common_dir: Path | None = None) -> str:
                 "allow": allow,
                 "deny": [
                     "write_file(*)",
-                    "command(git commit)", "command(git push)", "command(git reset)",
-                    "command(git checkout)", "command(git switch)", "command(git merge)",
-                    "command(git rebase)", "command(git cherry-pick)", "command(git clean)",
-                    "command(rm)", "command(mv)", "command(cp)", "command(chmod)", "command(chown)",
+                    "command(git commit)",
+                    "command(git push)",
+                    "command(git reset)",
+                    "command(git checkout)",
+                    "command(git switch)",
+                    "command(git merge)",
+                    "command(git rebase)",
+                    "command(git cherry-pick)",
+                    "command(git clean)",
+                    "command(rm)",
+                    "command(mv)",
+                    "command(cp)",
+                    "command(chmod)",
+                    "command(chown)",
                 ],
             },
         },
@@ -81,33 +91,89 @@ class IncrementalReviewScope:
         return bool(self.reviewable_files or self.submodule_changes)
 
 
-CODE_EXTENSIONS = frozenset({
-    ".py", ".swift", ".kt", ".kts", ".ts", ".tsx", ".js", ".jsx",
-    ".sql", ".sh", ".go", ".rs", ".rb", ".java", ".c", ".cc", ".cpp", ".h",
-})
+CODE_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".swift",
+        ".kt",
+        ".kts",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".sql",
+        ".sh",
+        ".go",
+        ".rs",
+        ".rb",
+        ".java",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".h",
+    }
+)
 SERVICE_CONFIG_EXTENSIONS = frozenset({".yaml", ".yml", ".json", ".toml", ".proto"})
 PROMPT_SKILL_PATH_MARKERS = (
-    "/skills/", "/prompts/", "/agents/",
-    ".agents/skills/", ".claude/skills/", ".claude/agents/", ".codex/agents/",
+    "/skills/",
+    "/prompts/",
+    "/agents/",
+    ".agents/skills/",
+    ".claude/skills/",
+    ".claude/agents/",
+    ".codex/agents/",
 )
-POLICY_REVIEWABLE_EXACT_PATHS = frozenset({"CLAUDE.md", "AGENTS.md"})
+POLICY_REVIEWABLE_EXACT_PATHS = frozenset(
+    {"AGENTS.md", "CLAUDE.md", ".guard/config.json"}
+)
 POLICY_REVIEWABLE_PREFIXES = (
-    "docs/engineering-quality/rules/",
-    "docs/engineering-quality/contracts/",
+    ".guard/",
+    "docs/standards/",
+    ".claude/",
+    ".agents/",
+    "skills/",
 )
-LOCK_FILENAMES = frozenset({
-    "uv.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "Podfile.lock",
-})
-TEST_DIR_PARTS = frozenset({
-    "tests", "test", "__tests__", "fixtures", "testdata",
-})
+LOCK_FILENAMES = frozenset(
+    {
+        "uv.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "Cargo.lock",
+        "Podfile.lock",
+    }
+)
+TEST_DIR_PARTS = frozenset(
+    {
+        "tests",
+        "test",
+        "__tests__",
+        "fixtures",
+        "testdata",
+    }
+)
 TEST_FILE_SUFFIXES = (
-    "_test.py", ".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx",
-    ".test.js", ".spec.js", "tests.swift", "test.kt",
+    "_test.py",
+    ".test.ts",
+    ".test.tsx",
+    ".spec.ts",
+    ".spec.tsx",
+    ".test.js",
+    ".spec.js",
+    "tests.swift",
+    "test.kt",
 )
-CONFIG_I18N_EXTENSIONS = frozenset({
-    ".strings", ".stringsdict", ".xcstrings", ".toml", ".json", ".yml", ".yaml",
-})
+CONFIG_I18N_EXTENSIONS = frozenset(
+    {
+        ".strings",
+        ".stringsdict",
+        ".xcstrings",
+        ".toml",
+        ".json",
+        ".yml",
+        ".yaml",
+    }
+)
 
 REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -127,10 +193,21 @@ REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
                     "required_fix": {"type": "string"},
                     "finding_origin": {
                         "type": "string",
-                        "enum": ["initial_full_scope", "prior_unresolved", "introduced_by_delta"],
+                        "enum": [
+                            "initial_full_scope",
+                            "prior_unresolved",
+                            "introduced_by_delta",
+                        ],
                     },
                 },
-                "required": ["rule_id", "file", "line", "issue", "required_fix", "finding_origin"],
+                "required": [
+                    "rule_id",
+                    "file",
+                    "line",
+                    "issue",
+                    "required_fix",
+                    "finding_origin",
+                ],
                 "additionalProperties": False,
             },
         },

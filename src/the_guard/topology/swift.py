@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from ..finding import Finding
 from .rules import (
     SWIFT_AWAIT_CALL_RE,
     SWIFT_FUNC_DECL_RE,
@@ -11,7 +12,6 @@ from .rules import (
     SWIFT_WRITE_METHOD_PREFIXES,
     _line_exempts_rule,
 )
-from ..finding import Finding
 
 
 def _check_swift_file(
@@ -19,23 +19,25 @@ def _check_swift_file(
     text: str,
     base_text: str | None,
     changed_lines: set[int] | None,
-    discarded_history: bool | dict = False,
+    exempt_tag: str = "guard-exempt",
 ) -> list[Finding]:
-    current = _collect_swift_findings(path, text, discarded_history)
+    current = _collect_swift_findings(path, text, exempt_tag)
     if not current:
         return []
     if base_text is None or changed_lines is None:
         return [finding for finding, _sig, _span in current]
 
-    base_sigs = {sig for _finding, sig, _span in _collect_swift_findings(path, base_text, discarded_history)}
+    base_sigs = {
+        sig
+        for _finding, sig, _span in _collect_swift_findings(path, base_text, exempt_tag)
+    }
     findings: list[Finding] = []
     for finding, sig, (func_start, func_end) in current:
         if finding.line in changed_lines:
             findings.append(finding)
             continue
         func_touched = any(
-            line_no in changed_lines
-            for line_no in range(func_start, func_end + 1)
+            line_no in changed_lines for line_no in range(func_start, func_end + 1)
         )
         if func_touched and sig not in base_sigs:
             findings.append(finding)
@@ -45,7 +47,7 @@ def _check_swift_file(
 def _collect_swift_findings(
     path: str,
     text: str,
-    discarded_history: bool | dict = False,
+    exempt_tag: str = "guard-exempt",
 ) -> list[tuple[Finding, tuple[str, str, str], tuple[int, int]]]:
     lines = text.splitlines()
     results: list[tuple[Finding, tuple[str, str, str], tuple[int, int]]] = []
@@ -55,7 +57,6 @@ def _collect_swift_findings(
         seen_reads: dict[str, int] = {}
         span = (start_line, end_line)
         func_body_lines = lines[start_line - 1 : end_line]
-        func_body_text = "\n".join(func_body_lines)
 
         for offset, line in enumerate(func_body_lines):
             line_no = start_line + offset
@@ -77,7 +78,7 @@ def _collect_swift_findings(
 
                 call_key = f"{receiver}.{method}({args})"
                 rule_id = "guard.database-query-efficiency"
-                if _line_exempts_rule(line, rule_id):
+                if _line_exempts_rule(line, rule_id, exempt_tag):
                     continue
 
                 if call_key in seen_reads:
@@ -89,33 +90,18 @@ def _collect_swift_findings(
                     )
                     results.append(
                         (
-                            Finding(rule_id=rule_id, path=path, line=line_no, message=message),
+                            Finding(
+                                rule_id=rule_id,
+                                path=path,
+                                line=line_no,
+                                message=message,
+                            ),
                             (rule_id, func_name, f"dup:{call_key}"),
                             span,
                         )
                     )
                 else:
                     seen_reads[call_key] = line_no
-
-                if (
-                    discarded_history
-                    and func_name.startswith(discarded_history.get("function_prefix", "prepareConversation") if isinstance(discarded_history, dict) else "prepareConversation")
-                    and ("History" in method or "history" in method)
-                    and "resetGeneration" in func_body_text
-                    and "messages" not in func_body_text
-                ):
-                    message = (
-                        f"'{func_name}' fetches conversation history via '{receiver}.{method}' "
-                        "only to inspect resetGeneration and discards messages; merge "
-                        "into the initial history load."
-                    )
-                    results.append(
-                        (
-                            Finding(rule_id=rule_id, path=path, line=line_no, message=message),
-                            (rule_id, func_name, f"discard-history:{method}"),
-                            span,
-                        )
-                    )
 
     return results
 

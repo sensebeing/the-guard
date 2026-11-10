@@ -58,8 +58,8 @@ No tests, builds, writes or delegated agents are requested inside review session
 
 Review receipts use Git stable patch IDs. Identical patches survive rebase; carry-forward additionally
 checks each changed file's patch when upstream context changes. Receipts and sessions live under the
-Git common directory in `arch-review-receipts/` and `arch-review-sessions/`. Logs are bounded and
-include prompts, streamed events and results. Existing `arch-review-receipt/v1` receipts remain readable;
+Git common directory in `the-guard-receipts/` and `arch-review-sessions/`. Logs are bounded and
+include prompts, streamed events and results. Existing `the-guard-receipt/v1` receipts remain readable;
 new receipts use `the-guard-receipt/v1`.
 
 Receipts are trusted local workflow evidence, not cryptographic attestations or server-side protection.
@@ -69,8 +69,7 @@ Creating a protected remote branch requires an explicit baseline before enabling
 
 ## Configuration
 
-`.guard/config.json` is optional. With no configuration, the CLI finds a policy block in `CLAUDE.md`
-or `AGENTS.md`. Policy validation deliberately supports a small YAML subset: scalar fields and inline
+`.guard/config.json` is optional. With no configuration, the CLI reads the canonical policy block in `AGENTS.md`. Policy validation deliberately supports a small YAML subset: scalar fields and inline
 scope lists, two-space list indentation, no YAML dependencies or implicit type coercion.
 
 ```json
@@ -78,6 +77,7 @@ scope lists, two-space list indentation, no YAML dependencies or implicit type c
   "manifest_file": "AGENTS.md",
   "manifest_tag": "the-guard-policy",
   "manifest_schema": "the-guard-policy/v1",
+  "detail_dir": "docs/standards/rules",
   "detail_manifest_ref": "AGENTS.md#engineering-quality-policy",
   "rule_id_prefix": "guard.",
   "exempt_tag": "guard-exempt",
@@ -93,7 +93,6 @@ scope lists, two-space list indentation, no YAML dependencies or implicit type c
   "topology": {
     "python_prod_prefixes": ["src/", "services/", "packages/", "app/", "apps/"],
     "swift_prod_prefixes": [""],
-    "swift_discarded_history_check": false,
     "modules": [],
     "forbidden_imports": [{"from": "src/ui/", "to": "internal.storage"}],
     "exclusive_sql_owners": [{"table": "jobs", "owners": ["src/storage/jobs.py"], "rule_id": "guard.single-source-of-truth", "message": "Use the jobs owner API."}],
@@ -108,8 +107,8 @@ and `imports` arrays instead of `from`/`to`. Production scope entries accept pre
 A retired-table rule may be a single object or an array. `literal_or_regex` is a Python regex unless
 `literal: true` is set. A line exemption has the form
 `# guard-exempt guard.architecture-simplicity: concrete reason here` (at least eight characters).
-Legacy `product-engineering-quality` tags, `product-engineering-quality/v1`, `peq.` IDs and `peq-exempt`
-remain accepted. With no explicit detail reference, either standard root manifest anchor is accepted.
+Manifest tag, schema, rule prefix and exemption tag are configured in `.guard/config.json`.
+Without an explicit detail reference, the configured manifest file uses `#engineering-quality-policy`.
 
 A manifest entry looks like this (inside `<!-- the-guard-policy:start -->` / `<!-- the-guard-policy:end -->`):
 
@@ -120,7 +119,7 @@ rules:
     severity: block
     scope: [backend, frontend]
     summary: Each module owns only its declared responsibilities.
-    details: docs/engineering-quality/rules/service-boundaries.md
+    details: docs/standards/rules/service-boundaries.md
     checker: static-plus-review
 ```
 
@@ -128,7 +127,7 @@ Each detail file has `id`, `title`, `manifest` frontmatter and a nonempty Markdo
 remain inside the repository. `.guard/config.json`, root agent instructions, policy directories,
 code and skills/prompts are reviewable by default; ordinary prose and lock-only changes are exempt.
 
-Provider settings use the `THE_GUARD_REVIEW_` (or `GUARD_ARCH_REVIEW_`) prefix with these suffixes: `CONFIG`, `PROVIDER`,
+Provider settings use the `THE_GUARD_REVIEW_` prefix with these suffixes: `CONFIG`, `PROVIDER`,
 `MODEL`, `EFFORT`, `STALL_SECONDS`, `HEARTBEAT_SECONDS`, `MAX_SECONDS`, `LOG_DIR`, and `ACTIVE`.
 For example, set `THE_GUARD_REVIEW_MODEL` to choose a model. `ACTIVE=1` marks an independent
 reviewer session and suppresses recursive CLI check-push invocation; do not set it in developer shells. Provider discovery is persisted in
@@ -143,15 +142,14 @@ guard topology check --base origin/main
 guard check --file src/api.py --file app/Screen.swift --json
 ```
 
-Discovery inventories modules, languages, owner docs, imports and internal dependencies. Sync updates
+Discovery inventories modules, languages, owner docs and internal dependencies. Sync updates
 only the discovered module inventory, preserving declared constraints. Distill adds tooling and bounded
 code samples for an agent to interpret; it does not invent or install domain rules automatically.
 
 Python AST checks detect write locks in read functions/endpoints, duplicate awaited reads on an
 execution path without an intervening write, and single-entity awaited reads in loops/comprehensions.
 Changed-line plus base-function-signature comparison avoids flagging unchanged legacy violations.
-Swift checks are lexical, not a Swift compiler: they detect duplicate reads and optional discarded
-history loads (`swift_discarded_history_check: true`, or an object with `function_prefix`).
+Swift checks are lexical, not a Swift compiler: they detect duplicate awaited reads.
 Configured checks enforce import boundaries, exclusive SQL owners, retired-table net-deletion ratchets,
 and forbidden dependencies. SQL detection is static, not a runtime query tracer. Syntax-based naming,
 control-flow and import checks are deliberately bounded; independent review covers semantics.
@@ -159,8 +157,8 @@ control-flow and import checks are deliberately bounded; independent review cove
 `guard hook edit-guard` accepts post-edit JSON with `tool_input.file_path`.
 `guard hook main-push-gate` accepts Git pre-push stdin, one ref update per line.
 Exit codes: `0` pass/exempt, `2` blocking findings or invalid policy, `3` unavailable checker/provider.
-Static check commands require a valid Git base unless files are explicitly provided; first-time explicit
-files are checked in full when no base exists. A failed diff is never an empty changed scope.
+Omitted `--base` resolves `origin/<main_branch>`, `<main_branch>`, then `HEAD`.
+An explicitly supplied invalid base fails with exit code `2`, even with explicit files. A failed diff is never an empty changed scope.
 
 ## Development
 

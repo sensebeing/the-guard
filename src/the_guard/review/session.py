@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-from .environment import review_environment
-
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import IO, Any
 
 RECEIPT_SCHEMA = "the-guard-receipt/v1"
-SESSION_SCHEMA = "arch-review-session/v1"
-LOG_META_SCHEMA = "arch-review-log-meta/v1"
+SESSION_SCHEMA = "the-guard-session/v1"
+LOG_META_SCHEMA = "the-guard-log-meta/v1"
 UTC = timezone.utc
 MAX_RETAINED_RUN_LOGS = 90
 MAX_RETAINED_LOGS_PER_WORKTREE = 8
@@ -67,11 +65,13 @@ class ReviewSessionState:
 def worktree_session_key(worktree_path: Path, branch: str) -> str:
     resolved_root = str(worktree_path.resolve())
     eff_branch = branch or "HEAD"
-    return hashlib.sha256(f"{resolved_root}:{eff_branch}".encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(f"{resolved_root}:{eff_branch}".encode("utf-8")).hexdigest()[
+        :16
+    ]
 
 
 def load_valid_receipt(common_dir: Path, patch_digest: str) -> dict[str, Any] | None:
-    path = common_dir / "arch-review-receipts" / f"{patch_digest}.json"
+    path = common_dir / "the-guard-receipts" / f"{patch_digest}.json"
     if not path.is_file():
         return None
     try:
@@ -80,7 +80,7 @@ def load_valid_receipt(common_dir: Path, patch_digest: str) -> dict[str, Any] | 
         return None
     if (
         isinstance(payload, dict)
-        and payload.get("schema") in {RECEIPT_SCHEMA, "arch-review-receipt/v1"}
+        and payload.get("schema") == RECEIPT_SCHEMA
         and payload.get("patch_digest") == patch_digest
         and payload.get("verdict") == "GO"
     ):
@@ -89,7 +89,7 @@ def load_valid_receipt(common_dir: Path, patch_digest: str) -> dict[str, Any] | 
 
 
 def save_receipt(common_dir: Path, result: ReviewResult) -> Path:
-    path = common_dir / "arch-review-receipts" / f"{result.patch_digest}.json"
+    path = common_dir / "the-guard-receipts" / f"{result.patch_digest}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": RECEIPT_SCHEMA,
@@ -104,12 +104,16 @@ def save_receipt(common_dir: Path, result: ReviewResult) -> Path:
         "log_path": result.log_path,
         "reviewed_at": datetime.now(UTC).isoformat(),
     }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     _prune_directory_files(path.parent, "*.json", MAX_RETAINED_RECEIPTS)
     return path
 
 
-def load_review_session(common_dir: Path, worktree_path: Path, branch: str) -> ReviewSessionState | None:
+def load_review_session(
+    common_dir: Path, worktree_path: Path, branch: str
+) -> ReviewSessionState | None:
     key = worktree_session_key(worktree_path, branch)
     path = common_dir / "arch-review-sessions" / f"{key}.json"
     if not path.is_file():
@@ -134,7 +138,11 @@ def load_review_session(common_dir: Path, worktree_path: Path, branch: str) -> R
     )
     sub_shas_raw = raw.get("last_submodule_shas")
     sub_shas = (
-        {str(k): str(v) for k, v in sub_shas_raw.items() if isinstance(k, str) and isinstance(v, str)}
+        {
+            str(k): str(v)
+            for k, v in sub_shas_raw.items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
         if isinstance(sub_shas_raw, dict)
         else {}
     )
@@ -157,7 +165,9 @@ def load_review_session(common_dir: Path, worktree_path: Path, branch: str) -> R
 
 def _prune_directory_files(directory: Path, pattern: str, max_keep: int) -> None:
     try:
-        files = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+        files = sorted(
+            directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True
+        )
         for old_file in files[max_keep:]:
             old_file.unlink(missing_ok=True)
     except OSError:
@@ -186,7 +196,9 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
         "updated_at": state.updated_at or datetime.now(UTC).isoformat(),
     }
     try:
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
         _prune_directory_files(sessions_dir, "*.json", MAX_RETAINED_SESSIONS)
     except OSError:
         pass
@@ -194,7 +206,7 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
 
 
 def review_logs_dir(common_dir: Path, env: dict[str, str] | None = None) -> Path:
-    eff_env = review_environment(env)
+    eff_env = dict(os.environ if env is None else env)
     override = eff_env.get("THE_GUARD_REVIEW_LOG_DIR", "").strip()
     if override:
         return Path(override)
@@ -238,7 +250,9 @@ class ReviewRunLogger:
         self._start_mono = time.monotonic()
 
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        self.run_id = f"{ts}-{os.getpid()}-{head_sha[:10]}-{patch_digest[:8]}-{provider}-{mode}"
+        self.run_id = (
+            f"{ts}-{os.getpid()}-{head_sha[:10]}-{patch_digest[:8]}-{provider}-{mode}"
+        )
         self.log_dir = review_logs_dir(common_dir, env)
         self.prompt_path = self.log_dir / f"{self.run_id}.prompt.md"
         self.events_path = self.log_dir / f"{self.run_id}.events.jsonl"
@@ -260,7 +274,12 @@ class ReviewRunLogger:
         s = line.strip()
         if not s.startswith("{"):
             return False
-        return '"subtype":"thinking_tokens"' in s or '"subtype": "thinking_tokens"' in s or '"type":"stream_event"' in s or '"type": "stream_event"' in s
+        return (
+            '"subtype":"thinking_tokens"' in s
+            or '"subtype": "thinking_tokens"' in s
+            or '"type":"stream_event"' in s
+            or '"type": "stream_event"' in s
+        )
 
     def append_stream_chunk(self, stream_name: str, text: str) -> None:
         if self._events_fp is None or not text:
@@ -275,7 +294,11 @@ class ReviewRunLogger:
             else:
                 for line in text.splitlines(keepends=True):
                     self._events_fp.write(
-                        json.dumps({"stream": "stderr", "text": line.rstrip("\r\n")}, ensure_ascii=False) + "\n"
+                        json.dumps(
+                            {"stream": "stderr", "text": line.rstrip("\r\n")},
+                            ensure_ascii=False,
+                        )
+                        + "\n"
                     )
             self._events_fp.flush()
         except OSError:
@@ -294,7 +317,10 @@ class ReviewRunLogger:
     ) -> Path:
         if self._events_fp is not None:
             try:
-                if self._stdout_line_buf.strip() and not self._is_high_frequency_delta_line(self._stdout_line_buf):
+                if (
+                    self._stdout_line_buf.strip()
+                    and not self._is_high_frequency_delta_line(self._stdout_line_buf)
+                ):
                     self._events_fp.write(self._stdout_line_buf.rstrip("\r\n") + "\n")
                 self._stdout_line_buf = ""
                 self._events_fp.flush()
@@ -322,7 +348,11 @@ class ReviewRunLogger:
 
     def _prune_old_runs(self) -> None:
         meta_files = sorted(
-            (p for p in self.log_dir.glob("*.meta.json") if not p.name.startswith("latest")),
+            (
+                p
+                for p in self.log_dir.glob("*.meta.json")
+                if not p.name.startswith("latest")
+            ),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -332,7 +362,11 @@ class ReviewRunLogger:
             prefix = meta_file.name.removesuffix(".meta.json")
             try:
                 meta = json.loads(meta_file.read_text(encoding="utf-8"))
-                worktree = str(meta.get("worktree") or prefix) if isinstance(meta, dict) else prefix
+                worktree = (
+                    str(meta.get("worktree") or prefix)
+                    if isinstance(meta, dict)
+                    else prefix
+                )
             except (OSError, ValueError):
                 worktree = prefix
             count = worktree_counts.get(worktree, 0)
@@ -402,7 +436,9 @@ class ReviewRunLogger:
         try:
             serialized = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
             self.meta_path.write_text(serialized, encoding="utf-8")
-            (self.log_dir / f"latest-{self.worktree_key}.json").write_text(serialized, encoding="utf-8")
+            (self.log_dir / f"latest-{self.worktree_key}.json").write_text(
+                serialized, encoding="utf-8"
+            )
             (self.log_dir / "latest.json").write_text(serialized, encoding="utf-8")
         except OSError:
             pass

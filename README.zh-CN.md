@@ -43,3 +43,5 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 MIT 许可证。
+
+策略标签、schema、规则 ID 前缀和豁免标签由 `.guard/config.json` 配置。默认读取 `AGENTS.md`，拓扑发现只输出模块、语言、边界文档和内部依赖。省略 `--base` 时依次解析远端主分支、本地主分支和 `HEAD`；显式无效基线直接失败。

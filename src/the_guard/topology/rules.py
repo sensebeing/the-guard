@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
 
-from ..finding import EXEMPT_RE
+from ..finding import _line_exempts_rule as _line_exempts_rule
 
 FOR_UPDATE_SQL_RE = re.compile(
     r"\b(?:FOR\s+(?:UPDATE|NO\s+KEY\s+UPDATE)|pg_(?:try_)?advisory_xact_lock|LOCK\s+TABLE)\b",
@@ -73,9 +72,8 @@ READ_CALL_PREFIXES = (
     "load_",
     "lookup_",
     "find_",
-    "ask_history",
 )
-READ_CALL_EXACT = frozenset({"get", "read", "fetch", "retrieve", "ask_history"})
+READ_CALL_EXACT = frozenset({"get", "read", "fetch", "retrieve"})
 NON_RESOURCE_READ_CALLS = frozenset(
     {
         "get_nowait",
@@ -174,7 +172,6 @@ SWIFT_READ_METHOD_PREFIXES = (
     "get",
     "load",
     "read",
-    "askHistory",
     "context",
     "detail",
 )
@@ -195,10 +192,3 @@ SWIFT_WRITE_METHOD_PREFIXES = (
     "mutate",
     "mark",
 )
-
-
-
-def _line_exempts_rule(line: str, rule_id: str, exempt_tag: str | None = None) -> bool:
-    pattern = re.compile(re.escape(exempt_tag) + r"\s+([a-z][a-z0-9_.-]+):\s+(.{8,})") if exempt_tag else EXEMPT_RE
-    match = pattern.search(line)
-    return bool(match and match.group(1).split(".", 1)[-1] == rule_id.split(".", 1)[-1])

@@ -57,7 +57,13 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo, _ = self._init_repo(Path(tmp))
             old_sha = _git(repo, "rev-parse", "HEAD")
-            _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{old_sha},services/example")
+            _git(
+                repo,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"160000,{old_sha},services/example",
+            )
             (repo / ".gitmodules").write_text(
                 '[submodule "example"]\npath = services/example\nurl = ../example\n'
             )
@@ -74,21 +80,40 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("services/example", prompt)
 
     def test_provider_command_enforces_process_level_readonly_flags(self) -> None:
-        agy_cmd = _build_provider_cmd("agy", "/bin/agy", "prompt", "{}", model="gemini-4-argon-high", effort="high")
+        agy_cmd = _build_provider_cmd(
+            "agy",
+            "/bin/agy",
+            "prompt",
+            "{}",
+            model="gemini-4-argon-high",
+            effort="high",
+        )
         self.assertIn("--mode", agy_cmd)
         self.assertEqual(agy_cmd[agy_cmd.index("--mode") + 1], "plan")
         self.assertIn("--sandbox", agy_cmd)
         agy_settings = json.loads(agy_cmd[agy_cmd.index("--settings") + 1])
         self.assertEqual(agy_settings["toolPermission"], "proceed-in-sandbox")
-        self.assertEqual(agy_settings["permissions"]["allow"], ["read_file(*)", "command(*)"])
+        self.assertEqual(
+            agy_settings["permissions"]["allow"], ["read_file(*)", "command(*)"]
+        )
         self.assertEqual(
             set(agy_settings["permissions"]["deny"]),
             {
                 "write_file(*)",
-                "command(git commit)", "command(git push)", "command(git reset)",
-                "command(git checkout)", "command(git switch)", "command(git merge)",
-                "command(git rebase)", "command(git cherry-pick)", "command(git clean)",
-                "command(rm)", "command(mv)", "command(cp)", "command(chmod)", "command(chown)",
+                "command(git commit)",
+                "command(git push)",
+                "command(git reset)",
+                "command(git checkout)",
+                "command(git switch)",
+                "command(git merge)",
+                "command(git rebase)",
+                "command(git cherry-pick)",
+                "command(git clean)",
+                "command(rm)",
+                "command(mv)",
+                "command(cp)",
+                "command(chmod)",
+                "command(chown)",
             },
         )
         self.assertNotIn("--add-dir", agy_cmd)
@@ -96,7 +121,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         agy_common_dir_cmd = _build_provider_cmd(
             "agy", "/bin/agy", "prompt", "{}", common_dir=Path("/repo/.git")
         )
-        agy_common_dir_settings = json.loads(agy_common_dir_cmd[agy_common_dir_cmd.index("--settings") + 1])
+        agy_common_dir_settings = json.loads(
+            agy_common_dir_cmd[agy_common_dir_cmd.index("--settings") + 1]
+        )
         self.assertEqual(
             agy_common_dir_settings["permissions"]["allow"],
             ["read_file(*)", "read_file(/repo/.git)", "command(*)"],
@@ -111,7 +138,15 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertNotIn("--disable-slash-commands", agy_cmd)
         self.assertEqual(agy_cmd[agy_cmd.index("--output-format") + 1], "stream-json")
 
-        claude_cmd = _build_provider_cmd("claude", "/bin/claude", "prompt", "{}", session_id="uuid-1", model="opus", effort="high")
+        claude_cmd = _build_provider_cmd(
+            "claude",
+            "/bin/claude",
+            "prompt",
+            "{}",
+            session_id="uuid-1",
+            model="opus",
+            effort="high",
+        )
         self.assertEqual(claude_cmd[claude_cmd.index("--model") + 1], "opus")
         self.assertEqual(claude_cmd[claude_cmd.index("--effort") + 1], "high")
         self.assertEqual(claude_cmd[claude_cmd.index("--permission-mode") + 1], "plan")
@@ -122,12 +157,20 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertIn("Agent", disallowed)
         self.assertEqual(claude_cmd[claude_cmd.index("--session-id") + 1], "uuid-1")
 
-        claude_resume_cmd = _build_provider_cmd("claude", "/bin/claude", "inc", "{}", resume_session_id="uuid-1")
-        self.assertEqual(claude_resume_cmd[claude_resume_cmd.index("--resume") + 1], "uuid-1")
+        claude_resume_cmd = _build_provider_cmd(
+            "claude", "/bin/claude", "inc", "{}", resume_session_id="uuid-1"
+        )
+        self.assertEqual(
+            claude_resume_cmd[claude_resume_cmd.index("--resume") + 1], "uuid-1"
+        )
         self.assertNotIn("--session-id", claude_resume_cmd)
 
-        agy_resume_cmd = _build_provider_cmd("agy", "/bin/agy", "inc", "{}", resume_session_id="conv-1")
-        self.assertEqual(agy_resume_cmd[agy_resume_cmd.index("--conversation") + 1], "conv-1")
+        agy_resume_cmd = _build_provider_cmd(
+            "agy", "/bin/agy", "inc", "{}", resume_session_id="conv-1"
+        )
+        self.assertEqual(
+            agy_resume_cmd[agy_resume_cmd.index("--conversation") + 1], "conv-1"
+        )
 
         codex_cmd = _build_provider_cmd(
             "codex",
@@ -136,7 +179,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             "{}",
             schema_file=Path("/tmp/s.json"),
             out_file=Path("/tmp/o.json"),
-            model="gpt-6-astra", effort="high",
+            model="gpt-6-astra",
+            effort="high",
         )
         self.assertIn("-s", codex_cmd)
         self.assertEqual(codex_cmd[codex_cmd.index("-s") + 1], "read-only")
@@ -149,7 +193,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             schema_file=Path("/tmp/s.json"),
             out_file=Path("/tmp/o.json"),
             resume_session_id="thread-1",
-            model="gpt-6-astra", effort="high",
+            model="gpt-6-astra",
+            effort="high",
         )
         self.assertEqual(codex_resume_cmd[:3], ["/bin/codex", "exec", "resume"])
         self.assertIn("thread-1", codex_resume_cmd)
@@ -157,7 +202,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(cmd[cmd.index("-m") + 1], "gpt-6-astra")
             effort_index = cmd.index('model_reasoning_effort="high"')
             self.assertEqual(cmd[effort_index - 1], "-c")
-            positional_index = cmd.index("thread-1") if "resume" in cmd else len(cmd) - 1
+            positional_index = (
+                cmd.index("thread-1") if "resume" in cmd else len(cmd) - 1
+            )
             self.assertLess(effort_index, positional_index)
             self.assertLess(cmd.index("-m"), positional_index)
 
@@ -194,7 +241,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             repo, origin = self._init_repo(tmp)
             app_py = repo / "services/catalog/app.py"
             app_py.parent.mkdir(parents=True)
-            app_py.write_text("def handle_get():\n    return {'ok': True}\n", encoding="utf-8")
+            app_py.write_text(
+                "def handle_get():\n    return {'ok': True}\n", encoding="utf-8"
+            )
             _git(repo, "add", "services/catalog/app.py")
             _git(repo, "commit", "-m", "feat: add handler")
 
@@ -214,7 +263,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     "summary": "read path lock",
                     "blocking_findings": [
                         {
-                            "rule_id": "peq.database-query-efficiency",
+                            "rule_id": "guard.database-query-efficiency",
                             "file": "services/catalog/app.py",
                             "line": 1,
                             "issue": "lock in GET",
@@ -247,11 +296,17 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("VERIFIED", chk_ok.stdout)
 
             other_clone = tmp / "other"
-            subprocess.run(["git", "clone", str(origin), str(other_clone)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "clone", str(origin), str(other_clone)],
+                check=True,
+                capture_output=True,
+            )
             _git(other_clone, "checkout", "main")
             _git(other_clone, "config", "user.email", "other@example.invalid")
             _git(other_clone, "config", "user.name", "Other")
-            (other_clone / "unrelated.txt").write_text("main advance\n", encoding="utf-8")
+            (other_clone / "unrelated.txt").write_text(
+                "main advance\n", encoding="utf-8"
+            )
             _git(other_clone, "add", "unrelated.txt")
             _git(other_clone, "commit", "-m", "advance main")
             _git(other_clone, "push", "origin", "main")
@@ -269,7 +324,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             )
             self.assertEqual(chk_after_rebase.returncode, 0)
 
-            app_py.write_text("def handle_get():\n    return {'ok': False}\n", encoding="utf-8")
+            app_py.write_text(
+                "def handle_get():\n    return {'ok': False}\n", encoding="utf-8"
+            )
             _git(repo, "add", "services/catalog/app.py")
             _git(repo, "commit", "--amend", "--no-edit")
             chk_after_edit = subprocess.run(
@@ -285,7 +342,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             tmp = Path(td)
             repo, _ = self._init_repo(tmp)
             (repo / "services/b").mkdir(parents=True)
-            (repo / "services/b/handler.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+            (repo / "services/b/handler.py").write_text(
+                "def f():\n    return 1\n", encoding="utf-8"
+            )
             _git(repo, "add", "services/b/handler.py")
             _git(repo, "commit", "-m", "feat: add b handler")
 
@@ -311,7 +370,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "        'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                 "        'summary': 'duplicate query in handler',\n"
                 "        'blocking_findings': [{\n"
-                "            'rule_id': 'peq.database-query-efficiency',\n"
+                "            'rule_id': 'guard.database-query-efficiency',\n"
                 "            'file': 'services/b/handler.py',\n"
                 "            'line': 1,\n"
                 "            'issue': 'dup read',\n"
@@ -332,8 +391,12 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "AGY_ARGV_FILE": str(argv_record),
             }
             probe_environment(
-                repo, env=base_env, priority_order=["agy", "codex"],
-                provider_models={"agy": {"model": "gemini-4-argon-high", "effort": "high"}},
+                repo,
+                env=base_env,
+                priority_order=["agy", "codex"],
+                provider_models={
+                    "agy": {"model": "gemini-4-argon-high", "effort": "high"}
+                },
             )
 
             nogo_res = run_architecture_review(
@@ -350,9 +413,13 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("--mode", recorded_argv)
             self.assertIn("plan", recorded_argv)
             self.assertIn("--sandbox", recorded_argv)
-            self.assertEqual(recorded_argv[recorded_argv.index("--model") + 1], "gemini-4-argon-high")
+            self.assertEqual(
+                recorded_argv[recorded_argv.index("--model") + 1], "gemini-4-argon-high"
+            )
             self.assertEqual(recorded_argv[recorded_argv.index("--effort") + 1], "high")
-            recorded_settings = json.loads(recorded_argv[recorded_argv.index("--settings") + 1])
+            recorded_settings = json.loads(
+                recorded_argv[recorded_argv.index("--settings") + 1]
+            )
             self.assertIn(
                 f"read_file({git_common_dir(repo)})",
                 recorded_settings["permissions"]["allow"],
@@ -410,7 +477,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     "-c",
                     "import time; \n"
                     "while True:\n"
-                    "    print('{\"type\": \"tick\"}', flush=True)\n"
+                    '    print(\'{"type": "tick"}\', flush=True)\n'
                     "    time.sleep(0.05)\n",
                 ],
                 cwd=REPO_ROOT,
@@ -460,21 +527,21 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             _write_exec(
                 fake_bin / "codex",
                 "#!/usr/bin/env bash\n"
-                "if [ \"$1\" = \"--version\" ]; then echo 'codex 0.1'; exit 0; fi\n"
+                'if [ "$1" = "--version" ]; then echo \'codex 0.1\'; exit 0; fi\n'
                 "echo 'codex quota exceeded' >&2; exit 1\n",
             )
             _write_exec(
                 fake_bin / "claude",
                 "#!/usr/bin/env bash\n"
-                "if [ \"$1\" = \"--version\" ]; then echo '2.0.0'; exit 0; fi\n"
+                'if [ "$1" = "--version" ]; then echo \'2.0.0\'; exit 0; fi\n'
                 "echo 'auth expired' >&2; exit 1\n",
             )
             _write_exec(
                 fake_bin / "agy",
                 "#!/usr/bin/env bash\n"
-                "if [ \"$1\" = \"--version\" ]; then echo '1.4.2'; exit 0; fi\n"
-                "printf '{\"event\":\"init\",\"conversation_id\":\"c1\"}\\n'\n"
-                "printf '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"structured_output\":{\"verdict\":\"GO\",\"summary\":\"ok via agy\",\"blocking_findings\":[],\"reviewed_head_sha\":\"%s\"}}}\\n' \"$(git rev-parse HEAD)\"\n",
+                'if [ "$1" = "--version" ]; then echo \'1.4.2\'; exit 0; fi\n'
+                'printf \'{"event":"init","conversation_id":"c1"}\\n\'\n'
+                'printf \'{"event":"result","result":{"status":"SUCCESS","structured_output":{"verdict":"GO","summary":"ok via agy","blocking_findings":[],"reviewed_head_sha":"%s"}}}\\n\' "$(git rev-parse HEAD)"\n',
             )
 
             env = {
@@ -503,10 +570,23 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "codex": {"model": "gpt-6-astra", "effort": "high"},
             }
             configured = subprocess.run(
-                [sys.executable, str(GATE_CLI), "probe", "--repo-root", str(repo),
-                 "--priority-order", "agy,codex", "--provider-model", "agy=gemini-4-argon-high:high",
-                 "--provider-model", "codex=gpt-6-astra:high"],
-                env=env, capture_output=True, text=True, check=False,
+                [
+                    sys.executable,
+                    str(GATE_CLI),
+                    "probe",
+                    "--repo-root",
+                    str(repo),
+                    "--priority-order",
+                    "agy,codex",
+                    "--provider-model",
+                    "agy=gemini-4-argon-high:high",
+                    "--provider-model",
+                    "codex=gpt-6-astra:high",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             self.assertEqual(configured.returncode, 0, configured.stderr)
             self.assertEqual(json.loads(configured.stdout)["provider_models"], models)
@@ -515,9 +595,14 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(reprobed["available_providers"], ["agy", "codex"])
             self.assertEqual(reprobed["preferred_provider"], "agy")
             self.assertEqual(reprobed["provider_models"], models)
-            merged = probe_environment(repo, env=env, provider_models={"codex": {"effort": "medium"}})
+            merged = probe_environment(
+                repo, env=env, provider_models={"codex": {"effort": "medium"}}
+            )
             self.assertEqual(merged["provider_models"]["agy"], models["agy"])
-            self.assertEqual(merged["provider_models"]["codex"], {"model": "gpt-6-astra", "effort": "medium"})
+            self.assertEqual(
+                merged["provider_models"]["codex"],
+                {"model": "gpt-6-astra", "effort": "medium"},
+            )
             probe_environment(repo, env=env, provider_models=models)
             record_working_provider(repo, "codex", str(fake_bin / "codex"), env=env)
             persisted = json.loads(cfg_file.read_text(encoding="utf-8"))
@@ -526,38 +611,104 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             ordered, payload = resolve_provider_order(repo, env=env)
             self.assertEqual([provider for provider, _ in ordered], ["codex", "agy"])
             self.assertEqual(payload, persisted)
-            for overrides in ({"explicit_provider": "claude"}, {"env": {**env, "THE_GUARD_REVIEW_PROVIDER": "claude"}}):
+            for overrides in (
+                {"explicit_provider": "claude"},
+                {"env": {**env, "THE_GUARD_REVIEW_PROVIDER": "claude"}},
+            ):
                 forced, _ = resolve_provider_order(repo, **{"env": env, **overrides})
-                self.assertEqual([provider for provider, _ in forced], ["claude", "codex", "agy"])
+                self.assertEqual(
+                    [provider for provider, _ in forced], ["claude", "codex", "agy"]
+                )
 
             record_working_provider(repo, "claude", str(fake_bin / "claude"), env=env)
             ordered, _ = resolve_provider_order(repo, env=env)
             self.assertEqual([provider for provider, _ in ordered], ["agy", "codex"])
             record_working_provider(repo, "agy", str(fake_bin / "agy"), env=env)
             with patch("the_guard.review.engine._invoke_provider") as invoke:
-                invoke.side_effect = [RuntimeError("quota exceeded"), ({"verdict": "GO", "summary": "ok", "blocking_findings": []}, "thread-1", "")]
+                invoke.side_effect = [
+                    RuntimeError("quota exceeded"),
+                    (
+                        {"verdict": "GO", "summary": "ok", "blocking_findings": []},
+                        "thread-1",
+                        "",
+                    ),
+                ]
                 result = run_architecture_review(repo, force=True, env=env)
             self.assertEqual((result.verdict, result.provider), ("GO", "codex"))
-            self.assertEqual([call.args[0] for call in invoke.call_args_list], ["agy", "codex"])
+            self.assertEqual(
+                [call.args[0] for call in invoke.call_args_list], ["agy", "codex"]
+            )
             for call in invoke.call_args_list:
-                self.assertEqual((call.kwargs["model"], call.kwargs["effort"]), tuple(models[call.args[0]][key] for key in ("model", "effort")))
+                self.assertEqual(
+                    (call.kwargs["model"], call.kwargs["effort"]),
+                    tuple(models[call.args[0]][key] for key in ("model", "effort")),
+                )
             with patch("the_guard.review.engine._invoke_provider") as invoke:
-                invoke.return_value = ({"verdict": "GO", "summary": "ok", "blocking_findings": []}, "thread-2", "")
-                result = run_architecture_review(repo, force=True, env={**env, "THE_GUARD_REVIEW_MODEL": "override", "THE_GUARD_REVIEW_EFFORT": "low"})
+                invoke.return_value = (
+                    {"verdict": "GO", "summary": "ok", "blocking_findings": []},
+                    "thread-2",
+                    "",
+                )
+                result = run_architecture_review(
+                    repo,
+                    force=True,
+                    env={
+                        **env,
+                        "THE_GUARD_REVIEW_MODEL": "override",
+                        "THE_GUARD_REVIEW_EFFORT": "low",
+                    },
+                )
             self.assertEqual((result.verdict, result.provider), ("GO", "codex"))
-            self.assertEqual((invoke.call_args.kwargs["model"], invoke.call_args.kwargs["effort"]), ("override", "low"))
+            self.assertEqual(
+                (invoke.call_args.kwargs["model"], invoke.call_args.kwargs["effort"]),
+                ("override", "low"),
+            )
 
-    def test_provider_configuration_normalization_and_environment_overrides(self) -> None:
-        self.assertEqual(_normalize_priority_order(["agy", "unknown", "codex", "agy", None]), ["agy", "codex"])
+    def test_provider_configuration_normalization_and_environment_overrides(
+        self,
+    ) -> None:
+        self.assertEqual(
+            _normalize_priority_order(["agy", "unknown", "codex", "agy", None]),
+            ["agy", "codex"],
+        )
         self.assertEqual(_normalize_priority_order("agy,codex"), [])
-        models = {"agy": {"model": " gemini-4-argon-high ", "effort": "high", "extra": "ignored"}, "codex": {"model": 7}, "unknown": {"model": "x"}}
-        self.assertEqual(_normalize_provider_models(models), {"agy": {"model": "gemini-4-argon-high", "effort": "high"}})
+        models = {
+            "agy": {
+                "model": " gemini-4-argon-high ",
+                "effort": "high",
+                "extra": "ignored",
+            },
+            "codex": {"model": 7},
+            "unknown": {"model": "x"},
+        }
+        self.assertEqual(
+            _normalize_provider_models(models),
+            {"agy": {"model": "gemini-4-argon-high", "effort": "high"}},
+        )
         self.assertEqual(_normalize_provider_models([]), {})
         payload = {"provider_models": models}
-        self.assertEqual(resolve_provider_model_config("agy", payload, {}), ("gemini-4-argon-high", "high"))
+        self.assertEqual(
+            resolve_provider_model_config("agy", payload, {}),
+            ("gemini-4-argon-high", "high"),
+        )
         self.assertEqual(resolve_provider_model_config("codex", payload, {}), ("", ""))
-        self.assertEqual(resolve_provider_model_config("agy", payload, {"THE_GUARD_REVIEW_MODEL": "override", "THE_GUARD_REVIEW_EFFORT": "low"}), ("override", "low"))
-        self.assertEqual(resolve_provider_model_config("agy", payload, {"THE_GUARD_REVIEW_MODEL": "override"}), ("override", "high"))
+        self.assertEqual(
+            resolve_provider_model_config(
+                "agy",
+                payload,
+                {
+                    "THE_GUARD_REVIEW_MODEL": "override",
+                    "THE_GUARD_REVIEW_EFFORT": "low",
+                },
+            ),
+            ("override", "low"),
+        )
+        self.assertEqual(
+            resolve_provider_model_config(
+                "agy", payload, {"THE_GUARD_REVIEW_MODEL": "override"}
+            ),
+            ("override", "high"),
+        )
 
     def test_build_review_prompt_loads_canonical_policy_rules(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -569,9 +720,11 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
             scope = collect_review_scope(repo)
             committed_policy = load_policy(repo, revision=scope.head_sha)
-            # Even if the working tree has uncommitted edits to CLAUDE.md, build_review_prompt
+            # Even if the working tree has uncommitted edits to AGENTS.md, build_review_prompt
             # reads strictly from the committed revision (scope.head_sha).
-            (repo / "CLAUDE.md").write_text("# uncommitted working tree edit\n", encoding="utf-8")
+            (repo / "AGENTS.md").write_text(
+                "# uncommitted working tree edit\n", encoding="utf-8"
+            )
             prompt = build_review_prompt(repo, scope)
             self.assertIn("Exhaustive Single-Pass Findings", prompt)
             self.assertIn("Pattern-Wide Sweep", prompt)
@@ -589,25 +742,52 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         previous = "1234567890abcdef" * 2 + "12345678"
         for reported in (expected, expected[:7], "  " + expected[:12].upper() + "  "):
             _verify_reviewed_head_sha({"reviewed_head_sha": reported}, expected)
-        for reported in (previous, expected[:6], expected + "abcd", "abcdefg", "", " ", None, 42):
+        for reported in (
+            previous,
+            expected[:6],
+            expected + "abcd",
+            "abcdefg",
+            "",
+            " ",
+            None,
+            42,
+        ):
             with self.assertRaises(RuntimeError):
                 _verify_reviewed_head_sha({"reviewed_head_sha": reported}, expected)
         with self.assertRaisesRegex(RuntimeError, "requires a non-empty"):
             _verify_reviewed_head_sha({}, expected)
         _verify_reviewed_head_sha(
-            {"reviewed_head_sha": expected, "summary": previous[:10] + " problems fixed"}, expected
+            {
+                "reviewed_head_sha": expected,
+                "summary": previous[:10] + " problems fixed",
+            },
+            expected,
         )
         with self.assertRaisesRegex(RuntimeError, "mismatched HEAD"):
-            _verify_reviewed_head_sha({"reviewed_head_sha": previous, "summary": expected}, expected)
+            _verify_reviewed_head_sha(
+                {"reviewed_head_sha": previous, "summary": expected}, expected
+            )
 
     def test_large_diff_preserves_full_stat_and_lists_omitted_files(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))
             (repo / "services/a").mkdir(parents=True)
-            (repo / "services/a/first.py").write_text("a = " + "'x' * 50\n" * 15, encoding="utf-8")
-            (repo / "services/a/second.py").write_text("b = " + "'y' * 50\n" * 30, encoding="utf-8")
-            (repo / "services/a/third.py").write_text("c = " + "'z' * 50\n" * 30, encoding="utf-8")
-            _git(repo, "add", "services/a/first.py", "services/a/second.py", "services/a/third.py")
+            (repo / "services/a/first.py").write_text(
+                "a = " + "'x' * 50\n" * 15, encoding="utf-8"
+            )
+            (repo / "services/a/second.py").write_text(
+                "b = " + "'y' * 50\n" * 30, encoding="utf-8"
+            )
+            (repo / "services/a/third.py").write_text(
+                "c = " + "'z' * 50\n" * 30, encoding="utf-8"
+            )
+            _git(
+                repo,
+                "add",
+                "services/a/first.py",
+                "services/a/second.py",
+                "services/a/third.py",
+            )
             _git(repo, "commit", "-m", "multi-file change")
 
             scope = collect_review_scope(repo)
@@ -626,10 +806,14 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("- `services/a/second.py`", rendered)
             self.assertIn("- `services/a/third.py`", rendered)
 
-    def test_policy_and_rule_files_are_reviewable_while_normal_docs_stay_exempt(self) -> None:
-        self.assertTrue(is_reviewable_path("CLAUDE.md"))
+    def test_policy_and_rule_files_are_reviewable_while_normal_docs_stay_exempt(
+        self,
+    ) -> None:
         self.assertTrue(is_reviewable_path("AGENTS.md"))
-        self.assertTrue(is_reviewable_path("docs/engineering-quality/rules/event-driven-execution.md"))
+        self.assertTrue(is_reviewable_path("AGENTS.md"))
+        self.assertTrue(
+            is_reviewable_path("docs/standards/rules/event-driven-execution.md")
+        )
         self.assertFalse(is_reviewable_path("docs/design.md"))
         self.assertFalse(is_reviewable_path("WORKING.md"))
 
@@ -638,8 +822,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             repo, _ = self._init_repo(Path(td))
             (repo / "services/a").mkdir(parents=True)
             (repo / "services/a/main.py").write_text("x = 1\n", encoding="utf-8")
-            (repo / "CLAUDE.md").write_text("# broken manifest without policy block\n", encoding="utf-8")
-            _git(repo, "add", "services/a/main.py", "CLAUDE.md")
+            (repo / "AGENTS.md").write_text(
+                "# broken manifest without policy block\n", encoding="utf-8"
+            )
+            _git(repo, "add", "services/a/main.py", "AGENTS.md")
             _git(repo, "commit", "-m", "commit broken policy")
             scope = collect_review_scope(repo)
             with self.assertRaises(PolicyError):
@@ -648,12 +834,24 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 run_architecture_review(
                     repo,
                     force=True,
-                    reviewer_fn=lambda _p: {"verdict": "GO", "summary": "should not run", "blocking_findings": []},
+                    reviewer_fn=lambda _p: {
+                        "verdict": "GO",
+                        "summary": "should not run",
+                        "blocking_findings": [],
+                    },
                 )
             self.assertIsNone(load_valid_receipt(repo, scope.patch_digest))
 
             cli_proc = subprocess.run(
-                [sys.executable, str(GATE_CLI), "review", "run", "--repo-root", str(repo), "--force"],
+                [
+                    sys.executable,
+                    str(GATE_CLI),
+                    "review",
+                    "run",
+                    "--repo-root",
+                    str(repo),
+                    "--force",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -671,9 +869,15 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "def test_a():\n" + "    assert True\n" * 40, encoding="utf-8"
             )
             (repo / "services/z/domain/service.py").write_text(
-                "def run_service():\n    return 'production_logic_inlined'\n", encoding="utf-8"
+                "def run_service():\n    return 'production_logic_inlined'\n",
+                encoding="utf-8",
             )
-            _git(repo, "add", "services/a/tests/test_alpha.py", "services/z/domain/service.py")
+            _git(
+                repo,
+                "add",
+                "services/a/tests/test_alpha.py",
+                "services/z/domain/service.py",
+            )
             _git(repo, "commit", "-m", "prod and test change")
 
             scope = collect_review_scope(repo)
@@ -690,33 +894,46 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("- `services/a/tests/test_alpha.py`", rendered)
 
     def test_stream_line_summarizer_extracts_tool_and_file_targets(self) -> None:
-        read_ev = json.dumps({
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "name": "Read",
-                        "input": {"file_path": "/workspace/services/catalog/daily/readers.py"},
-                    }
-                ]
-            },
-        })
+        read_ev = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {
+                                "file_path": "/workspace/services/catalog/daily/readers.py"
+                            },
+                        }
+                    ]
+                },
+            }
+        )
         self.assertEqual(_summarize_stream_line(read_ev), "Read(daily/readers.py)")
 
-        bash_ev = json.dumps({
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "name": "Bash",
-                        "input": {"command": "git -C /workspace diff a1b2..c3d4 -- services/catalog/ports.py"},
-                    }
-                ]
-            },
-        })
-        self.assertEqual(_summarize_stream_line(bash_ev), "Bash(git diff a1b2..c3d4 -- services/catalog/ports.py)")
+        bash_ev = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {
+                                "command": "git -C /workspace diff a1b2..c3d4 -- services/catalog/ports.py"
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+        self.assertEqual(
+            _summarize_stream_line(bash_ev),
+            "Bash(git diff a1b2..c3d4 -- services/catalog/ports.py)",
+        )
 
-        user_noise_ev = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result"}]}})
+        user_noise_ev = json.dumps(
+            {"type": "user", "message": {"content": [{"type": "tool_result"}]}}
+        )
         self.assertIsNone(_summarize_stream_line(user_noise_ev))

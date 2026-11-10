@@ -1,4 +1,5 @@
 # Contract: policy schema, severity, frontmatter and nonempty details must agree.
+import json
 import tempfile
 import textwrap
 import unittest
@@ -10,34 +11,73 @@ from the_guard.policy import PolicyError, load_policy
 MANIFEST = """\
 # Root
 
-<!-- product-engineering-quality:start -->
+<!-- the-guard-policy:start -->
 ```yaml
-schema: product-engineering-quality/v1
+schema: the-guard-policy/v1
 rules:
-  - id: peq.single-source-of-truth
+  - id: guard.single-source-of-truth
     severity: block
     scope: [frontend, backend]
     summary: One owner.
-    details: docs/engineering-quality/rules/single-source-of-truth.md
+    details: docs/standards/rules/single-source-of-truth.md
     checker: static-plus-review
 ```
-<!-- product-engineering-quality:end -->
+<!-- the-guard-policy:end -->
 """
 
 
 class PolicyLoaderTest(unittest.TestCase):
+    def test_custom_manifest_configuration_is_authoritative(self):
+        tmp, root = self.make_repo()
+        self.addCleanup(tmp.cleanup)
+        original = root / "AGENTS.md"
+        custom = (
+            original.read_text()
+            .replace("the-guard-policy", "custom-policy")
+            .replace("guard.", "custom.")
+        )
+        (root / "CLAUDE.md").write_text(custom)
+        original.unlink()
+        detail = root / "docs/standards/rules/single-source-of-truth.md"
+        detail.write_text(
+            detail.read_text()
+            .replace("guard.", "custom.")
+            .replace("AGENTS.md", "CLAUDE.md")
+        )
+        (root / ".guard").mkdir()
+        (root / ".guard/config.json").write_text(
+            json.dumps(
+                {
+                    "manifest_file": "CLAUDE.md",
+                    "manifest_tag": "custom-policy",
+                    "manifest_schema": "custom-policy/v1",
+                    "rule_id_prefix": "custom.",
+                }
+            )
+        )
+        self.assertEqual(load_policy(root).rules[0].id, "custom.single-source-of-truth")
+        for old, new in (
+            ("custom-policy/v1", "the-guard-policy/v1"),
+            ("custom.single", "guard.single"),
+        ):
+            with self.subTest(new=new):
+                (root / "CLAUDE.md").write_text(custom.replace(old, new))
+                with self.assertRaises(PolicyError):
+                    load_policy(root)
+        (root / "CLAUDE.md").write_text(custom)
+
     def make_repo(
         self,
         claude_text=MANIFEST,
-        detail_id="peq.single-source-of-truth",
-        detail_manifest="CLAUDE.md#product-engineering-quality-policy",
+        detail_id="guard.single-source-of-truth",
+        detail_manifest="AGENTS.md#engineering-quality-policy",
         create_detail=True,
         create_reviewer=False,
     ):
         tmp = tempfile.TemporaryDirectory()
         root = Path(tmp.name)
-        (root / "CLAUDE.md").write_text(claude_text, encoding="utf-8")
-        detail = root / "docs/engineering-quality/rules/single-source-of-truth.md"
+        (root / "AGENTS.md").write_text(claude_text, encoding="utf-8")
+        detail = root / "docs/standards/rules/single-source-of-truth.md"
         detail.parent.mkdir(parents=True)
         if create_detail:
             detail.write_text(
@@ -62,7 +102,7 @@ class PolicyLoaderTest(unittest.TestCase):
                     ---
                     id: reviewer-checklist
                     title: Product Quality Reviewer Checklist
-                    manifest: CLAUDE.md#product-engineering-quality-policy
+                    manifest: AGENTS.md#engineering-quality-policy
                     kind: reviewer-guidance
                     ---
 
@@ -77,8 +117,8 @@ class PolicyLoaderTest(unittest.TestCase):
         tmp, root = self.make_repo()
         self.addCleanup(tmp.cleanup)
         policy = load_policy(root)
-        self.assertEqual(policy.schema, "product-engineering-quality/v1")
-        self.assertEqual(policy.rules[0].id, "peq.single-source-of-truth")
+        self.assertEqual(policy.schema, "the-guard-policy/v1")
+        self.assertEqual(policy.rules[0].id, "guard.single-source-of-truth")
         self.assertEqual(policy.rules[0].scope, ("frontend", "backend"))
 
     def test_missing_policy_block_fails(self):
@@ -88,7 +128,7 @@ class PolicyLoaderTest(unittest.TestCase):
             load_policy(root)
 
     def test_unsupported_schema_fails(self):
-        text = MANIFEST.replace("product-engineering-quality/v1", "other/v1")
+        text = MANIFEST.replace("the-guard-policy/v1", "other/v1")
         tmp, root = self.make_repo(claude_text=text)
         self.addCleanup(tmp.cleanup)
         with self.assertRaisesRegex(PolicyError, "Unsupported policy schema"):
@@ -103,17 +143,17 @@ class PolicyLoaderTest(unittest.TestCase):
 
     def test_duplicate_rule_id_fails(self):
         text = MANIFEST.replace(
-            "```\n<!-- product-engineering-quality:end -->",
+            "```\n<!-- the-guard-policy:end -->",
             textwrap.dedent(
                 """\
-                  - id: peq.single-source-of-truth
+                  - id: guard.single-source-of-truth
                     severity: block
                     scope: [frontend]
                     summary: Duplicate.
-                    details: docs/engineering-quality/rules/single-source-of-truth.md
+                    details: docs/standards/rules/single-source-of-truth.md
                     checker: static
                 ```
-                <!-- product-engineering-quality:end -->"""
+                <!-- the-guard-policy:end -->"""
             ),
         )
         tmp, root = self.make_repo(claude_text=text)
@@ -123,8 +163,8 @@ class PolicyLoaderTest(unittest.TestCase):
 
     def test_duplicate_top_level_schema_fails(self):
         text = MANIFEST.replace(
-            "schema: product-engineering-quality/v1",
-            "schema: product-engineering-quality/v1\nschema: product-engineering-quality/v1",
+            "schema: the-guard-policy/v1",
+            "schema: the-guard-policy/v1\nschema: the-guard-policy/v1",
         )
         tmp, root = self.make_repo(claude_text=text)
         self.addCleanup(tmp.cleanup)
@@ -142,15 +182,15 @@ class PolicyLoaderTest(unittest.TestCase):
             load_policy(root)
 
     def test_detail_id_mismatch_fails(self):
-        tmp, root = self.make_repo(detail_id="peq.other")
+        tmp, root = self.make_repo(detail_id="guard.other")
         self.addCleanup(tmp.cleanup)
         with self.assertRaisesRegex(PolicyError, "frontmatter id"):
             load_policy(root)
 
     def test_unsupported_top_level_field_after_rules_fails(self):
         text = MANIFEST.replace(
-            "```\n<!-- product-engineering-quality:end -->",
-            "unexpected: true\n```\n<!-- product-engineering-quality:end -->",
+            "```\n<!-- the-guard-policy:end -->",
+            "unexpected: true\n```\n<!-- the-guard-policy:end -->",
         )
         tmp, root = self.make_repo(claude_text=text)
         self.addCleanup(tmp.cleanup)
@@ -168,7 +208,9 @@ class PolicyLoaderTest(unittest.TestCase):
             load_policy(root)
 
     def test_quoted_scope_items_are_normalized(self):
-        text = MANIFEST.replace("scope: [frontend, backend]", 'scope: ["frontend", "backend"]')
+        text = MANIFEST.replace(
+            "scope: [frontend, backend]", 'scope: ["frontend", "backend"]'
+        )
         tmp, root = self.make_repo(claude_text=text)
         self.addCleanup(tmp.cleanup)
         policy = load_policy(root)
@@ -183,7 +225,7 @@ class PolicyLoaderTest(unittest.TestCase):
 
     def test_details_path_traversal_fails(self):
         text = MANIFEST.replace(
-            "docs/engineering-quality/rules/single-source-of-truth.md",
+            "docs/standards/rules/single-source-of-truth.md",
             "../outside.md",
         )
         tmp, root = self.make_repo(claude_text=text)
@@ -200,15 +242,15 @@ class PolicyLoaderTest(unittest.TestCase):
     def test_duplicate_frontmatter_id_fails(self):
         tmp, root = self.make_repo()
         self.addCleanup(tmp.cleanup)
-        detail = root / "docs/engineering-quality/rules/single-source-of-truth.md"
+        detail = root / "docs/standards/rules/single-source-of-truth.md"
         detail.write_text(
             textwrap.dedent(
                 """\
                 ---
-                id: peq.single-source-of-truth
-                id: peq.single-source-of-truth
+                id: guard.single-source-of-truth
+                id: guard.single-source-of-truth
                 title: Single Source
-                manifest: CLAUDE.md#product-engineering-quality-policy
+                manifest: AGENTS.md#engineering-quality-policy
                 ---
 
                 # Body
@@ -222,15 +264,15 @@ class PolicyLoaderTest(unittest.TestCase):
     def test_duplicate_frontmatter_manifest_fails(self):
         tmp, root = self.make_repo()
         self.addCleanup(tmp.cleanup)
-        detail = root / "docs/engineering-quality/rules/single-source-of-truth.md"
+        detail = root / "docs/standards/rules/single-source-of-truth.md"
         detail.write_text(
             textwrap.dedent(
                 """\
                 ---
-                id: peq.single-source-of-truth
+                id: guard.single-source-of-truth
                 title: Single Source
-                manifest: CLAUDE.md#product-engineering-quality-policy
-                manifest: CLAUDE.md#product-engineering-quality-policy
+                manifest: AGENTS.md#engineering-quality-policy
+                manifest: AGENTS.md#engineering-quality-policy
                 ---
 
                 # Body
@@ -251,7 +293,9 @@ class PolicyLoaderTest(unittest.TestCase):
         tmp, root = self.make_repo(create_reviewer=True)
         self.addCleanup(tmp.cleanup)
         policy = load_policy(root)
-        self.assertEqual([rule.id for rule in policy.rules], ["peq.single-source-of-truth"])
+        self.assertEqual(
+            [rule.id for rule in policy.rules], ["guard.single-source-of-truth"]
+        )
 
     def test_quoted_scalar_value_is_normalized(self):
         text = MANIFEST.replace("summary: One owner.", 'summary: "One owner."')
@@ -268,7 +312,9 @@ class PolicyLoaderTest(unittest.TestCase):
             load_policy(root)
 
     def test_malformed_quoted_scope_item_fails(self):
-        text = MANIFEST.replace("scope: [frontend, backend]", 'scope: ["frontend, backend]')
+        text = MANIFEST.replace(
+            "scope: [frontend, backend]", 'scope: ["frontend, backend]'
+        )
         tmp, root = self.make_repo(claude_text=text)
         self.addCleanup(tmp.cleanup)
         with self.assertRaisesRegex(PolicyError, "Malformed quoted value|quote"):

@@ -41,13 +41,18 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
-    def test_conversational_incremental_review_resumes_session_and_persists_logs(self) -> None:
+    def test_conversational_incremental_review_resumes_session_and_persists_logs(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             repo, _ = self._init_repo(tmp)
             (repo / "services/catalog").mkdir(parents=True)
             readers_py = repo / "services/catalog/readers.py"
-            readers_py.write_text("def read_qualification_obligations():\n    return []\n", encoding="utf-8")
+            readers_py.write_text(
+                "def read_qualification_obligations():\n    return []\n",
+                encoding="utf-8",
+            )
             _git(repo, "add", "services/catalog/readers.py")
             _git(repo, "commit", "-m", "round 1 commit with dead shell")
 
@@ -76,7 +81,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "        'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                 "        'summary': 'dead shell remained',\n"
                 "        'blocking_findings': [{\n"
-                "            'rule_id': 'peq.code-organization',\n"
+                "            'rule_id': 'guard.code-organization',\n"
                 "            'file': 'services/catalog/readers.py',\n"
                 "            'line': 1,\n"
                 "            'issue': 'dead shell read_qualification_obligations',\n"
@@ -111,7 +116,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(saved_session.round_count, 1)
             self.assertEqual(len(saved_session.last_blocking_findings), 1)
 
-            readers_py.write_text("def read_completion_tail():\n    return {'tail': 1}\n", encoding="utf-8")
+            readers_py.write_text(
+                "def read_completion_tail():\n    return {'tail': 1}\n",
+                encoding="utf-8",
+            )
             _git(repo, "add", "services/catalog/readers.py")
             _git(repo, "commit", "-m", "round 2 remove dead shell")
 
@@ -122,37 +130,65 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(r2.session_id, r1.session_id)
             self.assertIsNotNone(load_valid_receipt(repo, r2.patch_digest))
 
-            calls = [json.loads(line) for line in calls_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+            calls = [
+                json.loads(line)
+                for line in calls_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0]["resume_id"], "")
             self.assertEqual(calls[1]["resume_id"], r1.session_id)
             self.assertIn("Continue round 2", calls[1]["prompt"])
-            self.assertIn("dead shell read_qualification_obligations", calls[1]["prompt"])
+            self.assertIn(
+                "dead shell read_qualification_obligations", calls[1]["prompt"]
+            )
             self.assertIn("read_completion_tail", calls[1]["prompt"])
             self.assertNotIn("Session Batch Read Plan", calls[1]["prompt"])
-            for contract_field in ("reviewed_head_sha", "prior_unresolved", "introduced_by_delta"):
+            for contract_field in (
+                "reviewed_head_sha",
+                "prior_unresolved",
+                "introduced_by_delta",
+            ):
                 self.assertIn(contract_field, calls[1]["prompt"])
-            self.assertEqual(saved_session.last_blocking_findings[0].finding_origin, "initial_full_scope")
+            self.assertEqual(
+                saved_session.last_blocking_findings[0].finding_origin,
+                "initial_full_scope",
+            )
 
             log_dir = review_logs_dir(repo, env)
             self.assertTrue((log_dir / "latest.json").is_file())
             self.assertTrue((log_dir / "index.jsonl").is_file())
-            index_entries = [json.loads(l) for l in (log_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()]
+            index_entries = [
+                json.loads(l)
+                for l in (log_dir / "index.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
             self.assertEqual(len(index_entries), 2)
             self.assertEqual(index_entries[0]["mode"], "full")
             self.assertEqual(index_entries[1]["mode"], "incremental")
 
             logger = ReviewRunLogger(
-                repo / ".git", worktree_path=repo, branch="topic", provider="claude",
-                mode="full", merge_base=r2.merge_base, head_sha=r2.head_sha,
-                patch_digest=r2.patch_digest, reviewable_file_count=1, prompt="review", env=env,
+                repo / ".git",
+                worktree_path=repo,
+                branch="topic",
+                provider="claude",
+                mode="full",
+                merge_base=r2.merge_base,
+                head_sha=r2.head_sha,
+                patch_digest=r2.patch_digest,
+                reviewable_file_count=1,
+                prompt="review",
+                env=env,
             )
             logger.finish(status="completed")
             # Quiet worktrees retain their evidence despite a much noisier peer.
             for idx in range(120):
                 prefix = f"retention-{idx:03d}"
                 meta = log_dir / f"{prefix}.meta.json"
-                meta.write_text(json.dumps({"worktree": "quiet" if idx < 12 else "noisy"}))
+                meta.write_text(
+                    json.dumps({"worktree": "quiet" if idx < 12 else "noisy"})
+                )
                 os.utime(meta, (1000 + idx, 1000 + idx))
                 for suffix in (".prompt.md", ".events.jsonl"):
                     (log_dir / f"{prefix}{suffix}").write_text("evidence")
@@ -173,16 +209,22 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             for idx in range(12):
                 expected = idx >= 4
                 for suffix in (".meta.json", ".prompt.md", ".events.jsonl"):
-                    self.assertEqual((log_dir / f"retention-{idx:03d}{suffix}").exists(), expected)
+                    self.assertEqual(
+                        (log_dir / f"retention-{idx:03d}{suffix}").exists(), expected
+                    )
 
-    def test_unverified_session_resume_falls_back_to_full_review_before_issuing_go(self) -> None:
+    def test_unverified_session_resume_falls_back_to_full_review_before_issuing_go(
+        self,
+    ) -> None:
         for failure_mode in ("session", "sha", "missing"):
             with tempfile.TemporaryDirectory() as td:
                 tmp = Path(td)
                 repo, _ = self._init_repo(tmp)
                 (repo / "services/catalog").mkdir(parents=True)
                 readers_py = repo / "services/catalog/readers.py"
-                readers_py.write_text("def legacy_fn():\n    return []\n", encoding="utf-8")
+                readers_py.write_text(
+                    "def legacy_fn():\n    return []\n", encoding="utf-8"
+                )
                 _git(repo, "add", "services/catalog/readers.py")
                 _git(repo, "commit", "-m", "round 1 commit")
 
@@ -212,7 +254,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     "        'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                     "        'summary': 'legacy shell',\n"
                     "        'blocking_findings': [{\n"
-                    "            'rule_id': 'peq.code-organization',\n"
+                    "            'rule_id': 'guard.code-organization',\n"
                     "            'file': 'services/catalog/readers.py',\n"
                     "            'line': 1,\n"
                     "            'issue': 'legacy_fn is dead',\n"
@@ -247,7 +289,9 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 self.assertEqual(r1.verdict, "NO-GO")
                 self.assertEqual(r1.session_id, "conv-round-1")
 
-                readers_py.write_text("def active_fn():\n    return {'ok': True}\n", encoding="utf-8")
+                readers_py.write_text(
+                    "def active_fn():\n    return {'ok': True}\n", encoding="utf-8"
+                )
                 _git(repo, "add", "services/catalog/readers.py")
                 _git(repo, "commit", "-m", "round 2 replace legacy_fn")
 
@@ -260,7 +304,11 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 self.assertEqual(r2.summary, "verified full review go")
                 self.assertIsNotNone(load_valid_receipt(repo, r2.patch_digest))
 
-                calls = [json.loads(l) for l in calls_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+                calls = [
+                    json.loads(l)
+                    for l in calls_file.read_text(encoding="utf-8").splitlines()
+                    if l.strip()
+                ]
                 self.assertEqual(len(calls), 3)
                 self.assertEqual(calls[1]["resume_id"], "conv-round-1")
                 self.assertEqual(calls[2]["resume_id"], "")
@@ -271,27 +319,50 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 self.assertEqual(saved.last_head_sha, r2.head_sha)
                 self.assertEqual(saved.last_summary, "verified full review go")
                 failures = [
-                    json.loads(p.read_text()) for p in review_logs_dir(repo, env).glob("*.meta.json")
+                    json.loads(p.read_text())
+                    for p in review_logs_dir(repo, env).glob("*.meta.json")
                     if json.loads(p.read_text())["status"] == "failed"
                 ]
                 self.assertEqual(len(failures), 1)
-                expected_error = {"session": "continuation", "sha": "mismatched HEAD", "missing": "requires a non-empty"}
+                expected_error = {
+                    "session": "continuation",
+                    "sha": "mismatched HEAD",
+                    "missing": "requires a non-empty",
+                }
                 self.assertIn(expected_error[failure_mode], failures[0]["error"])
 
-    def test_session_driven_scope_manifest_folds_tests_and_generates_batch_commands(self) -> None:
+    def test_session_driven_scope_manifest_folds_tests_and_generates_batch_commands(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             repo, _ = self._init_repo(tmp)
             prod_file = repo / "services/catalog/service.py"
-            ui_test_file = repo / "services/client/app-ios/SampleUITests/LoginUITests.swift"
-            contract_test_file = repo / "services/client/app-ios/SampleContractTests/AuthContractTests.swift"
+            ui_test_file = (
+                repo / "services/client/app-ios/SampleUITests/LoginUITests.swift"
+            )
+            contract_test_file = (
+                repo
+                / "services/client/app-ios/SampleContractTests/AuthContractTests.swift"
+            )
             lock_file = repo / "services/catalog/uv.lock"
             inventory_file = repo / "services/catalog/tests/test_tier_inventory.txt"
-            for f in (prod_file, ui_test_file, contract_test_file, lock_file, inventory_file):
+            for f in (
+                prod_file,
+                ui_test_file,
+                contract_test_file,
+                lock_file,
+                inventory_file,
+            ):
                 f.parent.mkdir(parents=True, exist_ok=True)
-            prod_file.write_text("def handle_sync():\n    return 'SECRET_INLINE_DIFF_MARKER'\n", encoding="utf-8")
+            prod_file.write_text(
+                "def handle_sync():\n    return 'SECRET_INLINE_DIFF_MARKER'\n",
+                encoding="utf-8",
+            )
             ui_test_file.write_text("class LoginUITests {}\n", encoding="utf-8")
-            contract_test_file.write_text("class AuthContractTests {}\n", encoding="utf-8")
+            contract_test_file.write_text(
+                "class AuthContractTests {}\n", encoding="utf-8"
+            )
             lock_file.write_text("version = 1\n", encoding="utf-8")
             inventory_file.write_text("tests/unit/test_a.py\n", encoding="utf-8")
             _git(repo, "add", ".")
@@ -305,7 +376,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             # Production file is listed in core production manifest and batch git diff command
             self.assertIn("services/catalog/service.py", prompt)
             self.assertIn("Session Batch Read Plan", prompt)
-            self.assertIn(f"git -C {repo} diff {scope.merge_base}..{scope.head_sha} -- ':(literal)services/catalog/service.py'", prompt)
+            self.assertIn(
+                f"git -C {repo} diff {scope.merge_base}..{scope.head_sha} -- ':(literal)services/catalog/service.py'",
+                prompt,
+            )
             # UITests and ContractTests are grouped into Tier 2 and Test Batch 1/1
             self.assertIn("tests/fixtures/locks 2", prompt)
             self.assertIn("[Test/fixture/lock directory summary and files]", prompt)
@@ -315,11 +389,20 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertIn("Git Snapshot Isolation", prompt)
             # Fail-closed when path list does not match git diff or git revision is invalid
             with self.assertRaises(RuntimeError):
-                _parse_numstat_entries(repo, scope.merge_base, scope.head_sha, (*scope.reviewable_files, "nonexistent.py"))
+                _parse_numstat_entries(
+                    repo,
+                    scope.merge_base,
+                    scope.head_sha,
+                    (*scope.reviewable_files, "nonexistent.py"),
+                )
             with self.assertRaises(RuntimeError):
-                _parse_numstat_entries(repo, "0000000000000000000000000000000000000000", scope.head_sha)
+                _parse_numstat_entries(
+                    repo, "0000000000000000000000000000000000000000", scope.head_sha
+                )
 
-    def test_conversational_rebuttal_on_unchanged_head_resumes_session_and_issues_go(self) -> None:
+    def test_conversational_rebuttal_on_unchanged_head_resumes_session_and_issues_go(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             repo, origin = self._init_repo(tmp)
@@ -334,7 +417,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
             calls_file = tmp / "claude_rebuttal_calls.jsonl"
             (fake_home / ".claude").mkdir(parents=True)
-            (fake_home / ".claude.json").write_text('{"oauthAccount": {"emailAddress": "dev@sensebeing.ai"}}', encoding="utf-8")
+            (fake_home / ".claude.json").write_text(
+                '{"oauthAccount": {"emailAddress": "dev@sensebeing.ai"}}',
+                encoding="utf-8",
+            )
 
             _write_exec(
                 fake_bin / "claude",
@@ -357,7 +443,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "            'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                 "            'summary': 'suspected missing migration',\n"
                 "            'blocking_findings': [{\n"
-                "                'rule_id': 'peq.data-modeling',\n"
+                "                'rule_id': 'guard.data-modeling',\n"
                 "                'file': 'services/catalog/service.py',\n"
                 "                'line': 1,\n"
                 "                'issue': 'thought legacy table still existed',\n"
@@ -399,35 +485,51 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(r2.session_id, "sess-rebuttal-1")
             self.assertIsNotNone(load_valid_receipt(repo, r2.patch_digest))
 
-            calls = [json.loads(l) for l in calls_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+            calls = [
+                json.loads(l)
+                for l in calls_file.read_text(encoding="utf-8").splitlines()
+                if l.strip()
+            ]
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[1]["resume_id"], "sess-rebuttal-1")
             self.assertIn("Evidence-Based Rebuttal Resolution", calls[1]["prompt"])
             self.assertIn("HEAD unchanged", calls[1]["prompt"])
-            self.assertIn("Migration 699 already dropped the legacy table", calls[1]["prompt"])
+            self.assertIn(
+                "Migration 699 already dropped the legacy table", calls[1]["prompt"]
+            )
 
             # Advance origin/main (changing merge_base) and merge with only a non-reviewable doc change
             # (so patch_digest changes, but zero reviewable files changed):
             # Must automatically carry forward the GO receipt without invoking the LLM.
             other_clone = tmp / "other_rebuttal"
-            subprocess.run(["git", "clone", str(origin), str(other_clone)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "clone", str(origin), str(other_clone)],
+                check=True,
+                capture_output=True,
+            )
             _git(other_clone, "checkout", "main")
             _git(other_clone, "config", "user.email", "other@example.invalid")
             _git(other_clone, "config", "user.name", "Other")
             (other_clone / "services/other").mkdir(parents=True)
-            (other_clone / "services/other/upstream.py").write_text("UPSTREAM = 1\n", encoding="utf-8")
+            (other_clone / "services/other/upstream.py").write_text(
+                "UPSTREAM = 1\n", encoding="utf-8"
+            )
             _git(other_clone, "add", "services/other/upstream.py")
             _git(other_clone, "commit", "-m", "advance main")
             _git(other_clone, "push", "origin", "main")
 
             _git(repo, "fetch", "origin", "main")
             _git(repo, "merge", "--no-commit", "--no-ff", "origin/main")
-            (repo / "WORKING.md").write_text("# updated working note during merge\n", encoding="utf-8")
+            (repo / "WORKING.md").write_text(
+                "# updated working note during merge\n", encoding="utf-8"
+            )
             _git(repo, "add", "WORKING.md")
             _git(repo, "commit", "-m", "merge origin/main with doc note")
             merged_scope = collect_review_scope(repo)
             self.assertNotEqual(merged_scope.patch_digest, r2.patch_digest)
-            preview_carried = resolve_or_carry_forward_receipt(repo, merged_scope, persist=False)
+            preview_carried = resolve_or_carry_forward_receipt(
+                repo, merged_scope, persist=False
+            )
             self.assertIsNotNone(preview_carried)
             self.assertIsNone(load_valid_receipt(repo, merged_scope.patch_digest))
             carried = resolve_or_carry_forward_receipt(repo, merged_scope, persist=True)
@@ -436,7 +538,13 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(carried["mode"], "carried-forward")
             self.assertIsNotNone(load_valid_receipt(repo, merged_scope.patch_digest))
             self.assertEqual(
-                len([l for l in calls_file.read_text(encoding="utf-8").splitlines() if l.strip()]),
+                len(
+                    [
+                        l
+                        for l in calls_file.read_text(encoding="utf-8").splitlines()
+                        if l.strip()
+                    ]
+                ),
                 2,
             )
 
@@ -453,11 +561,18 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 reviewer_note="Note attached alongside new code after merge.",
             )
             self.assertEqual(r3.mode, "incremental")
-            calls_after = [json.loads(l) for l in calls_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+            calls_after = [
+                json.loads(l)
+                for l in calls_file.read_text(encoding="utf-8").splitlines()
+                if l.strip()
+            ]
             self.assertEqual(len(calls_after), 3)
             self.assertEqual(calls_after[2]["resume_id"], "sess-rebuttal-1")
             self.assertNotIn("HEAD unchanged", calls_after[2]["prompt"])
-            self.assertIn("Incremental files (1): `services/catalog/service.py`", calls_after[2]["prompt"])
+            self.assertIn(
+                "Incremental files (1): `services/catalog/service.py`",
+                calls_after[2]["prompt"],
+            )
             self.assertNotIn("services/other/upstream.py", calls_after[2]["prompt"])
 
             # If session.merge_base is not an ancestor of scope.merge_base (while last_patch_digest still
@@ -486,35 +601,56 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 reviewer_note="Note with non-ancestor merge_base.",
             )
             self.assertEqual(r4.mode, "full")
-            calls_final = [json.loads(l) for l in calls_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+            calls_final = [
+                json.loads(l)
+                for l in calls_file.read_text(encoding="utf-8").splitlines()
+                if l.strip()
+            ]
             self.assertEqual(len(calls_final), 4)
             self.assertEqual(calls_final[3]["resume_id"], "")
-            self.assertIn("Different review baseline: review the full current branch scope", calls_final[3]["prompt"])
+            self.assertIn(
+                "Different review baseline: review the full current branch scope",
+                calls_final[3]["prompt"],
+            )
 
-    def test_carry_forward_fails_closed_on_delta_enumeration_error_and_glob_path_diff_failure(self) -> None:
+    def test_carry_forward_fails_closed_on_delta_enumeration_error_and_glob_path_diff_failure(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             repo, origin = self._init_repo(tmp)
             glob_dir = repo / "services/catalog/[slug]"
             glob_dir.mkdir(parents=True)
             glob_file = glob_dir / "handler.py"
-            glob_file.write_text("def handle():\n    return 'branch_v1'\n", encoding="utf-8")
+            glob_file.write_text(
+                "def handle():\n    return 'branch_v1'\n", encoding="utf-8"
+            )
             _git(repo, "add", "services/catalog/[slug]/handler.py")
             _git(repo, "commit", "-m", "add glob path handler")
 
             r1 = run_architecture_review(
                 repo,
-                reviewer_fn=lambda _p: {"verdict": "GO", "summary": "glob ok", "blocking_findings": []},
+                reviewer_fn=lambda _p: {
+                    "verdict": "GO",
+                    "summary": "glob ok",
+                    "blocking_findings": [],
+                },
             )
             self.assertEqual(r1.verdict, "GO")
 
             other = tmp / "other_glob"
-            subprocess.run(["git", "clone", str(origin), str(other)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "clone", str(origin), str(other)],
+                check=True,
+                capture_output=True,
+            )
             _git(other, "checkout", "main")
             _git(other, "config", "user.email", "other@example.invalid")
             _git(other, "config", "user.name", "Other")
             (other / "services/other").mkdir(parents=True)
-            (other / "services/other/base.py").write_text("BASE = 1\n", encoding="utf-8")
+            (other / "services/other/base.py").write_text(
+                "BASE = 1\n", encoding="utf-8"
+            )
             _git(other, "add", "services/other/base.py")
             _git(other, "commit", "-m", "advance main")
             _git(other, "push", "origin", "main")
@@ -534,15 +670,28 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             # must fail closed (return None, no receipt written, check-push exits 2).
             real_git = subprocess.run
 
-            def _failing_raw_diff(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-                if len(cmd) >= 3 and cmd[1] == "diff" and "--raw" in cmd and f"{session.merge_base}..{session.last_head_sha}" in cmd:
-                    return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: simulated corrupt pack")
+            def _failing_raw_diff(
+                cmd: list[str], *args: object, **kwargs: object
+            ) -> subprocess.CompletedProcess[bytes]:
+                if (
+                    len(cmd) >= 3
+                    and cmd[1] == "diff"
+                    and "--raw" in cmd
+                    and f"{session.merge_base}..{session.last_head_sha}" in cmd
+                ):
+                    return subprocess.CompletedProcess(
+                        cmd, 128, b"", b"fatal: simulated corrupt pack"
+                    )
                 return real_git(cmd, *args, **kwargs)  # type: ignore[arg-type]
 
-            with mock.patch("the_guard.review.runner.subprocess.run", side_effect=_failing_raw_diff):
+            with mock.patch(
+                "the_guard.review.runner.subprocess.run", side_effect=_failing_raw_diff
+            ):
                 with self.assertRaises(RuntimeError):
                     _collect_branch_delta(repo, merged_scope, session)
-                self.assertIsNone(collect_incremental_scope(repo, merged_scope, session))
+                self.assertIsNone(
+                    collect_incremental_scope(repo, merged_scope, session)
+                )
                 self.assertIsNone(resolve_or_carry_forward_receipt(repo, merged_scope))
             self.assertIsNone(load_valid_receipt(repo, merged_scope.patch_digest))
 
@@ -560,7 +709,9 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             # 2) Modify the glob-path file after merge so its blob differs from session.last_head_sha:
             # Even if per-file diff is normal or if per-file diff fails, the file must be treated as changed
             # and resolve_or_carry_forward_receipt must refuse to carry forward.
-            glob_file.write_text("def handle():\n    return 'branch_v2'\n", encoding="utf-8")
+            glob_file.write_text(
+                "def handle():\n    return 'branch_v2'\n", encoding="utf-8"
+            )
             _git(repo, "add", "services/catalog/[slug]/handler.py")
             _git(repo, "commit", "-m", "modify glob path handler")
             glob_scope = collect_review_scope(repo)
@@ -580,12 +731,16 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 )
             )
 
-    def test_transient_prompt_too_long_failure_preserves_claude_as_preferred_provider(self) -> None:
+    def test_transient_prompt_too_long_failure_preserves_claude_as_preferred_provider(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             repo, _ = self._init_repo(tmp)
             (repo / "services/catalog").mkdir(parents=True)
-            (repo / "services/catalog/service.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "services/catalog/service.py").write_text(
+                "x = 1\n", encoding="utf-8"
+            )
             _git(repo, "add", "services/catalog/service.py")
             _git(repo, "commit", "-m", "commit")
 
@@ -593,7 +748,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             fake_bin = fake_home / ".local/bin"
             cfg_file = fake_home / ".config/sensebeing/arch-review-agent.json"
             (fake_home / ".claude").mkdir(parents=True)
-            (fake_home / ".claude.json").write_text('{"oauthAccount": {"emailAddress": "dev@sensebeing.ai"}}', encoding="utf-8")
+            (fake_home / ".claude.json").write_text(
+                '{"oauthAccount": {"emailAddress": "dev@sensebeing.ai"}}',
+                encoding="utf-8",
+            )
             (fake_home / ".gemini/antigravity-cli").mkdir(parents=True)
 
             _write_exec(

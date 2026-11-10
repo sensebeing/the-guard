@@ -1,6 +1,8 @@
 """Structured static findings and explicit, reasoned line exemptions."""
-from dataclasses import dataclass
+
 import re
+from dataclasses import dataclass
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -9,4 +11,16 @@ class Finding:
     line: int
     message: str
 
-EXEMPT_RE = re.compile(r"(?:guard|peq)-exempt\s+([a-z][a-z0-9_.-]+):\s+(.{8,})")
+
+def exempt_pattern(exempt_tag: str = "guard-exempt") -> re.Pattern[str]:
+    return re.compile(rf"{re.escape(exempt_tag)}\s+([a-z][a-z0-9_.-]+):\s+(.{{8,}})")
+
+
+EXEMPT_RE = exempt_pattern()
+
+
+def _line_exempts_rule(
+    line: str, rule_id: str, exempt_tag: str = "guard-exempt"
+) -> bool:
+    match = exempt_pattern(exempt_tag).search(line)
+    return bool(match and match.group(1).split(".", 1)[-1] == rule_id.split(".", 1)[-1])

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import difflib
-from pathlib import Path
 
-from ..git_helpers import BaseFileReader
+from ..git_helpers import changed_files as changed_files
 
 
 def _compute_changed_lines(base_text: str, current_text: str) -> set[int]:
@@ -17,13 +16,3 @@ def _compute_changed_lines(base_text: str, current_text: str) -> set[int]:
         if tag in {"replace", "insert"}:
             changed.update(range(j1 + 1, j2 + 1))
     return changed
-
-
-def _read_base_blob(
-    repo_root: Path,
-    base: str,
-    rel_path: str,
-    submodules: tuple[str, ...],
-    reader: BaseFileReader | None = None,
-) -> str | None:
-    return (reader or BaseFileReader(repo_root, base, submodules)).read(rel_path)

@@ -47,42 +47,52 @@ class ArchitectureReviewTestCase(unittest.TestCase):
 
     def _init_repo(self, tmp_dir: Path) -> tuple[Path, Path]:
         origin = tmp_dir / "origin.git"
-        subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "init", "--bare", str(origin)], check=True, capture_output=True
+        )
         repo = tmp_dir / "repo"
-        subprocess.run(["git", "clone", str(origin), str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "clone", str(origin), str(repo)], check=True, capture_output=True
+        )
         _git(repo, "checkout", "-b", "main")
         _git(repo, "config", "user.email", "test@example.invalid")
         _git(repo, "config", "user.name", "Test User")
         (repo / "README.md").write_text("# base\n", encoding="utf-8")
-        (repo / "CLAUDE.md").write_text(
+        (repo / "AGENTS.md").write_text(
             "# Root\n\n"
-            "<!-- product-engineering-quality:start -->\n"
+            "<!-- the-guard-policy:start -->\n"
             "```yaml\n"
-            "schema: product-engineering-quality/v1\n"
+            "schema: the-guard-policy/v1\n"
             "rules:\n"
-            "  - id: peq.single-source-of-truth\n"
+            "  - id: guard.single-source-of-truth\n"
             "    severity: block\n"
             "    scope: [backend]\n"
             "    summary: One canonical owner.\n"
-            "    details: docs/engineering-quality/rules/single-source-of-truth.md\n"
+            "    details: docs/standards/rules/single-source-of-truth.md\n"
             "    checker: static-plus-review\n"
             "```\n"
-            "<!-- product-engineering-quality:end -->\n",
+            "<!-- the-guard-policy:end -->\n",
             encoding="utf-8",
         )
-        detail = repo / "docs/engineering-quality/rules/single-source-of-truth.md"
+        detail = repo / "docs/standards/rules/single-source-of-truth.md"
         detail.parent.mkdir(parents=True, exist_ok=True)
         detail.write_text(
             "---\n"
-            "id: peq.single-source-of-truth\n"
+            "id: guard.single-source-of-truth\n"
             "title: Single Source Of Truth\n"
-            "manifest: CLAUDE.md#product-engineering-quality-policy\n"
+            "manifest: AGENTS.md#engineering-quality-policy\n"
             "---\n\n"
             "# Single Source Of Truth\n\n"
             "Every business rule has a single executable owner.\n",
             encoding="utf-8",
         )
-        _git(repo, "add", "README.md", "CLAUDE.md", "docs/engineering-quality/rules/single-source-of-truth.md")
+        _git(
+            repo,
+            "add",
+            "README.md",
+            "AGENTS.md",
+            "docs/standards/rules/single-source-of-truth.md",
+        )
         _git(repo, "commit", "-m", "base")
         _git(repo, "push", "-u", "origin", "main")
         _git(repo, "checkout", "-b", "topic")

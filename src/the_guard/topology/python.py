@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from typing import Iterable, Sequence
 
+from ..finding import Finding
 from .rules import (
     BATCH_OR_INFRA_CALL_MARKERS,
     FOR_UPDATE_SQL_RE,
@@ -19,7 +20,6 @@ from .rules import (
     WRITE_CALL_MARKERS,
     _line_exempts_rule,
 )
-from ..finding import Finding
 
 
 def _check_python_file(
@@ -27,10 +27,11 @@ def _check_python_file(
     text: str,
     base_text: str | None,
     changed_lines: set[int] | None,
+    exempt_tag: str = "guard-exempt",
 ) -> list[Finding]:
     findings: list[Finding] = []
     lines = text.splitlines()
-    current_ast_findings = _collect_python_ast_findings(path, text, lines)
+    current_ast_findings = _collect_python_ast_findings(path, text, lines, exempt_tag)
     if not current_ast_findings:
         return findings
 
@@ -40,7 +41,10 @@ def _check_python_file(
 
     base_lines = base_text.splitlines()
     base_signatures = {
-        sig for _finding, sig, _span in _collect_python_ast_findings(path, base_text, base_lines)
+        sig
+        for _finding, sig, _span in _collect_python_ast_findings(
+            path, base_text, base_lines, exempt_tag
+        )
     }
 
     for finding, sig, (func_start, func_end) in current_ast_findings:
@@ -48,8 +52,7 @@ def _check_python_file(
             findings.append(finding)
             continue
         func_touched = any(
-            line_no in changed_lines
-            for line_no in range(func_start, func_end + 1)
+            line_no in changed_lines for line_no in range(func_start, func_end + 1)
         )
         if func_touched and sig not in base_signatures:
             findings.append(finding)
@@ -61,6 +64,7 @@ def _collect_python_ast_findings(
     path: str,
     text: str,
     lines: list[str],
+    exempt_tag: str = "guard-exempt",
 ) -> list[tuple[Finding, tuple[str, str, str], tuple[int, int]]]:
     try:
         tree = ast.parse(text, filename=path)
@@ -77,7 +81,7 @@ def _collect_python_ast_findings(
             for lock_line in _find_for_update_lines(func):
                 line_text = lines[lock_line - 1] if 1 <= lock_line <= len(lines) else ""
                 rule_id = "guard.architecture-simplicity"
-                if _line_exempts_rule(line_text, rule_id):
+                if _line_exempts_rule(line_text, rule_id, exempt_tag):
                     continue
                 message = (
                     f"Read path '{func.name}' must not acquire FOR UPDATE row write "
@@ -85,17 +89,24 @@ def _collect_python_ast_findings(
                 )
                 results.append(
                     (
-                        Finding(rule_id=rule_id, path=path, line=lock_line, message=message),
+                        Finding(
+                            rule_id=rule_id, path=path, line=lock_line, message=message
+                        ),
                         (rule_id, func.name, "FOR_UPDATE"),
                         span,
                     )
                 )
 
         if isinstance(func, ast.AsyncFunctionDef):
-            for dup_line, first_line, call_label, call_key in _find_duplicate_awaited_reads(func):
+            for (
+                dup_line,
+                first_line,
+                call_label,
+                call_key,
+            ) in _find_duplicate_awaited_reads(func):
                 line_text = lines[dup_line - 1] if 1 <= dup_line <= len(lines) else ""
                 rule_id = "guard.database-query-efficiency"
-                if _line_exempts_rule(line_text, rule_id):
+                if _line_exempts_rule(line_text, rule_id, exempt_tag):
                     continue
                 message = (
                     f"Duplicate awaited read call '{call_label}' in '{func.name}' "
@@ -104,7 +115,9 @@ def _collect_python_ast_findings(
                 )
                 results.append(
                     (
-                        Finding(rule_id=rule_id, path=path, line=dup_line, message=message),
+                        Finding(
+                            rule_id=rule_id, path=path, line=dup_line, message=message
+                        ),
                         (rule_id, func.name, f"dup:{call_key}"),
                         span,
                     )
@@ -113,7 +126,7 @@ def _collect_python_ast_findings(
             for loop_line, call_label, call_key in _find_loop_n_plus_one_reads(func):
                 line_text = lines[loop_line - 1] if 1 <= loop_line <= len(lines) else ""
                 rule_id = "guard.database-query-efficiency"
-                if _line_exempts_rule(line_text, rule_id):
+                if _line_exempts_rule(line_text, rule_id, exempt_tag):
                     continue
                 message = (
                     f"Single-entity awaited read '{call_label}' inside a loop/comprehension "
@@ -122,7 +135,9 @@ def _collect_python_ast_findings(
                 )
                 results.append(
                     (
-                        Finding(rule_id=rule_id, path=path, line=loop_line, message=message),
+                        Finding(
+                            rule_id=rule_id, path=path, line=loop_line, message=message
+                        ),
                         (rule_id, func.name, f"n+1:{call_key}"),
                         span,
                     )
@@ -154,18 +169,24 @@ def _is_read_function_or_endpoint(func: ast.FunctionDef | ast.AsyncFunctionDef) 
         return False
 
     for decorator in func.decorator_list:
-        if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute):
+        if isinstance(decorator, ast.Call) and isinstance(
+            decorator.func, ast.Attribute
+        ):
             method = decorator.func.attr.lower()
             if method == "get":
                 return True
             if method == "post" and decorator.args:
                 first_arg = decorator.args[0]
-                if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                if isinstance(first_arg, ast.Constant) and isinstance(
+                    first_arg.value, str
+                ):
                     route_path = first_arg.value.lower()
                     if route_path.endswith(READ_ACTION_SUFFIXES):
                         return True
 
-    if name_lower in READ_FUNCTION_EXACT or name_lower.startswith(READ_FUNCTION_PREFIXES):
+    if name_lower in READ_FUNCTION_EXACT or name_lower.startswith(
+        READ_FUNCTION_PREFIXES
+    ):
         return True
     if any(marker in name_lower for marker in LOCK_OR_WRITE_FUNCTION_MARKERS):
         return False
@@ -248,7 +269,9 @@ def _walk_stmts_for_duplicate_reads(
 
         if isinstance(stmt, (ast.With, ast.AsyncWith)):
             for item in stmt.items:
-                _inspect_node_non_control_awaits(item.context_expr, current_seen, duplicates)
+                _inspect_node_non_control_awaits(
+                    item.context_expr, current_seen, duplicates
+                )
             current_seen, block_mutated, block_term = _walk_stmts_for_duplicate_reads(
                 stmt.body, current_seen, duplicates
             )
@@ -267,7 +290,9 @@ def _walk_stmts_for_duplicate_reads(
             elif not body_term:
                 current_seen = body_seen
             for handler in stmt.handlers:
-                _walk_stmts_for_duplicate_reads(handler.body, dict(seen_reads), duplicates)
+                _walk_stmts_for_duplicate_reads(
+                    handler.body, dict(seen_reads), duplicates
+                )
             if stmt.orelse and not body_term:
                 current_seen, else_mutated, _ = _walk_stmts_for_duplicate_reads(
                     stmt.orelse, current_seen, duplicates
@@ -360,7 +385,11 @@ def _extract_read_call_signature(call: ast.Call) -> tuple[str, str] | None:
     # Require either a receiver (e.g. client.get_detail(...)) or an explicit resource read function name.
     if not receiver_label and lower == "get":
         return None
-    call_label = f"{receiver_label}.{method_name}(...)" if receiver_label else f"{method_name}(...)"
+    call_label = (
+        f"{receiver_label}.{method_name}(...)"
+        if receiver_label
+        else f"{method_name}(...)"
+    )
     call_key = ast.dump(call, include_attributes=False)
     return call_key, call_label
 
@@ -412,7 +441,9 @@ def _find_loop_n_plus_one_reads(
                             seen_lines.add(line_no)
                             call_key, call_label = info
                             findings.append((line_no, call_label, call_key))
-        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        elif isinstance(
+            node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+        ):
             for child in _iter_nodes_without_nested_functions(node):
                 if isinstance(child, ast.Await) and isinstance(child.value, ast.Call):
                     info = _extract_single_entity_loop_read(child.value)
@@ -429,7 +460,10 @@ def _find_loop_n_plus_one_reads(
 def _is_retry_range_loop(loop: ast.For | ast.AsyncFor) -> bool:
     if isinstance(loop.iter, ast.Call) and isinstance(loop.iter.func, ast.Name):
         if loop.iter.func.id == "range":
-            if isinstance(loop.target, ast.Name) and loop.target.id.lower() in RETRY_LOOP_VAR_NAMES:
+            if (
+                isinstance(loop.target, ast.Name)
+                and loop.target.id.lower() in RETRY_LOOP_VAR_NAMES
+            ):
                 return True
     return False
 
@@ -448,6 +482,9 @@ def _extract_single_entity_loop_read(call: ast.Call) -> tuple[str, str] | None:
     for arg in call.args:
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             arg_lower = arg.value.lower()
-            if any(marker in arg_lower for marker in ("batch", "bulk", "page", "cursor", "list")):
+            if any(
+                marker in arg_lower
+                for marker in ("batch", "bulk", "page", "cursor", "list")
+            ):
                 return None
     return call_key, call_label

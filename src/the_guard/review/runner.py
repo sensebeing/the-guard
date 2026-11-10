@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from .environment import review_environment
-
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import selectors
 import subprocess
 import sys
 import time
-from typing import Any
 import uuid
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from .contract import (
     CLAUDE_DISALLOWED_TOOLS,
@@ -39,7 +37,15 @@ def _extract_verdict_json(raw_output: str) -> dict[str, Any]:
         if isinstance(obj, dict):
             if "verdict" in obj and "summary" in obj and "blocking_findings" in obj:
                 return obj
-            for key in ("structured_output", "result", "response", "output", "content", "text", "message"):
+            for key in (
+                "structured_output",
+                "result",
+                "response",
+                "output",
+                "content",
+                "text",
+                "message",
+            ):
                 if key in obj:
                     nested = _try_candidate(obj[key])
                     if nested is not None:
@@ -78,7 +84,9 @@ def _extract_verdict_json(raw_output: str) -> dict[str, Any]:
         if found is not None:
             return found
 
-    raise ValueError(f"Could not extract structured review JSON from output: {text[:400]}")
+    raise ValueError(
+        f"Could not extract structured review JSON from output: {text[:400]}"
+    )
 
 
 def _compact_command(cmd_str: str) -> str:
@@ -122,18 +130,28 @@ def _summarize_event_dict(ev: dict[str, Any]) -> str | None:
                 for block in reversed(content):
                     if isinstance(block, dict) and block.get("type") == "tool_use":
                         tname = str(block.get("name") or "tool")
-                        inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                        inp = (
+                            block.get("input")
+                            if isinstance(block.get("input"), dict)
+                            else {}
+                        )
                         target = _compact_tool_target(inp)
                         return f"{tname}({target})" if target else f"tool:{tname}"
                 for block in reversed(content):
-                    if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").strip():
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and str(block.get("text") or "").strip()
+                    ):
                         return "drafting-verdict"
                 for block in reversed(content):
                     if isinstance(block, dict) and block.get("type") == "thinking":
                         return "thinking"
             return "assistant"
 
-        if etype in ("item.started", "item.completed") and isinstance(ev.get("item"), dict):
+        if etype in ("item.started", "item.completed") and isinstance(
+            ev.get("item"), dict
+        ):
             item = ev["item"]
             itype = str(item.get("type") or "")
             if itype == "command_execution":
@@ -146,8 +164,14 @@ def _summarize_event_dict(ev: dict[str, Any]) -> str | None:
             return f"{etype}:{itype}" if itype else etype
 
         if etype in {
-            "user", "attachment", "file-history-snapshot", "last-prompt",
-            "mode", "permission-mode", "atis-latch", "rate_limit_event",
+            "user",
+            "attachment",
+            "file-history-snapshot",
+            "last-prompt",
+            "mode",
+            "permission-mode",
+            "atis-latch",
+            "rate_limit_event",
         }:
             return None
         if etype == "system":
@@ -180,7 +204,14 @@ def _extract_session_id_from_stream(stdout_text: str) -> str:
             continue
         if not isinstance(ev, dict):
             continue
-        for key in ("session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId"):
+        for key in (
+            "session_id",
+            "sessionId",
+            "conversation_id",
+            "conversationId",
+            "thread_id",
+            "threadId",
+        ):
             val = ev.get(key)
             if isinstance(val, str) and val.strip():
                 found = val.strip()
@@ -201,7 +232,9 @@ def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def _register_process_streams(sel: selectors.BaseSelector, proc: subprocess.Popen[bytes], has_stdin: bool) -> None:
+def _register_process_streams(
+    sel: selectors.BaseSelector, proc: subprocess.Popen[bytes], has_stdin: bool
+) -> None:
     if has_stdin and proc.stdin is not None:
         os.set_blocking(proc.stdin.fileno(), False)
         sel.register(proc.stdin, selectors.EVENT_WRITE, data="stdin")
@@ -213,7 +246,11 @@ def _register_process_streams(sel: selectors.BaseSelector, proc: subprocess.Pope
         sel.register(proc.stderr, selectors.EVENT_READ, data="stderr")
 
 
-def _close_unregistered_stdin(sel: selectors.BaseSelector, key: selectors.SelectorKey, proc: subprocess.Popen[bytes]) -> None:
+def _close_unregistered_stdin(
+    sel: selectors.BaseSelector,
+    key: selectors.SelectorKey,
+    proc: subprocess.Popen[bytes],
+) -> None:
     sel.unregister(key.fileobj)
     if proc.stdin is not None and not proc.stdin.closed:
         proc.stdin.close()
@@ -233,10 +270,18 @@ def _pump_stdin_chunk(
         return stdin_offset, False, None
     except OSError as exc:
         _close_unregistered_stdin(sel, key, proc)
-        return stdin_offset, False, f"{provider} stdin write failed at {stdin_offset}/{len(stdin_buf)} bytes: {exc}"
+        return (
+            stdin_offset,
+            False,
+            f"{provider} stdin write failed at {stdin_offset}/{len(stdin_buf)} bytes: {exc}",
+        )
     if written <= 0:
         _close_unregistered_stdin(sel, key, proc)
-        return stdin_offset, False, f"{provider} closed stdin early at {stdin_offset}/{len(stdin_buf)} bytes"
+        return (
+            stdin_offset,
+            False,
+            f"{provider} closed stdin early at {stdin_offset}/{len(stdin_buf)} bytes",
+        )
     new_offset = stdin_offset + written
     if new_offset >= len(stdin_buf):
         _close_unregistered_stdin(sel, key, proc)
@@ -281,9 +326,15 @@ def _run_streaming_cmd(
     stdin_text: str | None = None,
     run_logger: ReviewRunLogger | None = None,
 ) -> tuple[int, str, str]:
-    stall_limit = float(review_environment(env).get("THE_GUARD_REVIEW_STALL_SECONDS") or DEFAULT_STALL_TIMEOUT_SECONDS)
-    heartbeat_sec = float(review_environment(env).get("THE_GUARD_REVIEW_HEARTBEAT_SECONDS") or DEFAULT_HEARTBEAT_SECONDS)
-    max_runaway_limit = float(review_environment(env).get("THE_GUARD_REVIEW_MAX_SECONDS") or DEFAULT_MAX_RUNAWAY_SECONDS)
+    stall_limit = float(
+        env.get("THE_GUARD_REVIEW_STALL_SECONDS") or DEFAULT_STALL_TIMEOUT_SECONDS
+    )
+    heartbeat_sec = float(
+        env.get("THE_GUARD_REVIEW_HEARTBEAT_SECONDS") or DEFAULT_HEARTBEAT_SECONDS
+    )
+    max_runaway_limit = float(
+        env.get("THE_GUARD_REVIEW_MAX_SECONDS") or DEFAULT_MAX_RUNAWAY_SECONDS
+    )
 
     proc = subprocess.Popen(
         cmd,
@@ -295,7 +346,11 @@ def _run_streaming_cmd(
     )
 
     sel = selectors.DefaultSelector()
-    stdin_buf = memoryview(stdin_text.encode("utf-8")) if stdin_text is not None else memoryview(b"")
+    stdin_buf = (
+        memoryview(stdin_text.encode("utf-8"))
+        if stdin_text is not None
+        else memoryview(b"")
+    )
     stdin_offset = 0
     stdin_error: str | None = None
     _register_process_streams(sel, proc, has_stdin=stdin_text is not None)
@@ -309,8 +364,14 @@ def _run_streaming_cmd(
     event_count = 0
     last_event_desc = "initializing"
 
-    log_suffix = f" (mode={run_logger.mode}, log={run_logger.events_path})" if run_logger is not None else ""
-    sys.stderr.write(f"[arch-review][{provider}] started independent architecture review{log_suffix}...\n")
+    log_suffix = (
+        f" (mode={run_logger.mode}, log={run_logger.events_path})"
+        if run_logger is not None
+        else ""
+    )
+    sys.stderr.write(
+        f"[arch-review][{provider}] started independent architecture review{log_suffix}...\n"
+    )
     sys.stderr.flush()
 
     try:
@@ -319,7 +380,9 @@ def _run_streaming_cmd(
             now = time.monotonic()
             for key, _ in events:
                 if key.data == "stdin":
-                    stdin_offset, progressed, err = _pump_stdin_chunk(sel, key, proc, stdin_buf, stdin_offset, provider)
+                    stdin_offset, progressed, err = _pump_stdin_chunk(
+                        sel, key, proc, stdin_buf, stdin_offset, provider
+                    )
                     if progressed:
                         last_activity_ts = now
                     if err is not None and stdin_error is None:
@@ -359,11 +422,15 @@ def _run_streaming_cmd(
 
             if now - last_activity_ts > stall_limit:
                 _terminate_process(proc)
-                raise ReviewTimeoutError(f"{provider} stalled with no output for {int(stall_limit)}s")
+                raise ReviewTimeoutError(
+                    f"{provider} stalled with no output for {int(stall_limit)}s"
+                )
 
             if now - start_ts > max_runaway_limit:
                 _terminate_process(proc)
-                raise ReviewTimeoutError(f"{provider} exceeded runaway safety limit of {int(max_runaway_limit)}s")
+                raise ReviewTimeoutError(
+                    f"{provider} exceeded runaway safety limit of {int(max_runaway_limit)}s"
+                )
 
         if stdout_line_buf.strip() and stdout_line_buf.strip().startswith("{"):
             try:
@@ -387,7 +454,10 @@ def _run_streaming_cmd(
     stdout_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
     stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
     if stdin_error is not None or stdin_offset < len(stdin_buf):
-        reason = stdin_error or f"{provider} closed stdin before receiving full review prompt ({stdin_offset}/{len(stdin_buf)} bytes)"
+        reason = (
+            stdin_error
+            or f"{provider} closed stdin before receiving full review prompt ({stdin_offset}/{len(stdin_buf)} bytes)"
+        )
         detail = (stderr_text or stdout_text).strip()[:200]
         raise RuntimeError(f"{reason} (output: {detail})" if detail else reason)
     return rc, stdout_text, stderr_text
@@ -409,12 +479,18 @@ def _build_provider_cmd(
 ) -> list[str]:
     if provider == "agy":
         cmd = [
-            binary_path, "-p", prompt,
-            "--mode", "plan",
+            binary_path,
+            "-p",
+            prompt,
+            "--mode",
+            "plan",
             "--sandbox",
-            "--settings", build_agy_readonly_settings(common_dir),
-            "--output-format", "stream-json",
-            "--json-schema", schema_str,
+            "--settings",
+            build_agy_readonly_settings(common_dir),
+            "--output-format",
+            "stream-json",
+            "--json-schema",
+            schema_str,
         ]
         if model:
             cmd.extend(["--model", model])
@@ -425,13 +501,19 @@ def _build_provider_cmd(
         return cmd
     if provider == "claude":
         cmd = [
-            binary_path, "-p", prompt,
-            "--permission-mode", "plan",
-            "--disallowedTools", CLAUDE_DISALLOWED_TOOLS,
+            binary_path,
+            "-p",
+            prompt,
+            "--permission-mode",
+            "plan",
+            "--disallowedTools",
+            CLAUDE_DISALLOWED_TOOLS,
             "--disable-slash-commands",
-            "--output-format", "stream-json",
+            "--output-format",
+            "stream-json",
             "--verbose",
-            "--json-schema", schema_str,
+            "--json-schema",
+            schema_str,
         ]
         if model:
             cmd.extend(["--model", model])
@@ -450,28 +532,39 @@ def _build_provider_cmd(
             options.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if resume_session_id:
             return [
-                binary_path, "exec", "resume",
-                "-c", 'sandbox_mode="read-only"',
+                binary_path,
+                "exec",
+                "resume",
+                "-c",
+                'sandbox_mode="read-only"',
                 "--json",
-                "--output-schema", str(schema_file or ""),
-                "-o", str(out_file or ""),
+                "--output-schema",
+                str(schema_file or ""),
+                "-o",
+                str(out_file or ""),
                 *options,
                 resume_session_id,
                 "-",
             ]
         return [
-            binary_path, "exec",
-            "-s", "read-only",
+            binary_path,
+            "exec",
+            "-s",
+            "read-only",
             "--json",
-            "--output-schema", str(schema_file or ""),
-            "-o", str(out_file or ""),
+            "--output-schema",
+            str(schema_file or ""),
+            "-o",
+            str(out_file or ""),
             *options,
             "-",
         ]
     raise ValueError(f"Unsupported provider: {provider}")
 
 
-def _verify_session_continuation(provider: str, resume_session_id: str | None, observed_session_id: str) -> None:
+def _verify_session_continuation(
+    provider: str, resume_session_id: str | None, observed_session_id: str
+) -> None:
     if not resume_session_id:
         return
     if not observed_session_id or observed_session_id != resume_session_id:
@@ -485,19 +578,34 @@ def _is_persistent_provider_failure(exc: Exception) -> bool:
     if isinstance(exc, ReviewTimeoutError):
         return False
     msg = str(exc).lower()
-    if "prompt is too long" in msg or "too_few_groups" in msg or "context length" in msg:
+    if (
+        "prompt is too long" in msg
+        or "too_few_groups" in msg
+        or "context length" in msg
+    ):
         return False
     persistent_markers = (
-        "quota exceeded", "insufficient_quota", "auth expired", "authentication failed",
-        "not logged in", "login required", "invalid api key", "unauthorized", "account suspended",
+        "quota exceeded",
+        "insufficient_quota",
+        "auth expired",
+        "authentication failed",
+        "not logged in",
+        "login required",
+        "invalid api key",
+        "unauthorized",
+        "account suspended",
     )
     return any(marker in msg for marker in persistent_markers)
 
 
-def _verify_reviewed_head_sha(verdict_payload: dict[str, Any], expected_head_sha: str) -> None:
+def _verify_reviewed_head_sha(
+    verdict_payload: dict[str, Any], expected_head_sha: str
+) -> None:
     reported = verdict_payload.get("reviewed_head_sha")
     if not isinstance(reported, str) or not reported.strip():
-        raise RuntimeError("reviewer output requires a non-empty reviewed_head_sha string")
+        raise RuntimeError(
+            "reviewer output requires a non-empty reviewed_head_sha string"
+        )
     reported = reported.strip().lower()
     expected = expected_head_sha.lower()
     if (
@@ -556,22 +664,34 @@ def _invoke_provider(
         reviewer_note=reviewer_note,
         env=env,
     )
-    initial_session_id = str(uuid.uuid4()) if (provider == "claude" and not resume_session_id) else ""
+    initial_session_id = (
+        str(uuid.uuid4()) if (provider == "claude" and not resume_session_id) else ""
+    )
 
     if provider in ("agy", "claude"):
         cmd = _build_provider_cmd(
-            provider, binary_path, prompt, schema_str,
-            session_id=initial_session_id or None, resume_session_id=resume_session_id,
-            model=model, effort=effort, common_dir=common_dir,
+            provider,
+            binary_path,
+            prompt,
+            schema_str,
+            session_id=initial_session_id or None,
+            resume_session_id=resume_session_id,
+            model=model,
+            effort=effort,
+            common_dir=common_dir,
         )
         try:
-            rc, out, err = _run_streaming_cmd(provider, cmd, cwd=repo_root, env=child_env, run_logger=run_logger)
+            rc, out, err = _run_streaming_cmd(
+                provider, cmd, cwd=repo_root, env=child_env, run_logger=run_logger
+            )
             if rc != 0:
                 raise RuntimeError(f"{provider} exited {rc}: {(err or out)[:300]}")
             verdict_payload = _extract_verdict_json(out)
             _verify_reviewed_head_sha(verdict_payload, scope.head_sha)
             observed_session_id = _extract_session_id_from_stream(out)
-            _verify_session_continuation(provider, resume_session_id, observed_session_id)
+            _verify_session_continuation(
+                provider, resume_session_id, observed_session_id
+            )
             log_path = run_logger.finish(
                 status="completed",
                 session_id=observed_session_id,
@@ -590,12 +710,23 @@ def _invoke_provider(
         schema_file.write_text(schema_str, encoding="utf-8")
         try:
             cmd = _build_provider_cmd(
-                provider, binary_path, prompt, schema_str,
-                schema_file=schema_file, out_file=out_file, resume_session_id=resume_session_id,
-                model=model, effort=effort,
+                provider,
+                binary_path,
+                prompt,
+                schema_str,
+                schema_file=schema_file,
+                out_file=out_file,
+                resume_session_id=resume_session_id,
+                model=model,
+                effort=effort,
             )
             rc, out, err = _run_streaming_cmd(
-                provider, cmd, cwd=repo_root, env=child_env, stdin_text=prompt, run_logger=run_logger
+                provider,
+                cmd,
+                cwd=repo_root,
+                env=child_env,
+                stdin_text=prompt,
+                run_logger=run_logger,
             )
             if rc != 0:
                 raise RuntimeError(f"codex exited {rc}: {(err or out)[:300]}")
@@ -603,7 +734,9 @@ def _invoke_provider(
             verdict_payload = _extract_verdict_json(raw)
             _verify_reviewed_head_sha(verdict_payload, scope.head_sha)
             observed_session_id = _extract_session_id_from_stream(out)
-            _verify_session_continuation(provider, resume_session_id, observed_session_id)
+            _verify_session_continuation(
+                provider, resume_session_id, observed_session_id
+            )
             log_path = run_logger.finish(
                 status="completed",
                 session_id=observed_session_id,
@@ -636,10 +769,20 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[BlockingFinding, ...]:
         if isinstance(line, bool) or not isinstance(line, int) or line < 1:
             raise ValueError("Blocking finding line must be a positive integer")
         origin = item.get("finding_origin", "initial_full_scope")
-        if origin not in {"initial_full_scope", "prior_unresolved", "introduced_by_delta"}:
+        if origin not in {
+            "initial_full_scope",
+            "prior_unresolved",
+            "introduced_by_delta",
+        }:
             raise ValueError("Invalid finding_origin")
-        findings.append(BlockingFinding(
-            rule_id=item["rule_id"], file=item["file"], line=line,
-            issue=item["issue"], required_fix=item["required_fix"], finding_origin=origin,
-        ))
+        findings.append(
+            BlockingFinding(
+                rule_id=item["rule_id"],
+                file=item["file"],
+                line=line,
+                issue=item["issue"],
+                required_fix=item["required_fix"],
+                finding_origin=origin,
+            )
+        )
     return tuple(findings)
