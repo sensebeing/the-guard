@@ -169,21 +169,41 @@ A linter sees valid syntax and types. `guard check` blocks forbidden cross-layer
 
 ## Benchmarks
 
-`the-guard` is evaluated on synthetic architecture regressions and real pull requests. See [GuardBench and ReviewBench](benchmarks/README.md) for cases and reproduction details.
+This README uses two tracks and Codex 6.1 (gpt-6.1-sol, effort=medium). Track 1 is the reproducible GuardBench in [benchmarks/guardbench.py](benchmarks/guardbench.py); Track 2 uses Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) plus three same-commit comparisons. Full cases and commands are in [benchmarks/README.md](benchmarks/README.md).
 
-| Track / measure | Ruff (E,F,B) | `guard check` (deterministic) | Raw Codex Review (gpt-5.4, no contracts) | `the-guard` (`guard check` + `guard review`) |
-| --- | --- | --- | --- | --- |
-| Track 1 — GuardBench corrupt cases caught | 0/6 | 4/6 (66.7%) | 6/6 | 6/6 (100%) |
-| Track 1 — Violation recall | 0/12 | 5/12 | 7/12 (58.3%) | 12/12 (100%) |
-| Track 1 — Fix direction quality | None | Exact on static findings | 3 anti-architectural suggestions (cases 4, 5, 6) | 12/12 root-cause aligned |
-| Track 1 — Clean case-7 false positives / input tokens | 0 / 0 | 0 / 0 | 1 / 352,664 | 0 / 205,866 |
-| Track 2 — ReviewBench golden TP recall (3 PRs) | — | — | 3/5 | 5/5 (100%) |
-| Track 2 — TechDebtMCP#135 annotated ReDoS FP | — | — | 1 | 0 |
-| Track 2 — TechDebtMCP#135 input tokens | — | — | 445,432 | 258,950 (-41.9%) |
+### Track 1 - GuardBench
 
-The deterministic layer catches structural regressions in about 40ms with zero tokens; the review layer supplies contract-aware root-cause analysis. Across ReviewBench, `the-guard` catches all five sampled true positives, including the `guard.no-silent-fallback` flag-stripping bug, while avoiding the annotated ReDoS false positive.
+Seven multi-service commits contain 12 violations across seven tools: Ruff, Semgrep 1.185, code-review-graph, deterministic guard check, Claude Code raw, Codex 6.1 raw, and the complete the-guard path.
 
-Reproduce with `python3 benchmarks/guardbench.py`; see [benchmarks/README.md](benchmarks/README.md).
+| Tool | Corrupt cases caught | Violation recall | Clean case-7 false positives | Noise / anti-architectural fixes | Rule-ID attribution |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Ruff | 0/6 | 0/12 | 0 | 0 | 0% |
+| Semgrep 1.185.0 | 0/6 | 0/12 | 0 | 0 | 0% |
+| code-review-graph | 0/6 | 0/12 | 0 | 0 | 0% |
+| guard check | 4/6 (66.7%) | 5/12 (41.7%) | 0 | 0 | 100% |
+| Claude Code raw | 6/6 | 11/12 (91.7%) | 0 | 6 speculative findings (24%) | 0% |
+| Codex 6.1 raw (gpt-6.1-sol) | 6/6 | 7/12 (58.3%) | 0 | 1 anti-architectural build_sha fix (case-6) | 0% |
+| the-guard full (gpt-6.1-sol) | 6/6 | 12/12 (100%) | 0 | 0 (12/12 root-cause aligned) | 100% |
+
+### Track 2 - real open-source PRs
+
+Martian's 50-PR aggregate reports these comparison points:
+
+| Product | Precision | Recall | F1 |
+| --- | ---: | ---: | ---: |
+| Claude Code | 58.9% | 32.1% | 41.6% |
+| Cursor BugBot | 51.9% | 32.9% | 40.3% |
+| CodeRabbit | 31.8% | 51.4% | 39.3% |
+| Greptile v4.1 | 34.9% | 42.9% | 38.5% |
+| GitHub Copilot Review v2 | 31.3% | 42.9% | 36.2% |
+| Qodo Extended v2 / PR-Agent | 38.7% | 33.6% | 36.0% |
+| Devin Review | 34.9% | 37.1% | 36.0% |
+| Sourcery | 26.5% | 35.0% | 30.2% |
+| Kodus v2 | 20.2% | 46.4% | 28.1% |
+
+Local PR comparison covers [getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168), [calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345), and [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528). the-guard returned NO-GO with 3 findings, 2 findings, and GO respectively; Codex 6.1 raw returned NO-GO with 1 finding, then GO and GO. ReviewBench remains a separate three-PR comparison documented in the benchmark README.
+
+Reproduce Track 1 with python3 benchmarks/guardbench.py; the command uses no model tokens unless --with-review is supplied.
 
 ## Design principles
 
@@ -200,7 +220,7 @@ See the [core rule definitions](docs/standards/rules/architecture-simplicity.md)
 
 ```sh
 guard probe --priority-order codex,claude,agy
-guard probe --provider-model codex=gpt-5.4:high
+guard probe --provider-model codex=gpt-6.1-sol:high
 guard review --provider codex
 guard review run --force
 guard review check-push

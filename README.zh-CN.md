@@ -169,21 +169,41 @@ flowchart TD
 
 ## 基准评测
 
-`the-guard` 同时接受架构退化样本与真实 PR 的双轨评测；案例与复现方式见[GuardBench 与 ReviewBench](benchmarks/README.md)。
+本文采用两条轨道，所有 Codex 评测统一使用 Codex 6.1（gpt-6.1-sol，effort=medium）。轨道 1 是 [benchmarks/guardbench.py](benchmarks/guardbench.py) 中可复现的 GuardBench；轨道 2 使用 Martian 公开的 [code-review-benchmark](https://github.com/withmartian/code-review-benchmark)，并补充三个相同提交的对比。完整案例、命令见 [benchmarks/README.md](benchmarks/README.md)。
 
-| 轨道 / 指标 | Ruff (E,F,B) | `guard check`（确定性） | 裸 Codex 审查（gpt-5.4，无合同） | `the-guard`（`guard check` + `guard review`） |
-| --- | --- | --- | --- | --- |
-| 轨道 1 — GuardBench 腐化案例检出 | 0/6 | 4/6（66.7%） | 6/6 | 6/6（100%） |
-| 轨道 1 — 违规召回 | 0/12 | 5/12 | 7/12（58.3%） | 12/12（100%） |
-| 轨道 1 — 修复方向质量 | 无 | 静态项精确 | 3 个反架构建议（案例 4、5、6） | 12/12 对齐根因 |
-| 轨道 1 — Clean case-7 误报 / 输入 Token | 0 / 0 | 0 / 0 | 1 / 352,664 | 0 / 205,866 |
-| 轨道 2 — ReviewBench 金标准 TP 召回（3 个 PR） | — | — | 3/5 | 5/5（100%） |
-| 轨道 2 — TechDebtMCP#135 标注 ReDoS 误报 | — | — | 1 | 0 |
-| 轨道 2 — TechDebtMCP#135 输入 Token | — | — | 445,432 | 258,950（少 41.9%） |
+### 轨道 1 - GuardBench
 
-确定性层在约 40ms、0 Token 下拦截结构退化；审查层依据合同要求从根因修复。ReviewBench 抽样的 5 项真实问题全部命中，其中包括 `guard.no-silent-fallback` 标出的标志剥离缺陷，同时避开标注的 ReDoS 误报。
+7 个多服务提交包含 12 项违规，比较 7 个工具：Ruff、Semgrep 1.185、code-review-graph、确定性 guard check、Claude Code 裸审查、Codex 6.1 裸审查，以及完整的 the-guard。
 
-复现命令：`python3 benchmarks/guardbench.py`；详见 [benchmarks/README.md](benchmarks/README.md)。
+| 工具 | 腐化案例检出 | 违规召回 | Clean case-7 误报 | 噪音 / 反架构修复 | 规则 ID 归因 |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Ruff | 0/6 | 0/12 | 0 | 0 | 0% |
+| Semgrep 1.185.0 | 0/6 | 0/12 | 0 | 0 | 0% |
+| code-review-graph | 0/6 | 0/12 | 0 | 0 | 0% |
+| guard check | 4/6（66.7%） | 5/12（41.7%） | 0 | 0 | 100% |
+| Claude Code 裸审查 | 6/6 | 11/12（91.7%） | 0 | 6 条推测性发现（24%） | 0% |
+| Codex 6.1 裸审查（gpt-6.1-sol） | 6/6 | 7/12（58.3%） | 0 | 1 条反架构 build_sha 修复建议（案例 6） | 0% |
+| the-guard 完整门禁（gpt-6.1-sol） | 6/6 | 12/12（100%） | 0 | 0（12/12 对齐根因） | 100% |
+
+### 轨道 2 - 真实开源 PR
+
+Martian 的 50 个 PR 汇总结果如下：
+
+| 产品 | Precision | Recall | F1 |
+| --- | ---: | ---: | ---: |
+| Claude Code | 58.9% | 32.1% | 41.6% |
+| Cursor BugBot | 51.9% | 32.9% | 40.3% |
+| CodeRabbit | 31.8% | 51.4% | 39.3% |
+| Greptile v4.1 | 34.9% | 42.9% | 38.5% |
+| GitHub Copilot Review v2 | 31.3% | 42.9% | 36.2% |
+| Qodo Extended v2 / PR-Agent | 38.7% | 33.6% | 36.0% |
+| Devin Review | 34.9% | 37.1% | 36.0% |
+| Sourcery | 26.5% | 35.0% | 30.2% |
+| Kodus v2 | 20.2% | 46.4% | 28.1% |
+
+本机逐 PR 对比覆盖 [getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168)、[calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345) 和 [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528)。the-guard 依次返回 NO-GO（3 项）、NO-GO（2 项）和 GO；Codex 6.1 裸审查依次返回 NO-GO（1 项）、GO 和 GO。ReviewBench 的三个 PR 对比仍单独记录在基准 README。
+
+用 python3 benchmarks/guardbench.py 复现轨道 1；除非传入 --with-review，否则不消耗模型 Token。
 
 ## 设计原则
 
@@ -200,7 +220,7 @@ flowchart TD
 
 ```sh
 guard probe --priority-order codex,claude,agy
-guard probe --provider-model codex=gpt-5.4:high
+guard probe --provider-model codex=gpt-6.1-sol:high
 guard review --provider codex
 guard review run --force
 guard review check-push
