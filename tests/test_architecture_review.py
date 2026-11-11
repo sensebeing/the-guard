@@ -6,6 +6,7 @@ Contract: code requires matching patch receipts, readonly providers, complete in
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -25,7 +26,8 @@ from the_guard.review.engine import (
 from the_guard.review.prompt import _render_bounded_diff_section
 from the_guard.review.provider import (
     _has_provider_credentials,
-    prepare_isolated_codex_home,
+    isolated_codex_home,
+    codex_isolation_scope_key,
     _normalize_priority_order,
     _normalize_provider_models,
     probe_environment,
@@ -254,12 +256,31 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 '[projects.foo]\npath = "/tmp"\n',
                 encoding="utf-8",
             )
-            target = prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
-            self.assertEqual(target, common_dir / "the-guard-codex-home")
+            def materialize(env):
+                with isolated_codex_home(common_dir, worktree_path=tmp / "worktree", branch="main", env=env) as home:
+                    return home
+
+            target = materialize({"CODEX_HOME": str(src_home)})
+            self.assertEqual(target.parent, common_dir / "the-guard-codex-homes")
+            other_source = tmp / "other-codex"
+            other_source.mkdir()
+            (other_source / "auth.json").write_text("other", encoding="utf-8")
+            other_target = None
+            with isolated_codex_home(common_dir, worktree_path=tmp / "other-worktree", branch="main", env={"CODEX_HOME": str(other_source)}) as scoped:
+                other_target = scoped
+                self.assertNotEqual(scoped, target)
+                self.assertEqual((scoped / "auth.json").read_text(encoding="utf-8"), "other")
+                probe_fd = os.open(scoped / ".review.lock", os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(probe_fd)
+            self.assertEqual((target / "auth.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual(target.stat().st_mode & 0o777, 0o700)
             self.assertEqual((target / "config.toml").stat().st_mode & 0o777, 0o600)
-            self.assertTrue((target / "auth.json").is_symlink())
-            self.assertTrue((target / ".credentials.json").is_symlink())
+            self.assertFalse((target / "auth.json").is_symlink())
+            self.assertFalse((target / ".credentials.json").is_symlink())
             self.assertFalse((target / "AGENTS.md").exists())
             self.assertFalse((target / "hooks.json").exists())
             self.assertFalse((target / "plugins").exists())
@@ -277,36 +298,36 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             auth_inode = (target / "auth.json").lstat().st_ino
             config_inode = (target / "config.toml").stat().st_ino
             config_bytes = (target / "config.toml").read_bytes()
-            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            materialize({"CODEX_HOME": str(src_home)})
             self.assertEqual((target / "auth.json").lstat().st_ino, auth_inode)
             self.assertEqual((target / "config.toml").stat().st_ino, config_inode)
             self.assertEqual((target / "config.toml").read_bytes(), config_bytes)
             (target / "auth.json").unlink()
             wrong_auth = tmp / "wrong-auth.json"
             wrong_auth.write_text("{}", encoding="utf-8")
-            (target / "auth.json").symlink_to(wrong_auth)
-            wrong_inode = (target / "auth.json").lstat().st_ino
-            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            (target / "auth.json").write_bytes(wrong_auth.read_bytes())
+            wrong_inode = (target / "auth.json").stat().st_ino
+            materialize({"CODEX_HOME": str(src_home)})
             self.assertNotEqual((target / "auth.json").lstat().st_ino, wrong_inode)
             (src_home / "config.toml").write_text((src_home / "config.toml").read_text(encoding="utf-8").replace('gpt-test', 'gpt-updated'), encoding="utf-8")
-            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            materialize({"CODEX_HOME": str(src_home)})
             self.assertNotEqual((target / "config.toml").stat().st_ino, config_inode)
             self.assertEqual(tomllib.loads((target / "config.toml").read_text(encoding="utf-8"))["model"], "gpt-updated")
 
             (src_home / ".credentials.json").unlink()
-            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            materialize({"CODEX_HOME": str(src_home)})
             self.assertFalse((target / ".credentials.json").exists())
 
             auth_only = tmp / "auth-only"
             auth_only.mkdir()
             (auth_only / "auth.json").write_text("{}", encoding="utf-8")
-            self.assertTrue(prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(auth_only)}).is_dir())
+            self.assertTrue(materialize({"CODEX_HOME": str(auth_only)}).is_dir())
             self.assertTrue(_has_provider_credentials("codex", {"CODEX_HOME": str(auth_only), "HOME": str(tmp / "empty")}))
             corrupt = tmp / "corrupt"
             corrupt.mkdir()
             (corrupt / "config.toml").write_text("[broken", encoding="utf-8")
             with self.assertRaises(RuntimeError):
-                prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(corrupt)})
+                materialize({"CODEX_HOME": str(corrupt)})
 
             repo, _ = self._init_repo(tmp / "repo-fixture")
             (repo / "services").mkdir()
@@ -329,7 +350,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp / "empty-home"), "CODEX_HOME": str(src_home), "THE_GUARD_REVIEW_CONFIG": str(tmp / "review.json"), "ARGV_FILE": str(argv_file), "ENV_FILE": str(env_file)}
             result = run_architecture_review(repo, force=True, explicit_provider="codex", env=env)
             self.assertEqual(result.verdict, "GO")
-            self.assertEqual(json.loads(env_file.read_text())["CODEX_HOME"], str(git_common_dir(repo) / "the-guard-codex-home"))
+            scope = codex_isolation_scope_key(repo, "topic", env)
+            self.assertEqual(json.loads(env_file.read_text())["CODEX_HOME"], str(git_common_dir(repo) / "the-guard-codex-homes" / scope))
             self.assertNotIn("secret-token-123", " ".join(json.loads(argv_file.read_text())))
 
     def test_pure_documentation_diff_is_exempt(self) -> None:

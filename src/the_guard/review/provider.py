@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -16,14 +19,14 @@ from typing import Any
 
 from .contract import (
     CODEX_DISABLED_FEATURES,
-    CODEX_ISOLATED_HOME_DIRNAME,
+    CODEX_ISOLATED_HOMES_DIRNAME,
     CODEX_RELATIVE_PATH_CONFIG_KEYS,
     CODEX_ROUTING_CONFIG_KEYS,
     CONFIG_SCHEMA,
     PROVIDERS,
 )
 from .repository import git_common_dir
-from .session import UTC
+from .session import MAX_RETAINED_SESSIONS, UTC, worktree_session_key
 
 
 def _config_file_path(repo_root: Path, env: dict[str, str] | None = None) -> Path:
@@ -111,101 +114,160 @@ def _format_toml_value(value: Any) -> str | None:
     return None
 
 
-def prepare_isolated_codex_home(common_dir: Path, env: dict[str, str] | None = None) -> Path:
-    source_home = codex_home_dir(env)
-    target_home = common_dir / CODEX_ISOLATED_HOME_DIRNAME
-    target_home.mkdir(parents=True, exist_ok=True)
-    target_home.chmod(0o700)
-    if source_home.resolve() == target_home.resolve():
-        return target_home
+def codex_isolation_scope_key(
+    worktree_path: Path, branch: str, env: dict[str, str] | None = None
+) -> str:
+    session_key = worktree_session_key(worktree_path, branch)
+    source_key = str(codex_home_dir(env).resolve())
+    return hashlib.sha256(f"{session_key}:{source_key}".encode("utf-8")).hexdigest()[:16]
 
-    for name in ("auth.json", ".credentials.json"):
-        target = target_home / name
-        source = source_home / name
-        if source.exists():
-            resolved = source.resolve()
-            same_target = False
-            if target.is_symlink():
-                try:
-                    same_target = os.readlink(target) == str(resolved)
-                except OSError:
-                    pass
-            if same_target:
-                continue
-            tmp_link = target_home / f".{name}.{uuid.uuid4().hex}.tmp"
+
+def _prune_isolated_codex_homes(homes_root: Path, keep_name: str, gc_fd: int | None = None) -> None:
+    owns_gc_fd = gc_fd is None
+    if owns_gc_fd:
+        gc_path = homes_root / ".gc.lock"
+        gc_fd = os.open(gc_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
+    assert gc_fd is not None
+    try:
+        if owns_gc_fd:
+            fcntl.flock(gc_fd, fcntl.LOCK_EX)
+        dirs = sorted(
+            (item for item in homes_root.iterdir() if item.is_dir() and item.name != keep_name),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for item in dirs[MAX_RETAINED_SESSIONS - 1 :]:
+            lock_path = item / ".review.lock"
             try:
-                tmp_link.symlink_to(resolved)
-                os.replace(tmp_link, target)
-            finally:
-                tmp_link.unlink(missing_ok=True)
-        else:
-            target.unlink(missing_ok=True)
-
-    src_cfg_path = source_home / "config.toml"
-    try:
-        raw_cfg = src_cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        parsed_cfg: dict[str, Any] = {}
-    except (OSError, UnicodeDecodeError) as exc:
-        raise RuntimeError(f"Invalid Codex configuration at {src_cfg_path}: {exc}") from exc
-    else:
-        try:
-            parsed_cfg = tomllib.loads(raw_cfg)
-        except tomllib.TOMLDecodeError as exc:
-            raise RuntimeError(f"Invalid Codex configuration at {src_cfg_path}: {exc}") from exc
-
-    lines = ["check_for_update_on_startup = false"]
-    for key in CODEX_ROUTING_CONFIG_KEYS:
-        if key == "model_providers" or key not in parsed_cfg:
-            continue
-        value = parsed_cfg[key]
-        if key in CODEX_RELATIVE_PATH_CONFIG_KEYS and isinstance(value, str) and value.strip():
-            expanded = Path(value.strip()).expanduser()
-            value = str((source_home / expanded).resolve()) if not expanded.is_absolute() else str(expanded.resolve())
-        if not isinstance(value, (bool, int, float, str, list)):
-            continue
-        rendered = _format_toml_value(value)
-        if rendered is not None:
-            lines.append(f"{key} = {rendered}")
-    lines.append("")
-    lines.append("[features]")
-    lines.extend(f"{feature} = false" for feature in CODEX_DISABLED_FEATURES)
-    providers = parsed_cfg.get("model_providers")
-    if isinstance(providers, dict):
-        for provider_name, provider_cfg in providers.items():
-            if not isinstance(provider_cfg, dict):
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
+            except OSError:
                 continue
-            lines.extend(
-                ["", f"[model_providers.{json.dumps(str(provider_name), ensure_ascii=False)}]"]
-            )
-            for key, value in provider_cfg.items():
-                rendered = _format_toml_value(value)
-                if rendered is not None:
-                    lines.append(f"{_format_toml_key(key)} = {rendered}")
-    rendered_cfg = "\n".join(lines) + "\n"
-    try:
-        tomllib.loads(rendered_cfg)
-    except tomllib.TOMLDecodeError as exc:
-        raise RuntimeError(f"Invalid isolated Codex configuration: {exc}") from exc
-    cfg_path = target_home / "config.toml"
-    try:
-        if (cfg_path.stat().st_mode & 0o777) == 0o600 and cfg_path.read_text(encoding="utf-8") == rendered_cfg:
-            return target_home
-    except (FileNotFoundError, OSError, UnicodeDecodeError):
-        pass
-    fd, tmp_str = tempfile.mkstemp(prefix=".config-", dir=target_home)
+            try:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                shutil.rmtree(item, ignore_errors=True)
+            finally:
+                os.close(lock_fd)
+    finally:
+        if owns_gc_fd:
+            fcntl.flock(gc_fd, fcntl.LOCK_UN)
+            os.close(gc_fd)
+
+
+def _write_snapshot(target: Path, data: bytes) -> None:
+    if target.is_file() and not target.is_symlink() and (target.stat().st_mode & 0o777) == 0o600:
+        try:
+            if target.read_bytes() == data:
+                return
+        except OSError:
+            pass
+    fd, tmp_str = tempfile.mkstemp(prefix=f".{target.name}-", dir=target.parent)
     tmp_path = Path(tmp_str)
     try:
-        handle = os.fdopen(fd, "w", encoding="utf-8")
+        handle = os.fdopen(fd, "wb")
         fd = -1
         with handle:
-            handle.write(rendered_cfg)
-        os.replace(tmp_path, cfg_path)
+            handle.write(data)
+        os.replace(tmp_path, target)
     finally:
         if fd != -1:
             os.close(fd)
         tmp_path.unlink(missing_ok=True)
-    return target_home
+
+
+@contextlib.contextmanager
+def isolated_codex_home(
+    common_dir: Path,
+    *,
+    worktree_path: Path,
+    branch: str = "",
+    env: dict[str, str] | None = None,
+):
+    homes_root = common_dir / CODEX_ISOLATED_HOMES_DIRNAME
+    homes_root.mkdir(parents=True, exist_ok=True)
+    homes_root.chmod(0o700)
+    gc_path = homes_root / ".gc.lock"
+    gc_fd = os.open(gc_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
+    review_fd: int | None = None
+    try:
+        fcntl.flock(gc_fd, fcntl.LOCK_EX)
+        target_home = homes_root / codex_isolation_scope_key(worktree_path, branch, env)
+        target_home.mkdir(parents=True, exist_ok=True)
+        target_home.chmod(0o700)
+        os.utime(target_home, None)
+        review_fd = os.open(
+            target_home / ".review.lock",
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        _prune_isolated_codex_homes(homes_root, keep_name=target_home.name, gc_fd=gc_fd)
+        fcntl.flock(gc_fd, fcntl.LOCK_UN)
+        fcntl.flock(review_fd, fcntl.LOCK_EX)
+        if not target_home.is_dir():
+            raise RuntimeError("Codex isolation home was pruned while acquiring its lock")
+        source_home = codex_home_dir(env)
+        if source_home.resolve() != target_home.resolve():
+            for name in ("auth.json", ".credentials.json"):
+                source = source_home / name
+                target = target_home / name
+                if source.is_file():
+                    _write_snapshot(target, source.read_bytes())
+                else:
+                    target.unlink(missing_ok=True)
+            src_cfg_path = source_home / "config.toml"
+            try:
+                raw_cfg = src_cfg_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                parsed_cfg: dict[str, Any] = {}
+            except (OSError, UnicodeDecodeError) as exc:
+                raise RuntimeError(f"Invalid Codex configuration at {src_cfg_path}: {exc}") from exc
+            else:
+                try:
+                    parsed_cfg = tomllib.loads(raw_cfg)
+                except tomllib.TOMLDecodeError as exc:
+                    raise RuntimeError(f"Invalid Codex configuration at {src_cfg_path}: {exc}") from exc
+            lines = ["check_for_update_on_startup = false"]
+            for key in CODEX_ROUTING_CONFIG_KEYS:
+                if key == "model_providers" or key not in parsed_cfg:
+                    continue
+                value = parsed_cfg[key]
+                if key in CODEX_RELATIVE_PATH_CONFIG_KEYS and isinstance(value, str) and value.strip():
+                    expanded = Path(value.strip()).expanduser()
+                    value = str((source_home / expanded).resolve()) if not expanded.is_absolute() else str(expanded.resolve())
+                if not isinstance(value, (bool, int, float, str, list)):
+                    continue
+                rendered = _format_toml_value(value)
+                if rendered is not None:
+                    lines.append(f"{key} = {rendered}")
+            lines += ["", "[features]"]
+            lines.extend(f"{feature} = false" for feature in CODEX_DISABLED_FEATURES)
+            providers = parsed_cfg.get("model_providers")
+            if isinstance(providers, dict):
+                for provider_name, provider_cfg in providers.items():
+                    if not isinstance(provider_cfg, dict):
+                        continue
+                    lines.extend(["", f"[model_providers.{json.dumps(str(provider_name), ensure_ascii=False)}]"])
+                    for key, value in provider_cfg.items():
+                        rendered = _format_toml_value(value)
+                        if rendered is not None:
+                            lines.append(f"{_format_toml_key(key)} = {rendered}")
+            rendered_cfg = "\n".join(lines) + "\n"
+            try:
+                tomllib.loads(rendered_cfg)
+            except tomllib.TOMLDecodeError as exc:
+                raise RuntimeError(f"Invalid isolated Codex configuration: {exc}") from exc
+            _write_snapshot(target_home / "config.toml", rendered_cfg.encode("utf-8"))
+        yield target_home
+    finally:
+        if review_fd is not None:
+            fcntl.flock(review_fd, fcntl.LOCK_UN)
+            os.close(review_fd)
+        try:
+            fcntl.flock(gc_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(gc_fd)
 
 
 def _verify_binary_runs(binary_path: str, env: dict[str, str]) -> bool:

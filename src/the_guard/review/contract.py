@@ -51,7 +51,7 @@ DEFAULT_INCREMENTAL_DIFF_MAX_CHARS = 24000
 MAX_REVIEWER_NOTE_CHARS = 8000
 CLAUDE_DISALLOWED_TOOLS = "Write,Edit,NotebookEdit,Task,Agent,TodoWrite"
 CLAUDE_ISOLATION_SETTINGS: str = '{"disableAllHooks":true}'
-CODEX_ISOLATED_HOME_DIRNAME: str = "the-guard-codex-home"
+CODEX_ISOLATED_HOMES_DIRNAME: str = "the-guard-codex-homes"
 CODEX_DISABLED_FEATURES: tuple[str, ...] = (
     "plugins", "remote_plugin", "plugin_discovery_prefetch", "apps",
     "computer_use", "browser_use", "daemon_auto_start", "hooks", "memories",

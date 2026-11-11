@@ -26,7 +26,7 @@ from .contract import (
     build_agy_readonly_settings,
     CODEX_DISABLED_FEATURES,
 )
-from .provider import prepare_isolated_codex_home
+from .provider import isolated_codex_home
 from .repository import current_branch_name, git_common_dir
 from .session import BlockingFinding, ReviewRunLogger
 
@@ -714,53 +714,59 @@ def _invoke_provider(
             raise
 
     if provider == "codex":
-        schema_file = common_dir / "the-guard-schema.tmp.json"
-        out_file = common_dir / f"the-guard-out-{os.getpid()}.tmp.json"
-        schema_file.write_text(schema_str, encoding="utf-8")
         try:
-            isolated_codex_home = prepare_isolated_codex_home(common_dir, env)
-            codex_env = {**child_env, "CODEX_HOME": str(isolated_codex_home)}
-            cmd = _build_provider_cmd(
-                provider,
-                binary_path,
-                prompt,
-                schema_str,
-                schema_file=schema_file,
-                out_file=out_file,
-                resume_session_id=resume_session_id,
-                model=model,
-                effort=effort,
-            )
-            rc, out, err = _run_streaming_cmd(
-                provider,
-                cmd,
-                cwd=repo_root,
-                env=codex_env,
-                stdin_text=prompt,
-                run_logger=run_logger,
-            )
-            if rc != 0:
-                raise RuntimeError(f"codex exited {rc}: {(err or out)[:300]}")
-            raw = out_file.read_text(encoding="utf-8") if out_file.is_file() else out
-            verdict_payload = _extract_verdict_json(raw)
-            _verify_reviewed_head_sha(verdict_payload, scope.head_sha)
-            observed_session_id = _extract_session_id_from_stream(out)
-            _verify_session_continuation(
-                provider, resume_session_id, observed_session_id
-            )
-            log_path = run_logger.finish(
-                status="completed",
-                session_id=observed_session_id,
-                verdict=str(verdict_payload.get("verdict") or ""),
-                summary=str(verdict_payload.get("summary") or ""),
-                blocking_findings=_parse_findings(verdict_payload),
-            )
-            return verdict_payload, observed_session_id, str(log_path)
+            with isolated_codex_home(
+                common_dir,
+                worktree_path=repo_root,
+                branch=branch,
+                env=env,
+            ) as isolated_home:
+                schema_file = isolated_home / "review-output-schema.json"
+                out_file = isolated_home / "review-output.json"
+                schema_file.write_text(schema_str, encoding="utf-8")
+                try:
+                    codex_env = {**child_env, "CODEX_HOME": str(isolated_home)}
+                    cmd = _build_provider_cmd(
+                        provider,
+                        binary_path,
+                        prompt,
+                        schema_str,
+                        schema_file=schema_file,
+                        out_file=out_file,
+                        resume_session_id=resume_session_id,
+                        model=model,
+                        effort=effort,
+                    )
+                    rc, out, err = _run_streaming_cmd(
+                        provider,
+                        cmd,
+                        cwd=repo_root,
+                        env=codex_env,
+                        stdin_text=prompt,
+                        run_logger=run_logger,
+                    )
+                    if rc != 0:
+                        raise RuntimeError(f"codex exited {rc}: {(err or out)[:300]}")
+                    raw = out_file.read_text(encoding="utf-8") if out_file.is_file() else out
+                finally:
+                    out_file.unlink(missing_ok=True)
+                verdict_payload = _extract_verdict_json(raw)
+                _verify_reviewed_head_sha(verdict_payload, scope.head_sha)
+                observed_session_id = _extract_session_id_from_stream(out)
+                _verify_session_continuation(
+                    provider, resume_session_id, observed_session_id
+                )
+                log_path = run_logger.finish(
+                    status="completed",
+                    session_id=observed_session_id,
+                    verdict=str(verdict_payload.get("verdict") or ""),
+                    summary=str(verdict_payload.get("summary") or ""),
+                    blocking_findings=_parse_findings(verdict_payload),
+                )
+                return verdict_payload, observed_session_id, str(log_path)
         except Exception as exc:
             run_logger.finish(status="failed", error=str(exc))
             raise
-        finally:
-            out_file.unlink(missing_ok=True)
 
     raise ValueError(f"Unsupported provider: {provider}")
 
