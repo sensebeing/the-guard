@@ -335,6 +335,7 @@ def _resolve_guard_command(
 
 def maybe_trigger_background_auto_update(
     *,
+    active_repo_root: str | Path | None = None,
     home_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
     gemini_dir: str | Path | None = None,
@@ -361,6 +362,10 @@ def maybe_trigger_background_auto_update(
         return False
 
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
+    if active_repo_root is not None:
+        checkout, _ = _discover_checkout(None, resolved_home)
+        if checkout is not None and Path(active_repo_root).expanduser().resolve() == checkout:
+            return False
     resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=eff_env)
     resolved_gemini = gemini_dir_for(
         home_dir=resolved_home, gemini_dir=gemini_dir, env=eff_env

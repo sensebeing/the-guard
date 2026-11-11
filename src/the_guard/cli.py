@@ -61,15 +61,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _extract_repo_root(values: list[str]) -> Path:
+    for idx, token in enumerate(values):
+        if token == "--repo-root" and idx + 1 < len(values):
+            return Path(values[idx + 1]).resolve()
+        if token.startswith("--repo-root="):
+            return Path(token.partition("=")[2]).resolve()
+    return Path(".").resolve()
+
+
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
-    if values and values[0] in {"review", "check-push", "probe"}:
-        return review_main(values[1:] if values[0] == "review" else values)
-    parser = build_parser()
-    args = parser.parse_args(values)
-    if args.command not in {"self-update", "status"}:
-        maybe_trigger_background_auto_update()
+    command = values[0] if values else ""
+    root = _extract_repo_root(values)
     try:
+        if command in {"review", "check-push", "probe"}:
+            return review_main(values[1:] if command == "review" else values)
+        parser = build_parser()
+        args = parser.parse_args(values)
+        command = args.command
         if args.command == "self-update":
             report = self_update(
                 checkout_dir=args.checkout_dir,
@@ -162,10 +172,13 @@ def main(argv: list[str] | None = None) -> int:
             print("## The Guard: NO-GO" if findings else "## The Guard: GO")
         return 2 if findings else 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        if args.command == "self-update" and getattr(args, "quiet", False):
+        if command == "self-update" and "--quiet" in values:
             return 3
         print(f"guard: {exc}", file=sys.stderr)
         return 2 if isinstance(exc, (PolicyError, ValueError)) else 3
+    finally:
+        if command and not command.startswith("-") and command not in {"self-update", "status"}:
+            maybe_trigger_background_auto_update(active_repo_root=root)
 
 
 if __name__ == "__main__":

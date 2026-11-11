@@ -8,7 +8,6 @@ import os
 import sys
 from pathlib import Path
 
-from ..auto_update import maybe_trigger_background_auto_update
 from ..config import load_config
 from ..policy import PolicyError
 from .contract import PROVIDERS
@@ -54,7 +53,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--provider-model", type=_parse_provider_model, action="append"
             )
     args = parser.parse_args(values)
-    maybe_trigger_background_auto_update()
     root = Path(args.repo_root).resolve()
     try:
         config = load_config(root)

@@ -421,6 +421,25 @@ class AutoUpdateTests(unittest.TestCase):
             log_text = (state_dir / "auto_update.log").read_text(encoding="utf-8")
             self.assertIn("auto_update_spawn_failed", log_text)
 
+    def test_background_trigger_skips_when_active_repo_is_guard_checkout(self) -> None:
+        """Background auto-update does not mutate the-guard checkout while it is the active repo."""
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            state_dir = root_path / "state"
+            state_dir.mkdir(parents=True)
+            checkout = auto_update.PACKAGE_DIR.parents[1]
+            env = {"THE_GUARD_BIN": "/usr/bin/true", "THE_GUARD_AUTO_UPDATE": "1"}
+            with mock.patch.object(auto_update.subprocess, "Popen") as popen:
+                triggered = auto_update.maybe_trigger_background_auto_update(
+                    active_repo_root=checkout,
+                    home_dir=root_path / "home",
+                    state_dir=state_dir,
+                    gemini_dir=root_path / "gemini",
+                    env=env,
+                )
+                self.assertFalse(triggered)
+                popen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
