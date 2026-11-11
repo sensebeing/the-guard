@@ -7,7 +7,8 @@
   `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
   `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;
   `engine` composes review and continuation. These modules do not implement product policy semantics.
-- `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows.
+- `init`, `distill`, `hooks`, `auto_update` and CLI modules compose those APIs for user workflows.
+- `auto_update` is the sole owner of `guard self-update`, global skill symlink repair, and background update cooldown metadata in `~/.guard`.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
 Discovery reports observed structure; it never grants ownership or changes declared constraints.

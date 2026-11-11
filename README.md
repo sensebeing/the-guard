@@ -310,6 +310,8 @@ guard check --file src/api.py --file app/Screen.swift --json
 | `guard probe` | Discover and configure local reviewer agent CLIs (`--priority-order`, `--provider-model`, `--reprobe`). |
 | `guard hook edit-guard` | Post-edit hook for coding agents (reads `tool_input.file_path` from JSON stdin). |
 | `guard hook main-push-gate` | Git `pre-push` hook enforcing valid review receipts before pushing to protected branches. |
+| `guard status` | Inspect local checkout, global skill symlinks, and persisted auto-update status (`--json`). |
+| `guard self-update` | Fast-forward clean `main` source checkout, reinstall `guard` via `uv`, and repair global skill symlinks (`--checkout-dir`, `--quiet`, `--json`). |
 
 Exit codes: `0` pass (`GO` or exempt), `2` blocking policy, topology, or review findings, `3` checker or reviewer provider unavailable.
 
