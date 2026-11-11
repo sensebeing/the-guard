@@ -18,7 +18,7 @@ When anyone can generate a working patch with an AI agent, the hard part is keep
 | --- | --- |
 | A coding agent adds an order-status badge by recalculating status rules inside a UI component, or fixes a bug by wrapping a broken query in a retry loop. Unit tests and linters pass, so the shortcut merges into `main`. | The agent reads `AGENTS.md` and module owner docs before editing. `guard check` blocks forbidden imports and SQL ownership violations during edits, and `guard review` runs a separate reviewer agent before merge that cites `guard.single-source-of-truth` and requires a root-cause fix at the owner boundary. |
 
-[中文文档](README.zh-CN.md) · [Quick start](#quick-start) · [Presets & rules](#presets-and-the-14-engineering-quality-rules) · [Workflow](#workflow) · [Configuration](#configuration) · [Setup skill](skills/the-guard-setup/SKILL.md) · [Daily skill](skills/the-guard/SKILL.md)
+[中文文档](README.zh-CN.md) · [Quick start](#quick-start) · [Presets & rules](#presets-and-the-14-engineering-quality-rules) · [Workflow](#workflow) · [Configuration](#configuration) · [Setup skill](skills/the-guard-setup/SKILL.md) · [Daily skill](skills/the-guard/SKILL.md) · [Benchmarks](#benchmarks)
 
 ## Get started in 30 seconds: paste to your agent
 
@@ -165,6 +165,17 @@ A linter sees valid syntax and types. `guard check` blocks forbidden cross-layer
 | Static and security analyzers ([Semgrep](https://github.com/semgrep/semgrep)) | Pattern-based security and correctness rules. | A shared contract linking agent instructions, module docs, and pre-merge design review. |
 | Dependency validators ([dependency-cruiser](https://github.com/sverweij/dependency-cruiser)) | Language-specific dependency graphs and import rules. | Python and Swift topology ratchets paired with LLM architectural review. |
 | Coding agents (ChatGPT, Claude Code, Codex) | Write features, refactor code, and fix bugs quickly. | A separate reviewer session that challenges shortcuts before code lands on `main`. |
+| AI PR reviewers and context graphs (CodeRabbit, Greptile, PR-Agent, code-review-graph) | Diff bug hunting, PR summaries, and AST call-graph retrieval on pull requests. | One shared contract across pre-coding `AGENTS.md` and module owner docs, zero-token topology and debt ratchets during edits, and adversarial pre-merge review with local push receipts. |
+
+## Benchmarks
+
+`the-guard` is evaluated on both synthetic architecture regressions and real pull requests. [GuardBench and ReviewBench](benchmarks/README.md) contain the cases, source, and reproduction details.
+
+**Track 1 — GuardBench:** seven multi-service commits contain 12 architectural violations. Ruff catches 0/6 corrupt cases and 0/12 violations. `guard check` catches 4/6 cases (66.7%) in about 40ms with zero tokens. Raw Codex catches 7/12 violations (58.3%), suggests keeping retry loops, write locks, or exact build settlement checks on three cases, and uses 352,664 input tokens on case 7. The full path (`guard check` + `guard review`) catches 12/12 (100%), aligns all fixes with root causes, has zero case-7 false positives, and uses 205,866 input tokens (41.6% fewer).
+
+**Track 2 — ReviewBench:** on `PierreJanineh/TechDebtMCP#135`, `AA-Factory/aafactory-prototype#17`, and `allan-mobley-jr/gimmes#468`, `the-guard` matched 5/5 sampled golden findings with zero known false positives, avoided the TechDebtMCP ReDoS false positive, caught the `guard.no-silent-fallback` flag-stripping bug, and used 41.9% fewer input tokens on that PR (258,950 vs. 445,432).
+
+Run `python3 benchmarks/guardbench.py` or read [benchmarks/README.md](benchmarks/README.md).
 
 ## Design principles
 

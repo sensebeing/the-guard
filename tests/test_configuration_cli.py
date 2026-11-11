@@ -260,6 +260,15 @@ class ConfigurationTests(unittest.TestCase):
         self.write("new.py", "value = 1\n")
         self.assertEqual(changed_files(self.root, "HEAD"), ["new.py"])
 
+    def test_guardbench_deterministic_suite_matches_expected_rules(self):
+        from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
+
+        bench_root = self.root / "guardbench"
+        result = evaluate_deterministic_checks(build_guardbench_repo(bench_root))
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(len(result["cases"]), 7)
+        self.assertTrue(all(case["passed"] for case in result["cases"]))
+
     def test_plugin_and_agent_manifests_match_package_metadata(self):
         repo_root = Path(__file__).resolve().parents[1]
         pyproject = tomllib.loads(

@@ -18,7 +18,7 @@
 | --- | --- |
 | 编码 Agent 在前端组件里重算了一遍订单状态规则，或者在报错的查询外包了一层重试。单元测试和 Linter 全部通过，这种偷懒补丁被合入 `main`。 | 编码 Agent 动笔前先读取 `AGENTS.md` 与模块职责文档；开发时 `guard check` 拦截越界导入与 SQL 写归属违规；合入前 `guard review` 拉起独立审查 Agent，依据 `guard.single-source-of-truth` 要求在唯一 Owner 边界内从源头修复。 |
 
-[English](README.md) · [快速开始](#快速开始) · [预设与规则](#四档预设与-14-条工程质量规范) · [日常工作流](#日常工作流) · [配置参考](#配置参考) · [接入技能](skills/the-guard-setup/SKILL.md) · [日常技能](skills/the-guard/SKILL.md)
+[English](README.md) · [快速开始](#快速开始) · [预设与规则](#四档预设与-14-条工程质量规范) · [日常工作流](#日常工作流) · [配置参考](#配置参考) · [接入技能](skills/the-guard-setup/SKILL.md) · [日常技能](skills/the-guard/SKILL.md) · [基准评测](#基准评测)
 
 ## 30 秒上手：复制给你的 Agent
 
@@ -165,6 +165,17 @@ flowchart TD
 | 静态与安全扫描器（[Semgrep](https://github.com/semgrep/semgrep)） | 基于模式匹配的安全漏洞与已知缺陷扫描。 | 将编码前 Agent 指令、模块职责文档与合入前独立审查串成闭环。 |
 | 依赖校验工具（[dependency-cruiser](https://github.com/sverweij/dependency-cruiser)） | 特定语言的依赖图与导入规则检查。 | Python 与 Swift 拓扑棘轮，配合 LLM 架构审查。 |
 | 编码 Agent（ChatGPT、Claude Code、Codex） | 编写功能、重构代码、定位问题。 | 引入独立审查会话，在代码合入 `main` 前拦截偷懒补丁与架构退化。 |
+| AI PR 审查器与上下文图谱（CodeRabbit、Greptile、PR-Agent、code-review-graph） | PR 差异缺陷挖掘、摘要与 AST 调用图检索。 | 用一套共享合同串起编码前的 `AGENTS.md` 与模块 Owner 文档；编辑时以零 Token 拓扑与技术债棘轮拦截退化；合入前做带本地推送回执的对抗式审查。 |
+
+## 基准评测
+
+`the-guard` 同时接受架构退化样本与真实 PR 的双轨评测；案例、源码和复现方式见[GuardBench 与 ReviewBench](benchmarks/README.md)。
+
+**轨道 1：GuardBench。** 七个多服务提交包含 12 项架构违规。Ruff 对 6 个腐化案例和 12 项违规均为 0 检出；`guard check` 在约 40ms、0 Token 下拦截 4/6（66.7%）。裸 Codex 检出 7/12（58.3%），在三个案例中建议保留重试循环、读路径写锁或精确构建号结算门禁，且 case-7 消耗 352,664 个输入 Token。完整链路（`guard check` + `guard review`）检出 12/12（100%），修复方向全部对齐根因，case-7 无误报，输入 Token 为 205,866（少 41.6%）。
+
+**轨道 2：ReviewBench。** 在 `PierreJanineh/TechDebtMCP#135`、`AA-Factory/aafactory-prototype#17` 与 `allan-mobley-jr/gimmes#468` 上，`the-guard` 命中抽样金标准 5/5、无已知误报，避开 TechDebtMCP 的 ReDoS 误报并抓到 `guard.no-silent-fallback` 的标志剥离缺陷；在该 PR 上使用 258,950 个输入 Token（裸 Codex 为 445,432，少 41.9%）。
+
+复现命令：`python3 benchmarks/guardbench.py`；详见 [benchmarks/README.md](benchmarks/README.md)。
 
 ## 设计原则
 
