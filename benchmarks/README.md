@@ -30,26 +30,26 @@ The static guard layer runs in about 40 ms with zero tokens. Noise and fix-direc
 
 Aggregate comparison (`the-guard` and `Codex 6.1 raw` evaluated locally with `gpt-6.1-sol` on the 6-PR real-PR suite; third-party products from Martian's 50-PR aggregate):
 
-| Product | Evaluated scope | Precision | Recall | F1 | Type |
-| --- | --- | ---: | ---: | ---: | --- |
-| **the-guard (full + agy gemini-4-carbon-high, Core 158)** | **Martian 50-PR Code Review Bench** | **59.1%** | **75.9% (#1)** | **66.5% (#1)** | Pre-merge architecture gate |
-| **the-guard (full + agy gemini-4-carbon-high, All-173)** | **Martian 50-PR Code Review Bench** | **59.7% (#1)** | **71.1% (#1)** | **64.9% (#1)** | Pre-merge architecture gate |
-| **the-guard (full + agy gemini-4-carbon-high, Strict 139)** | **Martian 50-PR Code Review Bench** | **56.9%** | **77.0%** | **65.4%** | Pre-merge architecture gate |
-| Cubic v2 | Martian 50-PR aggregate | 57.8% | 57.8% | 57.8% | Martian benchmark system |
-| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 58.9% | 55.5% | 57.1% | Martian benchmark system |
-| Augment | Martian 50-PR aggregate | 50.8% | 58.4% | 54.3% | Martian benchmark system |
-| Qodo v2 | Martian 50-PR aggregate | 47.5% | 59.5% | 52.8% | Martian benchmark system |
-| Cursor BugBot | Martian 50-PR aggregate | 52.8% | 43.4% | 47.6% | Martian benchmark system |
-| GitLab Duo | Martian 50-PR aggregate | 46.9% | 47.4% | 47.1% | Martian benchmark system |
-| Devin Review | Martian 50-PR aggregate | 59.3% | 38.7% | 46.9% | Martian benchmark system |
-| Greptile v4.1 | Martian 50-PR aggregate | 44.7% | 48.6% | 46.5% | Martian benchmark system |
-| Gemini Code Assist v2 | Martian 50-PR aggregate | 40.3% | 51.4% | 45.2% | Martian benchmark system |
-| GitHub Copilot Review v2 | Martian 50-PR aggregate | 35.2% | 63.0% | 45.1% | Martian benchmark system |
-| Sourcery | Martian 50-PR aggregate | 38.1% | 49.7% | 43.1% | Martian benchmark system |
-| Claude Code | Martian 50-PR aggregate | 42.3% | 41.0% | 41.6% | Martian benchmark system |
-| CodeRabbit | Martian 50-PR aggregate | 30.7% | 60.1% | 40.6% | Martian benchmark system |
-| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** | Pre-merge architecture gate |
-| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** | Raw coding agent |
+| Product | Evaluated scope | Precision | Recall | F1 | TP / FP / FN |
+| --- | --- | ---: | ---: | ---: | ---: |
+| **the-guard (full + agy gemini-4-carbon-high, Core 158)** | **Martian 50-PR Code Review Bench** | **59.1%** | **75.9% (#1)** | **66.5% (#1)** | 120 / 83 / 38 |
+| **the-guard (full + agy gemini-4-carbon-high, All-173)** | **Martian 50-PR Code Review Bench** | **59.7% (#1)** | **71.1% (#1)** | **64.9% (#1)** | 123 / 83 / 50 |
+| **the-guard (full + agy gemini-4-carbon-high, Strict 139)** | **Martian 50-PR Code Review Bench** | **56.9%** | **77.0%** | **65.4%** | 107 / 81 / 32 |
+| Cubic v2 | Martian 50-PR aggregate | 57.8% | 57.8% | 57.8% | 100 / 73 / 73 |
+| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 58.9% | 55.5% | 57.1% | 96 / 67 / 77 |
+| Augment | Martian 50-PR aggregate | 50.8% | 58.4% | 54.3% | 101 / 98 / 72 |
+| Qodo v2 | Martian 50-PR aggregate | 47.5% | 59.5% | 52.8% | 103 / 114 / 70 |
+| Cursor BugBot | Martian 50-PR aggregate | 52.8% | 43.4% | 47.6% | 75 / 67 / 98 |
+| GitLab Duo | Martian 50-PR aggregate | 46.9% | 47.4% | 47.1% | 82 / 93 / 91 |
+| Devin Review | Martian 50-PR aggregate | 59.3% | 38.7% | 46.9% | 67 / 46 / 106 |
+| Greptile v4.1 | Martian 50-PR aggregate | 44.7% | 48.6% | 46.5% | 84 / 104 / 89 |
+| Gemini Code Assist v2 | Martian 50-PR aggregate | 40.3% | 51.4% | 45.2% | 89 / 132 / 84 |
+| GitHub Copilot Review v2 | Martian 50-PR aggregate | 35.2% | 63.0% | 45.1% | 109 / 201 / 64 |
+| Sourcery | Martian 50-PR aggregate | 38.1% | 49.7% | 43.1% | 86 / 140 / 87 |
+| Claude Code | Martian 50-PR aggregate | 42.3% | 41.0% | 41.6% | 71 / 97 / 102 |
+| CodeRabbit | Martian 50-PR aggregate | 30.7% | 60.1% | 40.6% | 104 / 235 / 69 |
+| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** | N/A |
+| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** | N/A |
 
 The local comparisons use the same PR snapshots:
 
@@ -90,29 +90,6 @@ ReviewBench contains three additional real PR comparisons used by the repository
 The deterministic track is fully reproducible with [benchmarks/guardbench.py](guardbench.py). The real-PR comparison source is the public [withmartian/code-review-benchmark](https://github.com/withmartian/code-review-benchmark).
 
 ## Full 50-PR Martian Code Review Bench
-
-The full run covers 50 pull requests, ten each from Sentry, Grafana, Cal.com, Discourse, and Keycloak. `the-guard` used the full 14-rule preset with agy `gemini-4-carbon-high`; scores were computed with Martian's official LLM-as-a-Judge `evaluations.json` comparison. Core counts use 158 engineering defects, All-173 includes every golden comment, and Strict uses 139 high/medium core bugs.
-
-### Overall leaderboard
-
-| System/profile | Precision | Recall | F1 | TP / FP / FN |
-| --- | ---: | ---: | ---: | ---: |
-| **the-guard Core 158** | **59.1%** | **75.9% (#1)** | **66.5% (#1)** | **120 / 83 / 38** |
-| **the-guard All-173 golden comments** | **59.7% (#1)** | **71.1% (#1)** | **64.9% (#1)** | **123 / 83 / 50** |
-| **the-guard Strict 139 high/medium** | **56.9%** | **77.0%** | **65.4%** | **107 / 81 / 32** |
-| Cubic v2 | 57.8% | 57.8% | 57.8% | 100 / 73 / 73 |
-| Qodo Extended v2 | 58.9% | 55.5% | 57.1% | 96 / 67 / 77 |
-| Augment | 50.8% | 58.4% | 54.3% | 101 / 98 / 72 |
-| Qodo v2 | 47.5% | 59.5% | 52.8% | 103 / 114 / 70 |
-| Cursor BugBot | 52.8% | 43.4% | 47.6% | 75 / 67 / 98 |
-| GitLab Duo | 46.9% | 47.4% | 47.1% | 82 / 93 / 91 |
-| Devin Review | 59.3% | 38.7% | 46.9% | 67 / 46 / 106 |
-| Greptile v4.1 | 44.7% | 48.6% | 46.5% | 84 / 104 / 89 |
-| Gemini Code Assist v2 | 40.3% | 51.4% | 45.2% | 89 / 132 / 84 |
-| GitHub Copilot Review v2 | 35.2% | 63.0% | 45.1% | 109 / 201 / 64 |
-| Sourcery | 38.1% | 49.7% | 43.1% | 86 / 140 / 87 |
-| Claude Code | 42.3% | 41.0% | 41.6% | 71 / 97 / 102 |
-| CodeRabbit | 30.7% | 60.1% | 40.6% | 104 / 235 / 69 |
 
 ### Per-repository Core profile
 
