@@ -55,6 +55,7 @@ CODEX_ISOLATED_HOME_DIRNAME: str = "the-guard-codex-home"
 CODEX_DISABLED_FEATURES: tuple[str, ...] = (
     "plugins", "remote_plugin", "plugin_discovery_prefetch", "apps",
     "computer_use", "browser_use", "daemon_auto_start", "hooks", "memories",
+    "multi_agent", "skill_mcp_dependency_install",
 )
 CODEX_ROUTING_CONFIG_KEYS: tuple[str, ...] = (
     "model", "model_provider", "model_providers", "model_reasoning_effort",

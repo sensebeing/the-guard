@@ -273,6 +273,25 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertFalse(any(key in rendered for key in ("mcp_servers", "plugins", "marketplaces", "hooks", "projects")))
             self.assertFalse(rendered["check_for_update_on_startup"])
             self.assertTrue(all(rendered["features"][feature] is False for feature in CODEX_DISABLED_FEATURES))
+            self.assertIn("multi_agent", CODEX_DISABLED_FEATURES)
+            auth_inode = (target / "auth.json").lstat().st_ino
+            config_inode = (target / "config.toml").stat().st_ino
+            config_bytes = (target / "config.toml").read_bytes()
+            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            self.assertEqual((target / "auth.json").lstat().st_ino, auth_inode)
+            self.assertEqual((target / "config.toml").stat().st_ino, config_inode)
+            self.assertEqual((target / "config.toml").read_bytes(), config_bytes)
+            (target / "auth.json").unlink()
+            wrong_auth = tmp / "wrong-auth.json"
+            wrong_auth.write_text("{}", encoding="utf-8")
+            (target / "auth.json").symlink_to(wrong_auth)
+            wrong_inode = (target / "auth.json").lstat().st_ino
+            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            self.assertNotEqual((target / "auth.json").lstat().st_ino, wrong_inode)
+            (src_home / "config.toml").write_text((src_home / "config.toml").read_text(encoding="utf-8").replace('gpt-test', 'gpt-updated'), encoding="utf-8")
+            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            self.assertNotEqual((target / "config.toml").stat().st_ino, config_inode)
+            self.assertEqual(tomllib.loads((target / "config.toml").read_text(encoding="utf-8"))["model"], "gpt-updated")
 
             (src_home / ".credentials.json").unlink()
             prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})

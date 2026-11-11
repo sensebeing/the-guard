@@ -7,7 +7,9 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import tomllib
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -121,8 +123,21 @@ def prepare_isolated_codex_home(common_dir: Path, env: dict[str, str] | None = N
         target = target_home / name
         source = source_home / name
         if source.exists():
-            target.unlink(missing_ok=True)
-            target.symlink_to(source.resolve())
+            resolved = source.resolve()
+            same_target = False
+            if target.is_symlink():
+                try:
+                    same_target = os.readlink(target) == str(resolved)
+                except OSError:
+                    pass
+            if same_target:
+                continue
+            tmp_link = target_home / f".{name}.{uuid.uuid4().hex}.tmp"
+            try:
+                tmp_link.symlink_to(resolved)
+                os.replace(tmp_link, target)
+            finally:
+                tmp_link.unlink(missing_ok=True)
         else:
             target.unlink(missing_ok=True)
 
@@ -172,16 +187,24 @@ def prepare_isolated_codex_home(common_dir: Path, env: dict[str, str] | None = N
         tomllib.loads(rendered_cfg)
     except tomllib.TOMLDecodeError as exc:
         raise RuntimeError(f"Invalid isolated Codex configuration: {exc}") from exc
-    tmp = target_home / f".config-{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    cfg_path = target_home / "config.toml"
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(rendered_cfg)
+        if (cfg_path.stat().st_mode & 0o777) == 0o600 and cfg_path.read_text(encoding="utf-8") == rendered_cfg:
+            return target_home
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        pass
+    fd, tmp_str = tempfile.mkstemp(prefix=".config-", dir=target_home)
+    tmp_path = Path(tmp_str)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
         fd = -1
-        os.replace(tmp, target_home / "config.toml")
+        with handle:
+            handle.write(rendered_cfg)
+        os.replace(tmp_path, cfg_path)
     finally:
         if fd != -1:
             os.close(fd)
+        tmp_path.unlink(missing_ok=True)
     return target_home
 
 
