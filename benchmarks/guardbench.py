@@ -453,17 +453,35 @@ def run_review(repo_dir: Path, provider: str) -> dict[str, Any]:
     reviews = []
     for case in CASES:
         git(repo_dir, "switch", case.branch)
+        expected_verdict = "GO" if case.category == "clean" else "NO-GO"
         try:
             outcome = run_architecture_review(
                 repo_dir, main_branch="main", explicit_provider=provider, force=True
             )
             observed = tuple(sorted({finding.rule_id for finding in outcome.blocking_findings}))
-            expected_verdict = "GO" if case.category == "clean" else "NOGO"
-            reviews.append({"branch": case.branch, "verdict": outcome.verdict, "expected_verdict": expected_verdict, "provider": outcome.provider, "expected_review_rule_ids": list(case.expected_review_rule_ids), "observed_review_rule_ids": list(observed), "passed": outcome.verdict == expected_verdict})
+            observed_static = tuple(
+                sorted(
+                    {
+                        finding.rule_id
+                        for finding in run_topology_guard(
+                            repo_dir, changed_files(repo_dir, "main"), base="main"
+                        )
+                    }
+                )
+            )
+            combined_rule_ids = tuple(sorted(set(observed_static) | set(observed)))
+            if case.category == "clean":
+                passed = outcome.verdict == "GO" and not observed and not observed_static
+            else:
+                passed = (
+                    outcome.verdict == "NO-GO"
+                    and set(case.expected_review_rule_ids).issubset(set(combined_rule_ids))
+                )
+            reviews.append({"branch": case.branch, "verdict": outcome.verdict, "expected_verdict": expected_verdict, "provider": outcome.provider, "expected_review_rule_ids": list(case.expected_review_rule_ids), "observed_review_rule_ids": list(observed), "observed_static_rule_ids": list(observed_static), "passed": passed})
         except (OSError, RuntimeError, ValueError) as exc:
-            reviews.append({"branch": case.branch, "verdict": "ERROR", "expected_verdict": "GO" if case.category == "clean" else "NOGO", "expected_review_rule_ids": list(case.expected_review_rule_ids), "observed_review_rule_ids": [], "passed": False, "error": str(exc)})
+            reviews.append({"branch": case.branch, "verdict": "ERROR", "expected_verdict": expected_verdict, "expected_review_rule_ids": list(case.expected_review_rule_ids), "observed_review_rule_ids": [], "passed": False, "error": str(exc)})
     git(repo_dir, "switch", "main")
-    return {"provider": provider, "cases": reviews}
+    return {"provider": provider, "cases": reviews, "passed": all(case["passed"] for case in reviews)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -483,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
         result = evaluate_deterministic_checks(repo)
     if args.with_review:
         result["review"] = run_review(repo, args.provider)
+        result["passed"] = result["passed"] and result["review"]["passed"]
     if temp_dir is not None:
         temp_dir.cleanup()
     if args.json:
@@ -492,6 +511,11 @@ def main(argv: list[str] | None = None) -> int:
         for case in result["cases"]:
             status = "PASS" if case["passed"] else "FAIL"
             print(f"{status:4} {case['branch']}: {', '.join(case['observed_static_rule_ids']) or 'no findings'}")
+        if args.with_review:
+            print("GuardBench architecture review")
+            for case in result["review"]["cases"]:
+                status = "PASS" if case["passed"] else "FAIL"
+                print(f"{status:4} {case['branch']}: {case['verdict']} (expected {case['expected_verdict']})")
         print("PASS" if result["passed"] else "FAIL")
     return 0 if result["passed"] else 2
 

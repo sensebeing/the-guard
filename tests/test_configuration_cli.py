@@ -8,7 +8,10 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from the_guard import __version__
+from benchmarks import guardbench
 from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
 from the_guard.cli import main, changed_files
 from the_guard.config import GuardConfig, load_config
@@ -267,6 +270,38 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(result["passed"], result)
         self.assertEqual(len(result["cases"]), 7)
         self.assertTrue(all(case["passed"] for case in result["cases"]))
+
+    def test_guardbench_review_enforces_verdicts_and_rule_ids(self):
+        bench_root = self.root / "guardbench-review"
+
+        def fake_review(repo, **_kwargs):
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            case = next(case for case in guardbench.CASES if case.branch == branch)
+            if branch == "case-3-retired-table-dual-read":
+                raise RuntimeError("review unavailable")
+            verdict = "GO" if branch in {"case-2-cross-service-sql-and-import", "case-7-clean-architecture-feature"} else "NO-GO"
+            findings = [SimpleNamespace(rule_id=rule_id) for rule_id in case.expected_review_rule_ids]
+            return SimpleNamespace(verdict=verdict, provider="codex", blocking_findings=findings)
+
+        output = io.StringIO()
+        with patch("benchmarks.guardbench.run_architecture_review", side_effect=fake_review), contextlib.redirect_stdout(output):
+            code = guardbench.main(["--repo-dir", str(bench_root), "--with-review", "--json"])
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 2)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["review"]["passed"])
+        cases = {case["branch"]: case for case in result["review"]["cases"]}
+        self.assertTrue(all(case["expected_verdict"] == "NO-GO" for case in cases.values() if case["branch"] != "case-7-clean-architecture-feature"))
+        self.assertEqual(cases["case-7-clean-architecture-feature"]["expected_verdict"], "GO")
+        self.assertTrue(cases["case-1-duplicate-state-machine"]["passed"])
+        self.assertFalse(cases["case-2-cross-service-sql-and-import"]["passed"])
+        self.assertFalse(cases["case-3-retired-table-dual-read"]["passed"])
 
     def test_plugin_and_agent_manifests_match_package_metadata(self):
         repo_root = Path(__file__).resolve().parents[1]
