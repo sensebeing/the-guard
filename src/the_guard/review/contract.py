@@ -50,6 +50,16 @@ POST_EOF_WAIT_TIMEOUT_SECONDS = 15.0
 DEFAULT_INCREMENTAL_DIFF_MAX_CHARS = 24000
 MAX_REVIEWER_NOTE_CHARS = 8000
 CLAUDE_DISALLOWED_TOOLS = "Write,Edit,NotebookEdit,Task,Agent,TodoWrite"
+CLAUDE_ISOLATION_SETTINGS: str = '{"disableAllHooks":true}'
+CODEX_DISABLED_FEATURES: tuple[str, ...] = (
+    "plugins", "remote_plugin", "plugin_discovery_prefetch", "apps",
+    "computer_use", "browser_use", "daemon_auto_start", "hooks",
+)
+CODEX_ROUTING_CONFIG_KEYS: tuple[str, ...] = (
+    "model", "model_provider", "model_providers", "model_reasoning_effort",
+    "service_tier", "openai_base_url", "model_catalog_json", "oss_provider",
+    "ca_certificate",
+)
 
 
 class ReviewTimeoutError(RuntimeError):

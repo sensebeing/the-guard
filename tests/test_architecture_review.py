@@ -164,6 +164,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             claude_resume_cmd[claude_resume_cmd.index("--resume") + 1], "uuid-1"
         )
         self.assertNotIn("--session-id", claude_resume_cmd)
+        for cmd in (claude_cmd, claude_resume_cmd):
+            self.assertIn("--strict-mcp-config", cmd)
+            self.assertEqual(cmd[cmd.index("--settings") + 1], '{"disableAllHooks":true}')
 
         agy_resume_cmd = _build_provider_cmd(
             "agy", "/bin/agy", "inc", "{}", resume_session_id="conv-1"
@@ -199,6 +202,14 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(codex_resume_cmd[:3], ["/bin/codex", "exec", "resume"])
         self.assertIn("thread-1", codex_resume_cmd)
         for cmd in (codex_cmd, codex_resume_cmd):
+            self.assertIn("--ignore-user-config", cmd)
+            self.assertIn("--ignore-rules", cmd)
+            self.assertIn("--disable", cmd)
+            self.assertIn("plugins", cmd)
+            self.assertIn("remote_plugin", cmd)
+            self.assertIn("hooks", cmd)
+            self.assertIn("check_for_update_on_startup=false", cmd)
+            self.assertNotIn("--ephemeral", cmd)
             self.assertEqual(cmd[cmd.index("-m") + 1], "gpt-6-astra")
             effort_index = cmd.index('model_reasoning_effort="high"')
             self.assertEqual(cmd[effort_index - 1], "-c")

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import tomllib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .contract import CONFIG_SCHEMA, PROVIDERS
+from .contract import CODEX_DISABLED_FEATURES, CODEX_ROUTING_CONFIG_KEYS, CONFIG_SCHEMA, PROVIDERS
 from .repository import git_common_dir
 from .session import UTC
 
@@ -53,12 +55,72 @@ def _has_provider_credentials(provider: str, env: dict[str, str]) -> bool:
             or bool(env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN"))
         )
     if provider == "codex":
+        codex_home = codex_home_dir(env)
         return (
-            (home / ".codex" / "auth.json").exists()
-            or (home / ".codex" / "config.toml").exists()
+            (codex_home / "auth.json").exists()
+            or (codex_home / "config.toml").exists()
             or bool(env.get("OPENAI_API_KEY"))
         )
     return False
+
+
+def codex_home_dir(env: dict[str, str] | None = None) -> Path:
+    eff_env = dict(os.environ if env is None else env)
+    configured = eff_env.get("CODEX_HOME", "").strip()
+    return Path(configured) if configured else Path(eff_env.get("HOME", str(Path.home()))) / ".codex"
+
+
+def _format_toml_value(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return None if value != value or value in (float("inf"), float("-inf")) else str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        formatted = [_format_toml_value(item) for item in value]
+        if any(item is None for item in formatted) or len({type(item) for item in value}) > 1:
+            return None
+        return "[" + ", ".join(item for item in formatted if item is not None) + "]"
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            rendered = _format_toml_value(item)
+            if rendered is None:
+                continue
+            key_text = str(key)
+            key_text = key_text if re.fullmatch(r"[A-Za-z0-9_-]+", key_text) else json.dumps(key_text, ensure_ascii=False)
+            parts.append(f"{key_text} = {rendered}")
+        return "{" + ", ".join(parts) + "}"
+    return None
+
+
+def build_codex_isolated_args(env: dict[str, str] | None = None, *, model: str = "", effort: str = "") -> list[str]:
+    args = ["--ignore-user-config", "--ignore-rules"]
+    for feature in CODEX_DISABLED_FEATURES:
+        args.extend(["--disable", feature])
+    args.extend(["-c", "check_for_update_on_startup=false"])
+    try:
+        parsed_cfg = tomllib.loads((codex_home_dir(env) / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        parsed_cfg = {}
+    for key in CODEX_ROUTING_CONFIG_KEYS:
+        if key == "model" and model or key == "model_reasoning_effort" and effort:
+            continue
+        if key not in parsed_cfg:
+            continue
+        rendered = _format_toml_value(parsed_cfg[key])
+        if rendered and rendered != "{}":
+            args.extend(["-c", f"{key}={rendered}"])
+    if model:
+        args.extend(["-m", model])
+    if effort:
+        args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
+    return args
 
 
 def _verify_binary_runs(binary_path: str, env: dict[str, str]) -> bool:

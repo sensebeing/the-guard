@@ -15,6 +15,7 @@ from typing import Any
 
 from .contract import (
     CLAUDE_DISALLOWED_TOOLS,
+    CLAUDE_ISOLATION_SETTINGS,
     DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_MAX_RUNAWAY_SECONDS,
     DEFAULT_STALL_TIMEOUT_SECONDS,
@@ -24,6 +25,7 @@ from .contract import (
     ReviewTimeoutError,
     build_agy_readonly_settings,
 )
+from .provider import build_codex_isolated_args
 from .repository import current_branch_name, git_common_dir
 from .session import BlockingFinding, ReviewRunLogger
 
@@ -476,6 +478,7 @@ def _build_provider_cmd(
     model: str = "",
     effort: str = "",
     common_dir: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> list[str]:
     if provider == "agy":
         cmd = [
@@ -509,6 +512,9 @@ def _build_provider_cmd(
             "--disallowedTools",
             CLAUDE_DISALLOWED_TOOLS,
             "--disable-slash-commands",
+            "--strict-mcp-config",
+            "--settings",
+            CLAUDE_ISOLATION_SETTINGS,
             "--output-format",
             "stream-json",
             "--verbose",
@@ -525,11 +531,7 @@ def _build_provider_cmd(
             cmd.extend(["--session-id", session_id])
         return cmd
     if provider == "codex":
-        options: list[str] = []
-        if model:
-            options.extend(["-m", model])
-        if effort:
-            options.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        isolated_args = build_codex_isolated_args(env, model=model, effort=effort)
         if resume_session_id:
             return [
                 binary_path,
@@ -542,7 +544,7 @@ def _build_provider_cmd(
                 str(schema_file or ""),
                 "-o",
                 str(out_file or ""),
-                *options,
+                *isolated_args,
                 resume_session_id,
                 "-",
             ]
@@ -556,7 +558,7 @@ def _build_provider_cmd(
             str(schema_file or ""),
             "-o",
             str(out_file or ""),
-            *options,
+            *isolated_args,
             "-",
         ]
     raise ValueError(f"Unsupported provider: {provider}")
@@ -679,6 +681,7 @@ def _invoke_provider(
             model=model,
             effort=effort,
             common_dir=common_dir,
+            env=child_env,
         )
         try:
             rc, out, err = _run_streaming_cmd(
@@ -719,6 +722,7 @@ def _invoke_provider(
                 resume_session_id=resume_session_id,
                 model=model,
                 effort=effort,
+                env=child_env,
             )
             rc, out, err = _run_streaming_cmd(
                 provider,
