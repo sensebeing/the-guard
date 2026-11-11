@@ -326,6 +326,7 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
                 ],
             },
             module in loaded_boundary_modules,
+            module,
         )
         for module in touched
     ):
@@ -342,9 +343,40 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
 
 
 def _has_explicit_topology_contract(
-    topology: dict[str, Any], loaded_boundary_docs: bool
+    topology: dict[str, Any], loaded_boundary_docs: bool, module_path: str | None = None
 ) -> bool:
     if loaded_boundary_docs:
+        return True
+    def applies(rule: dict[str, Any]) -> bool:
+        if module_path is None:
+            return True
+        scope_prefixes = rule.get("scope_prefixes")
+        if scope_prefixes and not any(
+            module_path == prefix
+            or module_path.startswith(prefix.rstrip("/") + "/")
+            or prefix.startswith(module_path.rstrip("/") + "/")
+            for prefix in scope_prefixes
+        ):
+            return False
+        path_values = []
+        if isinstance(rule.get("from"), str):
+            path_values.append(rule["from"])
+        path_values.extend(owner for owner in rule.get("owners", []) if isinstance(owner, str))
+        if path_values and not any(
+            module_path == path
+            or module_path.startswith(path.rstrip("/") + "/")
+            or path.startswith(module_path.rstrip("/") + "/")
+            for path in path_values
+        ):
+            return False
+        if isinstance(rule.get("path"), str):
+            path = rule["path"]
+            if not (
+                module_path == path
+                or module_path.startswith(path.rstrip("/") + "/")
+                or path.startswith(module_path.rstrip("/") + "/")
+            ):
+                return False
         return True
     for key in (
         "forbidden_imports",
@@ -353,10 +385,14 @@ def _has_explicit_topology_contract(
         "retired_tables",
         "forbidden_patterns",
     ):
-        if topology.get(key):
+        if any(
+            isinstance(rule, dict) and applies(rule)
+            for rule in topology.get(key, [])
+        ):
             return True
     return any(
-        module.get("boundary_docs") or module.get("dependencies")
+        module.get("path") == module_path
+        and (module.get("boundary_docs") or module.get("dependencies"))
         for module in topology.get("modules", [])
         if isinstance(module, dict)
     )
