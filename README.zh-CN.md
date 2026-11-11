@@ -169,11 +169,19 @@ flowchart TD
 
 ## 基准评测
 
-`the-guard` 同时接受架构退化样本与真实 PR 的双轨评测；案例、源码和复现方式见[GuardBench 与 ReviewBench](benchmarks/README.md)。
+`the-guard` 同时接受架构退化样本与真实 PR 的双轨评测；案例与复现方式见[GuardBench 与 ReviewBench](benchmarks/README.md)。
 
-**轨道 1：GuardBench。** 七个多服务提交包含 12 项架构违规。Ruff 对 6 个腐化案例和 12 项违规均为 0 检出；`guard check` 在约 40ms、0 Token 下拦截 4/6（66.7%）。裸 Codex 检出 7/12（58.3%），在三个案例中建议保留重试循环、读路径写锁或精确构建号结算门禁，且 case-7 消耗 352,664 个输入 Token。完整链路（`guard check` + `guard review`）检出 12/12（100%），修复方向全部对齐根因，case-7 无误报，输入 Token 为 205,866（少 41.6%）。
+| 轨道 / 指标 | Ruff (E,F,B) | `guard check`（确定性） | 裸 Codex 审查（gpt-5.4，无合同） | `the-guard`（`guard check` + `guard review`） |
+| --- | --- | --- | --- | --- |
+| 轨道 1 — GuardBench 腐化案例检出 | 0/6 | 4/6（66.7%） | 6/6 | 6/6（100%） |
+| 轨道 1 — 违规召回 | 0/12 | 5/12 | 7/12（58.3%） | 12/12（100%） |
+| 轨道 1 — 修复方向质量 | 无 | 静态项精确 | 3 个反架构建议（案例 4、5、6） | 12/12 对齐根因 |
+| 轨道 1 — Clean case-7 误报 / 输入 Token | 0 / 0 | 0 / 0 | 1 / 352,664 | 0 / 205,866 |
+| 轨道 2 — ReviewBench 金标准 TP 召回（3 个 PR） | — | — | 3/5 | 5/5（100%） |
+| 轨道 2 — TechDebtMCP#135 标注 ReDoS 误报 | — | — | 1 | 0 |
+| 轨道 2 — TechDebtMCP#135 输入 Token | — | — | 445,432 | 258,950（少 41.9%） |
 
-**轨道 2：ReviewBench。** 在 `PierreJanineh/TechDebtMCP#135`、`AA-Factory/aafactory-prototype#17` 与 `allan-mobley-jr/gimmes#468` 上，`the-guard` 命中抽样金标准 5/5、无已知误报，避开 TechDebtMCP 的 ReDoS 误报并抓到 `guard.no-silent-fallback` 的标志剥离缺陷；在该 PR 上使用 258,950 个输入 Token（裸 Codex 为 445,432，少 41.9%）。
+确定性层在约 40ms、0 Token 下拦截结构退化；审查层依据合同要求从根因修复。ReviewBench 抽样的 5 项真实问题全部命中，其中包括 `guard.no-silent-fallback` 标出的标志剥离缺陷，同时避开标注的 ReDoS 误报。
 
 复现命令：`python3 benchmarks/guardbench.py`；详见 [benchmarks/README.md](benchmarks/README.md)。
 

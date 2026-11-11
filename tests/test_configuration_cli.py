@@ -9,6 +9,7 @@ import tempfile
 import tomllib
 import unittest
 from the_guard import __version__
+from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
 from the_guard.cli import main, changed_files
 from the_guard.config import GuardConfig, load_config
 from the_guard.hooks import install_hooks, main_push_gate
@@ -261,8 +262,6 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(changed_files(self.root, "HEAD"), ["new.py"])
 
     def test_guardbench_deterministic_suite_matches_expected_rules(self):
-        from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
-
         bench_root = self.root / "guardbench"
         result = evaluate_deterministic_checks(build_guardbench_repo(bench_root))
         self.assertTrue(result["passed"], result)

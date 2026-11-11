@@ -30,7 +30,7 @@ Across the six corrupt cases, Ruff catches 0/6 and 0/12 violations. `guard check
 
 | Pull request | Sampled golden findings | Raw Codex | `the-guard` |
 | --- | --- | --- | --- |
-| `PierreJanineh/TechDebtMCP#135` | ReDoS warning is a known false positive; flag-stripping bug is true positive | Hits ReDoS false positive; misses silent flag bug; 445,432 input tokens | Matches 5/5 sampled findings, 0 known false positives; catches `guard.no-silent-fallback`; 258,950 input tokens (41.9% fewer) |
+| `PierreJanineh/TechDebtMCP#135` | 1 golden TP: `executePattern` silently strips invalid/duplicate flags; 1 annotated ReDoS FP (`tp_fp: "fp"`) | Hits ReDoS FP; misses the silent flag bug; 445,432 input tokens | Catches 1/1 TP with `guard.no-silent-fallback`, 0 FP; 258,950 input tokens (41.9% fewer) |
 | `AA-Factory/aafactory-prototype#17` | Three test-contract findings | Finds 2/3 and points to wrong function | Finds 3/3 with `guard.test-case-quality` |
 | `allan-mobley-jr/gimmes#468` | One stale-volume filter finding | Finds 1/1 | Finds 1/1 with owner-contract explanation |
 

@@ -169,13 +169,21 @@ A linter sees valid syntax and types. `guard check` blocks forbidden cross-layer
 
 ## Benchmarks
 
-`the-guard` is evaluated on both synthetic architecture regressions and real pull requests. [GuardBench and ReviewBench](benchmarks/README.md) contain the cases, source, and reproduction details.
+`the-guard` is evaluated on synthetic architecture regressions and real pull requests. See [GuardBench and ReviewBench](benchmarks/README.md) for cases and reproduction details.
 
-**Track 1 — GuardBench:** seven multi-service commits contain 12 architectural violations. Ruff catches 0/6 corrupt cases and 0/12 violations. `guard check` catches 4/6 cases (66.7%) in about 40ms with zero tokens. Raw Codex catches 7/12 violations (58.3%), suggests keeping retry loops, write locks, or exact build settlement checks on three cases, and uses 352,664 input tokens on case 7. The full path (`guard check` + `guard review`) catches 12/12 (100%), aligns all fixes with root causes, has zero case-7 false positives, and uses 205,866 input tokens (41.6% fewer).
+| Track / measure | Ruff (E,F,B) | `guard check` (deterministic) | Raw Codex Review (gpt-5.4, no contracts) | `the-guard` (`guard check` + `guard review`) |
+| --- | --- | --- | --- | --- |
+| Track 1 — GuardBench corrupt cases caught | 0/6 | 4/6 (66.7%) | 6/6 | 6/6 (100%) |
+| Track 1 — Violation recall | 0/12 | 5/12 | 7/12 (58.3%) | 12/12 (100%) |
+| Track 1 — Fix direction quality | None | Exact on static findings | 3 anti-architectural suggestions (cases 4, 5, 6) | 12/12 root-cause aligned |
+| Track 1 — Clean case-7 false positives / input tokens | 0 / 0 | 0 / 0 | 1 / 352,664 | 0 / 205,866 |
+| Track 2 — ReviewBench golden TP recall (3 PRs) | — | — | 3/5 | 5/5 (100%) |
+| Track 2 — TechDebtMCP#135 annotated ReDoS FP | — | — | 1 | 0 |
+| Track 2 — TechDebtMCP#135 input tokens | — | — | 445,432 | 258,950 (-41.9%) |
 
-**Track 2 — ReviewBench:** on `PierreJanineh/TechDebtMCP#135`, `AA-Factory/aafactory-prototype#17`, and `allan-mobley-jr/gimmes#468`, `the-guard` matched 5/5 sampled golden findings with zero known false positives, avoided the TechDebtMCP ReDoS false positive, caught the `guard.no-silent-fallback` flag-stripping bug, and used 41.9% fewer input tokens on that PR (258,950 vs. 445,432).
+The deterministic layer catches structural regressions in about 40ms with zero tokens; the review layer supplies contract-aware root-cause analysis. Across ReviewBench, `the-guard` catches all five sampled true positives, including the `guard.no-silent-fallback` flag-stripping bug, while avoiding the annotated ReDoS false positive.
 
-Run `python3 benchmarks/guardbench.py` or read [benchmarks/README.md](benchmarks/README.md).
+Reproduce with `python3 benchmarks/guardbench.py`; see [benchmarks/README.md](benchmarks/README.md).
 
 ## Design principles
 

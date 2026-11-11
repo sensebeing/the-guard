@@ -78,11 +78,7 @@ async def fetch_order_rows_batch(db, order_ids: list[str]) -> list[dict]:
         "services/orders/api.py",
         """\"\"\"Public Orders Service API.\"\"\"
 from dataclasses import dataclass
-from typing import Any
-
-from dataclasses import dataclass
 from services.orders.internal.storage import fetch_order_row, fetch_order_rows_batch
-from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -314,9 +310,6 @@ async def load_customer_refundable_total(db, order_ids: list[str]) -> int:
         "services/orders/api.py",
         """\"\"\"Public Orders Service API.\"\"\"
 from dataclasses import dataclass
-from typing import Any
-
-from dataclasses import dataclass
 from services.orders.internal.storage import fetch_order_row, fetch_order_rows_batch
 
 @dataclass(frozen=True)
@@ -450,7 +443,7 @@ def evaluate_deterministic_checks(repo_dir: Path) -> dict[str, Any]:
         observed = tuple(sorted({finding.rule_id for finding in findings}))
         expected = tuple(sorted(case.expected_static_rule_ids))
         matched = observed == expected
-        results["cases"].append({"branch": case.branch, "category": case.category, "title": case.title, "expected_static_rule_ids": list(expected), "observed_static_rule_ids": list(observed), "passed": matched})
+        results["cases"].append({"branch": case.branch, "category": case.category, "title": case.title, "expected_static_rule_ids": list(expected), "observed_static_rule_ids": list(observed), "expected_review_rule_ids": list(case.expected_review_rule_ids), "passed": matched})
         results["passed"] = results["passed"] and matched
     git(repo_dir, "switch", "main")
     return results
@@ -464,9 +457,11 @@ def run_review(repo_dir: Path, provider: str) -> dict[str, Any]:
             outcome = run_architecture_review(
                 repo_dir, main_branch="main", explicit_provider=provider, force=True
             )
-            reviews.append({"branch": case.branch, "verdict": outcome.verdict, "provider": outcome.provider})
+            observed = tuple(sorted({finding.rule_id for finding in outcome.blocking_findings}))
+            expected_verdict = "GO" if case.category == "clean" else "NOGO"
+            reviews.append({"branch": case.branch, "verdict": outcome.verdict, "expected_verdict": expected_verdict, "provider": outcome.provider, "expected_review_rule_ids": list(case.expected_review_rule_ids), "observed_review_rule_ids": list(observed), "passed": outcome.verdict == expected_verdict})
         except (OSError, RuntimeError, ValueError) as exc:
-            reviews.append({"branch": case.branch, "verdict": "ERROR", "error": str(exc)})
+            reviews.append({"branch": case.branch, "verdict": "ERROR", "expected_verdict": "GO" if case.category == "clean" else "NOGO", "expected_review_rule_ids": list(case.expected_review_rule_ids), "observed_review_rule_ids": [], "passed": False, "error": str(exc)})
     git(repo_dir, "switch", "main")
     return {"provider": provider, "cases": reviews}
 
