@@ -8,7 +8,7 @@
   `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;
   `engine` composes review and continuation. These modules do not implement product policy semantics.
 - `init`, `distill`, `hooks`, `auto_update` and CLI modules compose those APIs for user workflows.
-- `auto_update` is the sole owner of `guard self-update`, global skill symlink repair, and background update cooldown metadata in `~/.guard`. `cli` schedules post-command background self-update only after `check` or `review` completes and skips background updates when the inspected `--repo-root` is the `the-guard` checkout itself, so snapshot-bound inspection never races with tool updates.
+- `auto_update` is the sole owner of `guard self-update`, global skill symlink repair, and background update cooldown metadata in `~/.guard`. `cli` schedules post-command background self-update only after `check`, `check-push`, or `review` (`run` / `check-push`) completes and skips background updates when the inspected `--repo-root` is the `the-guard` checkout itself, so snapshot-bound inspection never races with tool updates.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
 Discovery reports observed structure; it never grants ownership or changes declared constraints.

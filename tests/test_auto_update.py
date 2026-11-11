@@ -440,6 +440,34 @@ class AutoUpdateTests(unittest.TestCase):
                 self.assertFalse(triggered)
                 popen.assert_not_called()
 
+    def test_cli_only_schedules_background_update_after_check_or_review(self) -> None:
+        """Only completed check, check-push, or review commands trigger background auto-update."""
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            subprocess.run(
+                ["git", "init", "-b", "main", str(root_path)],
+                check=True,
+                capture_output=True,
+            )
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                mock.patch("the_guard.cli.maybe_trigger_background_auto_update") as trigger,
+            ):
+                self.assertEqual(
+                    main(["init", "--repo-root", str(root_path)]),
+                    0,
+                )
+                self.assertEqual(
+                    main(["distill", "--repo-root", str(root_path), "--json"]),
+                    0,
+                )
+                trigger.assert_not_called()
+                self.assertEqual(
+                    main(["check", "--policy-only", "--repo-root", str(root_path)]),
+                    0,
+                )
+                trigger.assert_called_once_with(active_repo_root=root_path.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

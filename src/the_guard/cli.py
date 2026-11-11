@@ -74,9 +74,20 @@ def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     command = values[0] if values else ""
     root = _extract_repo_root(values)
+    should_trigger_auto_update = False
     try:
         if command in {"review", "check-push", "probe"}:
-            return review_main(values[1:] if command == "review" else values)
+            sub_values = values[1:] if command == "review" else values
+            code = review_main(sub_values)
+            sub_cmd = (
+                sub_values[0]
+                if sub_values and not sub_values[0].startswith("-")
+                else "run"
+            )
+            should_trigger_auto_update = (
+                sub_cmd in {"run", "check-push"} and code in {0, 2}
+            )
+            return code
         parser = build_parser()
         args = parser.parse_args(values)
         command = args.command
@@ -147,15 +158,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             load_policy(root)
             if args.policy_only and args.base is None:
+                should_trigger_auto_update = True
                 print('{"status": "GO"}' if args.json else "GO: policy valid")
                 return 0
         base = resolve_changed_base(root, args.base, main_branch=cfg.main_branch)
         if args.command == "check" and args.policy_only:
+            should_trigger_auto_update = True
             print('{"status": "GO"}' if args.json else "GO: policy valid")
             return 0
         findings = run_topology_guard(
             root, args.file or changed_files(root, base), base=base, config=cfg
         )
+        should_trigger_auto_update = args.command == "check"
         if args.json:
             print(
                 json.dumps(
@@ -177,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"guard: {exc}", file=sys.stderr)
         return 2 if isinstance(exc, (PolicyError, ValueError)) else 3
     finally:
-        if command and not command.startswith("-") and command not in {"self-update", "status"}:
+        if should_trigger_auto_update:
             maybe_trigger_background_auto_update(active_repo_root=root)
 
 
