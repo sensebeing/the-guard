@@ -77,6 +77,11 @@ def codex_home_dir(env: dict[str, str] | None = None) -> Path:
     return Path(configured) if configured else Path(eff_env.get("HOME", str(Path.home()))) / ".codex"
 
 
+def _format_toml_key(key: Any) -> str:
+    key_text = str(key)
+    return key_text if re.fullmatch(r"[A-Za-z0-9_-]+", key_text) else json.dumps(key_text, ensure_ascii=False)
+
+
 def _format_toml_value(value: Any) -> str | None:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -99,9 +104,7 @@ def _format_toml_value(value: Any) -> str | None:
             rendered = _format_toml_value(item)
             if rendered is None:
                 continue
-            key_text = str(key)
-            key_text = key_text if re.fullmatch(r"[A-Za-z0-9_-]+", key_text) else json.dumps(key_text, ensure_ascii=False)
-            parts.append(f"{key_text} = {rendered}")
+            parts.append(f"{_format_toml_key(key)} = {rendered}")
         return "{" + ", ".join(parts) + "}"
     return None
 
@@ -141,8 +144,8 @@ def prepare_isolated_codex_home(common_dir: Path, env: dict[str, str] | None = N
         if key == "model_providers" or key not in parsed_cfg:
             continue
         value = parsed_cfg[key]
-        if key in CODEX_RELATIVE_PATH_CONFIG_KEYS and isinstance(value, str) and value:
-            expanded = Path(value).expanduser()
+        if key in CODEX_RELATIVE_PATH_CONFIG_KEYS and isinstance(value, str) and value.strip():
+            expanded = Path(value.strip()).expanduser()
             value = str((source_home / expanded).resolve()) if not expanded.is_absolute() else str(expanded.resolve())
         if not isinstance(value, (bool, int, float, str, list)):
             continue
@@ -163,16 +166,22 @@ def prepare_isolated_codex_home(common_dir: Path, env: dict[str, str] | None = N
             for key, value in provider_cfg.items():
                 rendered = _format_toml_value(value)
                 if rendered is not None:
-                    lines.append(f"{key} = {rendered}")
+                    lines.append(f"{_format_toml_key(key)} = {rendered}")
     rendered_cfg = "\n".join(lines) + "\n"
     try:
         tomllib.loads(rendered_cfg)
     except tomllib.TOMLDecodeError as exc:
         raise RuntimeError(f"Invalid isolated Codex configuration: {exc}") from exc
     tmp = target_home / f".config-{os.getpid()}"
-    tmp.write_text(rendered_cfg, encoding="utf-8")
-    tmp.chmod(0o600)
-    os.replace(tmp, target_home / "config.toml")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(rendered_cfg)
+        fd = -1
+        os.replace(tmp, target_home / "config.toml")
+    finally:
+        if fd != -1:
+            os.close(fd)
     return target_home
 
 

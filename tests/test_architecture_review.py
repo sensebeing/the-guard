@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 import tempfile
 from unittest.mock import patch
 
@@ -23,6 +24,8 @@ from the_guard.review.engine import (
 )
 from the_guard.review.prompt import _render_bounded_diff_section
 from the_guard.review.provider import (
+    _has_provider_credentials,
+    prepare_isolated_codex_home,
     _normalize_priority_order,
     _normalize_provider_models,
     probe_environment,
@@ -34,6 +37,7 @@ from the_guard.review.repository import (
     is_reviewable_path,
     load_valid_receipt,
 )
+from the_guard.review.contract import CODEX_DISABLED_FEATURES
 from the_guard.review.runner import (
     _build_provider_cmd,
     _build_provider_env,
@@ -222,6 +226,92 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(provider_env.get("THE_GUARD_REVIEW_ACTIVE"), "1")
         self.assertEqual(provider_env.get("THE_GUARD_SESSION_MODE"), "readonly")
         self.assertNotIn("CLAUDECODE", provider_env)
+
+    def test_prepare_isolated_codex_home_and_codex_subprocess_env(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            src_home = tmp / "source-codex"
+            common_dir = tmp / "common"
+            src_home.mkdir()
+            common_dir.mkdir()
+            (src_home / "auth.json").write_text("{}", encoding="utf-8")
+            (src_home / ".credentials.json").write_text("{}", encoding="utf-8")
+            (src_home / "AGENTS.md").write_text("ambient", encoding="utf-8")
+            (src_home / "hooks.json").write_text("ambient", encoding="utf-8")
+            (src_home / "plugins").mkdir()
+            (src_home / "marketplaces").mkdir()
+            (src_home / "config.toml").write_text(
+                'model = "gpt-test"\n'
+                'model_catalog_json = "catalog.json"\n'
+                'openai_base_url = "https://example.invalid"\n'
+                '[model_providers.magpie]\n'
+                'experimental_bearer_token = "secret-token-123"\n'
+                'http_headers = {"X-Test" = "1"}\n'
+                '[mcp_servers.foo]\ncommand = "unsafe"\n'
+                '[plugins.foo]\nenabled = true\n'
+                '[marketplaces.foo]\nurl = "https://example.invalid"\n'
+                '[hooks.foo]\nenabled = true\n'
+                '[projects.foo]\npath = "/tmp"\n',
+                encoding="utf-8",
+            )
+            target = prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            self.assertEqual(target, common_dir / "the-guard-codex-home")
+            self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((target / "config.toml").stat().st_mode & 0o777, 0o600)
+            self.assertTrue((target / "auth.json").is_symlink())
+            self.assertTrue((target / ".credentials.json").is_symlink())
+            self.assertFalse((target / "AGENTS.md").exists())
+            self.assertFalse((target / "hooks.json").exists())
+            self.assertFalse((target / "plugins").exists())
+            self.assertFalse((target / "marketplaces").exists())
+            rendered = tomllib.loads((target / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual(rendered["model"], "gpt-test")
+            self.assertEqual(rendered["openai_base_url"], "https://example.invalid")
+            self.assertEqual(rendered["model_catalog_json"], str((src_home / "catalog.json").resolve()))
+            self.assertEqual(rendered["model_providers"]["magpie"]["experimental_bearer_token"], "secret-token-123")
+            self.assertEqual(rendered["model_providers"]["magpie"]["http_headers"], {"X-Test": "1"})
+            self.assertFalse(any(key in rendered for key in ("mcp_servers", "plugins", "marketplaces", "hooks", "projects")))
+            self.assertFalse(rendered["check_for_update_on_startup"])
+            self.assertTrue(all(rendered["features"][feature] is False for feature in CODEX_DISABLED_FEATURES))
+
+            (src_home / ".credentials.json").unlink()
+            prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(src_home)})
+            self.assertFalse((target / ".credentials.json").exists())
+
+            auth_only = tmp / "auth-only"
+            auth_only.mkdir()
+            (auth_only / "auth.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(auth_only)}).is_dir())
+            self.assertTrue(_has_provider_credentials("codex", {"CODEX_HOME": str(auth_only), "HOME": str(tmp / "empty")}))
+            corrupt = tmp / "corrupt"
+            corrupt.mkdir()
+            (corrupt / "config.toml").write_text("[broken", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                prepare_isolated_codex_home(common_dir, {"CODEX_HOME": str(corrupt)})
+
+            repo, _ = self._init_repo(tmp / "repo-fixture")
+            (repo / "services").mkdir()
+            (repo / "services/example.py").write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/example.py")
+            _git(repo, "commit", "-m", "change")
+            fake_bin = tmp / "bin"
+            argv_file = tmp / "codex-argv.json"
+            env_file = tmp / "codex-env.json"
+            _write_exec(
+                fake_bin / "codex",
+                "#!/usr/bin/env python3\n"
+                "import json, os, subprocess, sys\n"
+                "if '--version' in sys.argv: print('codex test'); raise SystemExit(0)\n"
+                "json.dump(sys.argv[1:], open(os.environ['ARGV_FILE'], 'w'))\n"
+                "json.dump({'CODEX_HOME': os.environ.get('CODEX_HOME')}, open(os.environ['ENV_FILE'], 'w'))\n"
+                "out = sys.argv[sys.argv.index('-o') + 1]\n"
+                "json.dump({'verdict':'GO','summary':'ok','blocking_findings':[],'reviewed_head_sha':subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()}, open(out, 'w'))\n",
+            )
+            env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp / "empty-home"), "CODEX_HOME": str(src_home), "THE_GUARD_REVIEW_CONFIG": str(tmp / "review.json"), "ARGV_FILE": str(argv_file), "ENV_FILE": str(env_file)}
+            result = run_architecture_review(repo, force=True, explicit_provider="codex", env=env)
+            self.assertEqual(result.verdict, "GO")
+            self.assertEqual(json.loads(env_file.read_text())["CODEX_HOME"], str(git_common_dir(repo) / "the-guard-codex-home"))
+            self.assertNotIn("secret-token-123", " ".join(json.loads(argv_file.read_text())))
 
     def test_pure_documentation_diff_is_exempt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
