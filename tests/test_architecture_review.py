@@ -921,6 +921,15 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))
+            (repo / "pkg/server").mkdir(parents=True)
+            (repo / "pkg/server/handler.go").write_text("package server\n", encoding="utf-8")
+            _git(repo, "add", "pkg/server/handler.go")
+            _git(repo, "commit", "-m", "unbound external layout change")
+            prompt = build_review_prompt(repo, collect_review_scope(repo))
+            self.assertIn("## Unbound Module Topology Guidance", prompt)
+
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
             (repo / ".guard").mkdir()
             (repo / ".guard/config.json").write_text(
                 '{"topology": {"exclusive_sql_owners": [{"table": "jobs", "owners": ["services/owner.py"]}]}}\n',

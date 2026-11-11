@@ -315,21 +315,28 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
                     f"## Boundary reference: {path}\n"
                     + proc.stdout.decode("utf-8", errors="replace")
                 )
-    if any(
-        not _has_explicit_topology_contract(
-            {
-                **rendered_topology,
-                "modules": [
-                    item
-                    for item in rendered_topology.get("modules", [])
-                    if isinstance(item, dict) and item.get("path") == module
-                ],
-            },
-            module in loaded_boundary_modules,
-            module,
+    unbound_guidance_needed = (
+        (
+            not touched
+            and not _has_explicit_topology_contract(rendered_topology, False, None)
         )
-        for module in touched
-    ):
+        or any(
+            not _has_explicit_topology_contract(
+                {
+                    **rendered_topology,
+                    "modules": [
+                        item
+                        for item in rendered_topology.get("modules", [])
+                        if isinstance(item, dict) and item.get("path") == module
+                    ],
+                },
+                module in loaded_boundary_modules,
+                module,
+            )
+            for module in touched
+        )
+    )
+    if unbound_guidance_needed:
         sections.append(
             "## Unbound Module Topology Guidance\n"
             "This repository has no declared module boundary documents or declarative topology constraints for the touched scope:\n"
