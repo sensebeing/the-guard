@@ -28,19 +28,21 @@ The static guard layer runs in about 40 ms with zero tokens. Noise and fix-direc
 
 ## Track 2 - Martian real open-source PRs
 
-Martian's aggregate table covers 50 real PRs:
+Aggregate comparison (`the-guard` and `Codex 6.1 raw` evaluated locally with `gpt-6.1-sol` on the 6-PR real-PR suite; third-party products from Martian's 50-PR aggregate):
 
-| Product | Precision | Recall | F1 | Type |
-| --- | ---: | ---: | ---: | --- |
-| Claude Code | 58.9% | 32.1% | 41.6% | Agent |
-| Cursor BugBot | 51.9% | 32.9% | 40.3% | PR bot |
-| CodeRabbit | 31.8% | 51.4% | 39.3% | PR bot |
-| Greptile v4.1 | 34.9% | 42.9% | 38.5% | Graph PR bot |
-| GitHub Copilot Review v2 | 31.3% | 42.9% | 36.2% | Platform review |
-| Qodo Extended v2 / PR-Agent | 38.7% | 33.6% | 36.0% | PR agent |
-| Devin Review | 34.9% | 37.1% | 36.0% | Autonomous agent |
-| Sourcery | 26.5% | 35.0% | 30.2% | Refactoring bot |
-| Kodus v2 | 20.2% | 46.4% | 28.1% | PR bot |
+| Product | Evaluated scope | Precision | Recall | F1 | Type |
+| --- | --- | ---: | ---: | ---: | --- |
+| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** | **Pre-merge architecture gate** |
+| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** | **Raw coding agent** |
+| Claude Code | Martian 50-PR aggregate | 58.9% | 32.1% | 41.6% | Agent |
+| Cursor BugBot | Martian 50-PR aggregate | 51.9% | 32.9% | 40.3% | PR bot |
+| CodeRabbit | Martian 50-PR aggregate | 31.8% | 51.4% | 39.3% | PR bot |
+| Greptile v4.1 | Martian 50-PR aggregate | 34.9% | 42.9% | 38.5% | Graph PR bot |
+| GitHub Copilot Review v2 | Martian 50-PR aggregate | 31.3% | 42.9% | 36.2% | Platform review |
+| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 38.7% | 33.6% | 36.0% | PR agent |
+| Devin Review | Martian 50-PR aggregate | 34.9% | 37.1% | 36.0% | Autonomous agent |
+| Sourcery | Martian 50-PR aggregate | 26.5% | 35.0% | 30.2% | Refactoring bot |
+| Kodus v2 | Martian 50-PR aggregate | 20.2% | 46.4% | 28.1% | PR bot |
 
 The local comparisons use the same PR snapshots:
 

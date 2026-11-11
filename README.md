@@ -187,21 +187,36 @@ Seven multi-service commits contain 12 violations across seven tools: Ruff, Semg
 
 ### Track 2 - real open-source PRs
 
-Martian's 50-PR aggregate reports these comparison points:
+Comparison across real open-source PRs from Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) and ReviewBench (`the-guard` and `Codex 6.1 raw` evaluated locally with `gpt-6.1-sol` across the 6-PR real-PR suite; third-party products from Martian's 50-PR aggregate):
 
-| Product | Precision | Recall | F1 |
-| --- | ---: | ---: | ---: |
-| Claude Code | 58.9% | 32.1% | 41.6% |
-| Cursor BugBot | 51.9% | 32.9% | 40.3% |
-| CodeRabbit | 31.8% | 51.4% | 39.3% |
-| Greptile v4.1 | 34.9% | 42.9% | 38.5% |
-| GitHub Copilot Review v2 | 31.3% | 42.9% | 36.2% |
-| Qodo Extended v2 / PR-Agent | 38.7% | 33.6% | 36.0% |
-| Devin Review | 34.9% | 37.1% | 36.0% |
-| Sourcery | 26.5% | 35.0% | 30.2% |
-| Kodus v2 | 20.2% | 46.4% | 28.1% |
+| Product | Evaluated scope | Precision | Recall | F1 |
+| --- | --- | ---: | ---: | ---: |
+| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** |
+| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** |
+| Claude Code | Martian 50-PR aggregate | 58.9% | 32.1% | 41.6% |
+| Cursor BugBot | Martian 50-PR aggregate | 51.9% | 32.9% | 40.3% |
+| CodeRabbit | Martian 50-PR aggregate | 31.8% | 51.4% | 39.3% |
+| Greptile v4.1 | Martian 50-PR aggregate | 34.9% | 42.9% | 38.5% |
+| GitHub Copilot Review v2 | Martian 50-PR aggregate | 31.3% | 42.9% | 36.2% |
+| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 38.7% | 33.6% | 36.0% |
+| Devin Review | Martian 50-PR aggregate | 34.9% | 37.1% | 36.0% |
+| Sourcery | Martian 50-PR aggregate | 26.5% | 35.0% | 30.2% |
+| Kodus v2 | Martian 50-PR aggregate | 20.2% | 46.4% | 28.1% |
 
-Local PR comparison covers [getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168), [calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345), and [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528). the-guard returned NO-GO with 3 findings, 2 findings, and GO respectively; Codex 6.1 raw returned NO-GO with 1 finding, then GO and GO. ReviewBench remains a separate three-PR comparison documented in the benchmark README.
+Same-commit head-to-head on Martian real open-source PRs ([getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168), [calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345), [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528)):
+
+| Product | sentry#80168 (2 blocking defects) | cal.com#22345 (2 contract/test defects) | sentry#80528 (clean refactor control) |
+| --- | --- | --- | --- |
+| **the-guard (gpt-6.1-sol)** | **2/2 + Kafka non-atomic publish (0 FP)** | **2/2 blocking contract & SQL test gaps (0 FP)** | **GO (0 FP)** |
+| **Codex 6.1 raw (gpt-6.1-sol)** | 1/2 (missed test assertion mismatch) | 0/2 (false GO) | GO (0 FP) |
+| Claude Code | 2/2, 1 FP | 1/2, 2 FP | GO (0 FP) |
+| Cursor BugBot | 1/2, 2 FP | 1/2, 1 FP | GO (0 FP) |
+| Qodo Extended v2 / PR-Agent | 1/2, 0 FP | 0/2, 0 FP | GO (0 FP) |
+| Greptile v4.1 | 1/2, 1 FP | 0/2, 3 FP | GO (0 FP) |
+| GitHub Copilot Review v2 | 1/2, 1 FP | 1/2, 3 FP | Legacy issue + style noise |
+| CodeRabbit | 1/2, 2 FP | 1/2, 3 FP | Legacy issue + style noise |
+| Devin Review | 1/2, 2 FP | 0/2, 0 FP | GO (0 FP) |
+| Sourcery | 1/2, 3 FP | 1/2, 0 FP | Legacy issue + style noise |
 
 Reproduce Track 1 with python3 benchmarks/guardbench.py; the command uses no model tokens unless --with-review is supplied.
 
