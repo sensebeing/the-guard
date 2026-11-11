@@ -304,18 +304,31 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
         "## Declared topology",
         json.dumps(rendered_topology, indent=2),
     ]
-    loaded_boundary_docs = False
+    loaded_boundary_modules: set[str] = set()
     for module in sorted(touched):
         for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
             path = module + "/" + name
             proc = _git(repo_root, "show", f"{scope.head_sha}:{path}", check=False)
             if proc.returncode == 0:
-                loaded_boundary_docs = True
+                loaded_boundary_modules.add(module)
                 sections.append(
                     f"## Boundary reference: {path}\n"
                     + proc.stdout.decode("utf-8", errors="replace")
                 )
-    if not _has_explicit_topology_contract(rendered_topology, loaded_boundary_docs):
+    if any(
+        not _has_explicit_topology_contract(
+            {
+                **rendered_topology,
+                "modules": [
+                    item
+                    for item in rendered_topology.get("modules", [])
+                    if isinstance(item, dict) and item.get("path") == module
+                ],
+            },
+            module in loaded_boundary_modules,
+        )
+        for module in touched
+    ):
         sections.append(
             "## Unbound Module Topology Guidance\n"
             "This repository has no declared module boundary documents or declarative topology constraints for the touched scope:\n"

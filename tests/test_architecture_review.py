@@ -945,6 +945,19 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("## Boundary reference: services/a/README.md", prompt)
             self.assertNotIn("## Unbound Module Topology Guidance", prompt)
 
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/README.md").write_text("# boundary\n", encoding="utf-8")
+            (repo / "services/a/main.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "services/b").mkdir(parents=True)
+            (repo / "services/b/main.py").write_text("y = 2\n", encoding="utf-8")
+            _git(repo, "add", "services/a", "services/b")
+            _git(repo, "commit", "-m", "mixed boundaries")
+            prompt = build_review_prompt(repo, collect_review_scope(repo))
+            self.assertIn("## Boundary reference: services/a/README.md", prompt)
+            self.assertIn("## Unbound Module Topology Guidance", prompt)
+
     def test_large_diff_preserves_full_stat_and_lists_omitted_files(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))
