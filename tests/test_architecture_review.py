@@ -202,7 +202,6 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(codex_resume_cmd[:3], ["/bin/codex", "exec", "resume"])
         self.assertIn("thread-1", codex_resume_cmd)
         for cmd in (codex_cmd, codex_resume_cmd):
-            self.assertIn("--ignore-user-config", cmd)
             self.assertIn("--ignore-rules", cmd)
             self.assertIn("--disable", cmd)
             self.assertIn("plugins", cmd)

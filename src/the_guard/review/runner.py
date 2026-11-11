@@ -24,8 +24,9 @@ from .contract import (
     ReviewScope,
     ReviewTimeoutError,
     build_agy_readonly_settings,
+    CODEX_DISABLED_FEATURES,
 )
-from .provider import build_codex_isolated_args
+from .provider import prepare_isolated_codex_home
 from .repository import current_branch_name, git_common_dir
 from .session import BlockingFinding, ReviewRunLogger
 
@@ -478,7 +479,6 @@ def _build_provider_cmd(
     model: str = "",
     effort: str = "",
     common_dir: Path | None = None,
-    env: dict[str, str] | None = None,
 ) -> list[str]:
     if provider == "agy":
         cmd = [
@@ -531,7 +531,14 @@ def _build_provider_cmd(
             cmd.extend(["--session-id", session_id])
         return cmd
     if provider == "codex":
-        isolated_args = build_codex_isolated_args(env, model=model, effort=effort)
+        isolated_args = ["--ignore-rules"]
+        for feature in CODEX_DISABLED_FEATURES:
+            isolated_args.extend(["--disable", feature])
+        isolated_args.extend(["-c", "check_for_update_on_startup=false"])
+        if model:
+            isolated_args.extend(["-m", model])
+        if effort:
+            isolated_args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
         if resume_session_id:
             return [
                 binary_path,
@@ -681,7 +688,6 @@ def _invoke_provider(
             model=model,
             effort=effort,
             common_dir=common_dir,
-            env=child_env,
         )
         try:
             rc, out, err = _run_streaming_cmd(
@@ -712,6 +718,8 @@ def _invoke_provider(
         out_file = common_dir / f"the-guard-out-{os.getpid()}.tmp.json"
         schema_file.write_text(schema_str, encoding="utf-8")
         try:
+            isolated_codex_home = prepare_isolated_codex_home(common_dir, env)
+            codex_env = {**child_env, "CODEX_HOME": str(isolated_codex_home)}
             cmd = _build_provider_cmd(
                 provider,
                 binary_path,
@@ -722,13 +730,12 @@ def _invoke_provider(
                 resume_session_id=resume_session_id,
                 model=model,
                 effort=effort,
-                env=child_env,
             )
             rc, out, err = _run_streaming_cmd(
                 provider,
                 cmd,
                 cwd=repo_root,
-                env=child_env,
+                env=codex_env,
                 stdin_text=prompt,
                 run_logger=run_logger,
             )

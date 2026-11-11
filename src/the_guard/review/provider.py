@@ -12,7 +12,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .contract import CODEX_DISABLED_FEATURES, CODEX_ROUTING_CONFIG_KEYS, CONFIG_SCHEMA, PROVIDERS
+from .contract import (
+    CODEX_DISABLED_FEATURES,
+    CODEX_ISOLATED_HOME_DIRNAME,
+    CODEX_RELATIVE_PATH_CONFIG_KEYS,
+    CODEX_ROUTING_CONFIG_KEYS,
+    CONFIG_SCHEMA,
+    PROVIDERS,
+)
 from .repository import git_common_dir
 from .session import UTC
 
@@ -99,28 +106,74 @@ def _format_toml_value(value: Any) -> str | None:
     return None
 
 
-def build_codex_isolated_args(env: dict[str, str] | None = None, *, model: str = "", effort: str = "") -> list[str]:
-    args = ["--ignore-user-config", "--ignore-rules"]
-    for feature in CODEX_DISABLED_FEATURES:
-        args.extend(["--disable", feature])
-    args.extend(["-c", "check_for_update_on_startup=false"])
+def prepare_isolated_codex_home(common_dir: Path, env: dict[str, str] | None = None) -> Path:
+    source_home = codex_home_dir(env)
+    target_home = common_dir / CODEX_ISOLATED_HOME_DIRNAME
+    target_home.mkdir(parents=True, exist_ok=True)
+    target_home.chmod(0o700)
+    if source_home.resolve() == target_home.resolve():
+        return target_home
+
+    for name in ("auth.json", ".credentials.json"):
+        target = target_home / name
+        source = source_home / name
+        if source.exists():
+            target.unlink(missing_ok=True)
+            target.symlink_to(source.resolve())
+        else:
+            target.unlink(missing_ok=True)
+
+    src_cfg_path = source_home / "config.toml"
     try:
-        parsed_cfg = tomllib.loads((codex_home_dir(env) / "config.toml").read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        parsed_cfg = {}
+        raw_cfg = src_cfg_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        parsed_cfg: dict[str, Any] = {}
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"Invalid Codex configuration at {src_cfg_path}: {exc}") from exc
+    else:
+        try:
+            parsed_cfg = tomllib.loads(raw_cfg)
+        except tomllib.TOMLDecodeError as exc:
+            raise RuntimeError(f"Invalid Codex configuration at {src_cfg_path}: {exc}") from exc
+
+    lines = ["check_for_update_on_startup = false"]
     for key in CODEX_ROUTING_CONFIG_KEYS:
-        if key == "model" and model or key == "model_reasoning_effort" and effort:
+        if key == "model_providers" or key not in parsed_cfg:
             continue
-        if key not in parsed_cfg:
+        value = parsed_cfg[key]
+        if key in CODEX_RELATIVE_PATH_CONFIG_KEYS and isinstance(value, str) and value:
+            expanded = Path(value).expanduser()
+            value = str((source_home / expanded).resolve()) if not expanded.is_absolute() else str(expanded.resolve())
+        if not isinstance(value, (bool, int, float, str, list)):
             continue
-        rendered = _format_toml_value(parsed_cfg[key])
-        if rendered and rendered != "{}":
-            args.extend(["-c", f"{key}={rendered}"])
-    if model:
-        args.extend(["-m", model])
-    if effort:
-        args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
-    return args
+        rendered = _format_toml_value(value)
+        if rendered is not None:
+            lines.append(f"{key} = {rendered}")
+    lines.append("")
+    lines.append("[features]")
+    lines.extend(f"{feature} = false" for feature in CODEX_DISABLED_FEATURES)
+    providers = parsed_cfg.get("model_providers")
+    if isinstance(providers, dict):
+        for provider_name, provider_cfg in providers.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            lines.extend(
+                ["", f"[model_providers.{json.dumps(str(provider_name), ensure_ascii=False)}]"]
+            )
+            for key, value in provider_cfg.items():
+                rendered = _format_toml_value(value)
+                if rendered is not None:
+                    lines.append(f"{key} = {rendered}")
+    rendered_cfg = "\n".join(lines) + "\n"
+    try:
+        tomllib.loads(rendered_cfg)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError(f"Invalid isolated Codex configuration: {exc}") from exc
+    tmp = target_home / f".config-{os.getpid()}"
+    tmp.write_text(rendered_cfg, encoding="utf-8")
+    tmp.chmod(0o600)
+    os.replace(tmp, target_home / "config.toml")
+    return target_home
 
 
 def _verify_binary_runs(binary_path: str, env: dict[str, str]) -> bool:
