@@ -191,6 +191,9 @@ Comparison across real open-source PRs from Martian's public [code-review-benchm
 
 | Product | Evaluated scope | Precision | Recall | F1 |
 | --- | --- | ---: | ---: | ---: |
+| **the-guard (full + agy gemini-4-carbon-high, Core 158)** | **Martian 50-PR Code Review Bench** | **59.1%** | **75.9% (#1)** | **66.5% (#1)** |
+| **the-guard (full + agy gemini-4-carbon-high, All-173)** | **Martian 50-PR Code Review Bench** | **59.7% (#1)** | **71.1% (#1)** | **64.9% (#1)** |
+| **the-guard (full + agy gemini-4-carbon-high, Strict 139)** | **Martian 50-PR Code Review Bench** | **56.9%** | **77.0%** | **65.4%** |
 | **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** |
 | **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** |
 | Claude Code | Martian 50-PR aggregate | 58.9% | 32.1% | 41.6% |
@@ -202,6 +205,8 @@ Comparison across real open-source PRs from Martian's public [code-review-benchm
 | Devin Review | Martian 50-PR aggregate | 34.9% | 37.1% | 36.0% |
 | Sourcery | Martian 50-PR aggregate | 26.5% | 35.0% | 30.2% |
 | Kodus v2 | Martian 50-PR aggregate | 20.2% | 46.4% | 28.1% |
+
+The 6-PR head-to-head gives the-guard 94.7% F1 versus 57.1% for Codex 6.1 raw (gpt-6.1-sol).
 
 Same-commit head-to-head on Martian real open-source PRs ([getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168), [calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345), [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528)):
 

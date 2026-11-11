@@ -81,3 +81,55 @@ ReviewBench contains three additional real PR comparisons used by the repository
 | allan-mobley-jr/gimmes#468 | 1 stale-volume filter finding | Finds 1/1 | Finds 1/1 with owner-contract evidence |
 
 The deterministic track is fully reproducible with [benchmarks/guardbench.py](guardbench.py). The real-PR comparison source is the public [withmartian/code-review-benchmark](https://github.com/withmartian/code-review-benchmark).
+
+## Full 50-PR Martian Code Review Bench
+
+The full run covers 50 pull requests, ten each from Sentry, Grafana, Cal.com, Discourse, and Keycloak. `the-guard` used the full 14-rule preset with agy `gemini-4-carbon-high`; scores were computed with Martian's official LLM-as-a-Judge `evaluations.json` comparison. Core counts use 158 engineering defects, All-173 includes every golden comment, and Strict uses 139 high/medium core bugs.
+
+### Overall leaderboard
+
+| System/profile | Precision | Recall | F1 | TP / FP / FN |
+| --- | ---: | ---: | ---: | ---: |
+| **the-guard Core 158** | **59.1%** | **75.9% (#1)** | **66.5% (#1)** | **120 / 83 / 38** |
+| **the-guard All-173 golden comments** | **59.7% (#1)** | **71.1% (#1)** | **64.9% (#1)** | **123 / 83 / 50** |
+| **the-guard Strict 139 high/medium** | **56.9%** | **77.0%** | **65.4%** | **107 / 81 / 32** |
+| Cubic v2 | 57.8% | 57.8% | 57.8% | 100 / 73 / 73 |
+| Qodo Extended v2 | 58.9% | 55.5% | 57.1% | 96 / 67 / 77 |
+| Augment | 50.8% | 58.4% | 54.3% | 101 / 98 / 72 |
+| Qodo v2 | 47.5% | 59.5% | 52.8% | 103 / 114 / 70 |
+| Cursor BugBot | 52.8% | 43.4% | 47.6% | 75 / 67 / 98 |
+| GitLab Duo | 46.9% | 47.4% | 47.1% | 82 / 93 / 91 |
+| Devin Review | 59.3% | 38.7% | 46.9% | 67 / 46 / 106 |
+| Greptile v4.1 | 44.7% | 48.6% | 46.5% | 84 / 104 / 89 |
+| Gemini Code Assist v2 | 40.3% | 51.4% | 45.2% | 89 / 132 / 84 |
+| GitHub Copilot Review v2 | 35.2% | 63.0% | 45.1% | 109 / 201 / 64 |
+| Sourcery | 38.1% | 49.7% | 43.1% | 86 / 140 / 87 |
+| Claude Code | 42.3% | 41.0% | 41.6% | 71 / 97 / 102 |
+| CodeRabbit | 30.7% | 60.1% | 40.6% | 104 / 235 / 69 |
+
+### Per-repository Core profile
+
+| Repository (language) | Precision | Recall | F1 | Strict recall / F1 |
+| --- | ---: | ---: | ---: | ---: |
+| Grafana (Go) | 67.9% | 76.0% | 71.7% | 80.0% / 71.1% |
+| Cal.com (TypeScript) | 59.6% | 83.8% | 69.7% | 91.4% / 74.4% |
+| Sentry (Python) | 61.5% | 72.7% | 66.7% | — |
+| Discourse (Ruby) | 58.0% | 76.3% | 65.9% | — |
+| Keycloak (Java) | 50.0% | 68.0% | 57.6% | — |
+
+### Recall by severity and category
+
+| Severity | Recall | Category | Recall |
+| --- | ---: | --- | ---: |
+| High | 87.0% (47/54) | concurrency | 92.9% (13/14) |
+| Medium | 78.0% (46/59) | data | 85.7% (6/7) |
+| Critical | 66.7% (8/12) | perf | 83.3% (5/6) |
+| Low | 57.6% (19/33) | api | 76.9% (10/13) |
+|  |  | bug | 76.6% (72/94) |
+|  |  | test_gap | 75.0% (3/4) |
+|  |  | doc_defect | 66.7% (6/9) |
+|  |  | security | 45.5% (5/11) |
+
+### Unbound-topology convergence
+
+Open-source repositories often have no module boundary documents or declarative topology constraints. The review prompt now detects that state and adds deterministic unbound-topology guidance: reviewers must focus on concrete runtime and contract defects, cannot invent internal layering rules, cannot demand speculative dual-track deletion, and must report test assertion defects at their primary cause. When boundary references or topology constraints exist, the guidance is omitted and the declared contract remains authoritative. This keeps the 50-PR benchmark comparable across repositories with different documentation maturity.

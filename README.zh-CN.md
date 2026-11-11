@@ -191,6 +191,9 @@ Martian 的 50 个 PR 汇总结果如下：
 
 | 产品 | Precision | Recall | F1 |
 | --- | ---: | ---: | ---: |
+| **the-guard（full + agy gemini-4-carbon-high，Core 158）** | **59.1%** | **75.9%（第 1）** | **66.5%（第 1）** |
+| **the-guard（full + agy gemini-4-carbon-high，All-173）** | **59.7%（第 1）** | **71.1%（第 1）** | **64.9%（第 1）** |
+| **the-guard（full + agy gemini-4-carbon-high，Strict 139）** | **56.9%** | **77.0%** | **65.4%** |
 | Claude Code | 58.9% | 32.1% | 41.6% |
 | Cursor BugBot | 51.9% | 32.9% | 40.3% |
 | CodeRabbit | 31.8% | 51.4% | 39.3% |
@@ -200,6 +203,8 @@ Martian 的 50 个 PR 汇总结果如下：
 | Devin Review | 34.9% | 37.1% | 36.0% |
 | Sourcery | 26.5% | 35.0% | 30.2% |
 | Kodus v2 | 20.2% | 46.4% | 28.1% |
+
+6-PR 头对头中，the-guard 的 F1 为 94.7%，Codex 6.1 裸审查（gpt-6.1-sol）为 57.1%。
 
 本机逐 PR 对比覆盖 [getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168)、[calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345) 和 [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528)。the-guard 依次返回 NO-GO（3 项）、NO-GO（2 项）和 GO；Codex 6.1 裸审查依次返回 NO-GO（1 项）、GO 和 GO。ReviewBench 的三个 PR 对比仍单独记录在基准 README。
 

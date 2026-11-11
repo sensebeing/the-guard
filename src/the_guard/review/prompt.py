@@ -8,6 +8,7 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from ..config import load_config
 from ..policy import Policy, load_policy
@@ -303,16 +304,49 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
         "## Declared topology",
         json.dumps(rendered_topology, indent=2),
     ]
+    loaded_boundary_docs = False
     for module in sorted(touched):
         for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
             path = module + "/" + name
             proc = _git(repo_root, "show", f"{scope.head_sha}:{path}", check=False)
             if proc.returncode == 0:
+                loaded_boundary_docs = True
                 sections.append(
                     f"## Boundary reference: {path}\n"
                     + proc.stdout.decode("utf-8", errors="replace")
                 )
+    if not _has_explicit_topology_contract(rendered_topology, loaded_boundary_docs):
+        sections.append(
+            "## Unbound Module Topology Guidance\n"
+            "This repository has no declared module boundary documents or declarative topology constraints for the touched scope:\n"
+            "1. Focus blocking findings on concrete runtime, logic, state, security, concurrency, data/ORM, API contract, broken test assertion, or docstring/signature mismatch defects introduced or exposed by the diff.\n"
+            "2. Do NOT invent internal module-layering rules (e.g., demanding that a helper, metric, or model call be wrapped in another internal module) unless an explicit boundary contract in the repository requires it.\n"
+            "3. Do NOT demand deleting existing database columns, feature flags, or compatibility helpers as dual-track code unless the diff itself proves the old path is dead and unreferenced across the repository.\n"
+            "4. Flag test issues under `guard.test-case-quality` when an existing or modified test has a wrong assertion, tests the wrong variable, or fails to exercise the query/code path it claims to test; do NOT block a PR solely with a generic \"missing new unit tests\" complaint.\n"
+            "5. Report each distinct root-cause defect once at its primary location instead of splitting one defect into multiple cascading findings."
+        )
     return sections
+
+
+def _has_explicit_topology_contract(
+    topology: dict[str, Any], loaded_boundary_docs: bool
+) -> bool:
+    if loaded_boundary_docs:
+        return True
+    for key in (
+        "forbidden_imports",
+        "module_boundaries",
+        "exclusive_sql_owners",
+        "retired_tables",
+        "forbidden_patterns",
+    ):
+        if topology.get(key):
+            return True
+    return any(
+        module.get("boundary_docs") or module.get("dependencies")
+        for module in topology.get("modules", [])
+        if isinstance(module, dict)
+    )
 
 
 def _output_contract(scope: ReviewScope, incremental: bool = False) -> str:
