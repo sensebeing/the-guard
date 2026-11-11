@@ -879,31 +879,6 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 self.assertTrue(rule.detail_body)
                 self.assertIn(rule.detail_body, prompt)
 
-    def test_build_review_prompt_guides_unbound_topology_only_without_contract(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
-            (repo / "services/a").mkdir(parents=True)
-            (repo / "services/a/main.py").write_text("x = 1\n", encoding="utf-8")
-            _git(repo, "add", "services/a/main.py")
-            _git(repo, "commit", "-m", "unbound change")
-            prompt = build_review_prompt(repo, collect_review_scope(repo))
-            self.assertIn("## Unbound Module Topology Guidance", prompt)
-            self.assertNotIn("## Boundary reference: services/a/", prompt)
-
-        with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
-            (repo / ".guard").mkdir()
-            (repo / ".guard/config.json").write_text(
-                '{"topology": {"forbidden_imports": [{"from": "services/a", "to": "internal.storage"}]}}\n',
-                encoding="utf-8",
-            )
-            (repo / "services/a").mkdir(parents=True)
-            (repo / "services/a/main.py").write_text("x = 1\n", encoding="utf-8")
-            _git(repo, "add", ".guard/config.json", "services/a/main.py")
-            _git(repo, "commit", "-m", "bound change")
-            prompt = build_review_prompt(repo, collect_review_scope(repo))
-            self.assertNotIn("## Unbound Module Topology Guidance", prompt)
-
         expected = "abcdef0123456789" * 2 + "abcdef01"
         previous = "1234567890abcdef" * 2 + "12345678"
         for reported in (expected, expected[:7], "  " + expected[:12].upper() + "  "):
@@ -933,6 +908,42 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             _verify_reviewed_head_sha(
                 {"reviewed_head_sha": previous, "summary": expected}, expected
             )
+
+    def test_build_review_prompt_guides_unbound_topology_only_without_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/main.py").write_text("x = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/a/main.py")
+            _git(repo, "commit", "-m", "unbound change")
+            prompt = build_review_prompt(repo, collect_review_scope(repo))
+            self.assertIn("## Unbound Module Topology Guidance", prompt)
+            self.assertNotIn("## Boundary reference: services/a/", prompt)
+
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(
+                '{"topology": {"forbidden_imports": [{"from": "services/a", "to": "internal.storage"}]}}\n',
+                encoding="utf-8",
+            )
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/main.py").write_text("x = 1\n", encoding="utf-8")
+            _git(repo, "add", ".guard/config.json", "services/a/main.py")
+            _git(repo, "commit", "-m", "bound change")
+            prompt = build_review_prompt(repo, collect_review_scope(repo))
+            self.assertNotIn("## Unbound Module Topology Guidance", prompt)
+
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/README.md").write_text("# boundary\n", encoding="utf-8")
+            (repo / "services/a/main.py").write_text("x = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/a")
+            _git(repo, "commit", "-m", "boundary docs")
+            prompt = build_review_prompt(repo, collect_review_scope(repo))
+            self.assertIn("## Boundary reference: services/a/README.md", prompt)
+            self.assertNotIn("## Unbound Module Topology Guidance", prompt)
 
     def test_large_diff_preserves_full_stat_and_lists_omitted_files(self) -> None:
         with tempfile.TemporaryDirectory() as td:

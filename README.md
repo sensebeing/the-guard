@@ -194,17 +194,21 @@ Comparison across real open-source PRs from Martian's public [code-review-benchm
 | **the-guard (full + agy gemini-4-carbon-high, Core 158)** | **Martian 50-PR Code Review Bench** | **59.1%** | **75.9% (#1)** | **66.5% (#1)** |
 | **the-guard (full + agy gemini-4-carbon-high, All-173)** | **Martian 50-PR Code Review Bench** | **59.7% (#1)** | **71.1% (#1)** | **64.9% (#1)** |
 | **the-guard (full + agy gemini-4-carbon-high, Strict 139)** | **Martian 50-PR Code Review Bench** | **56.9%** | **77.0%** | **65.4%** |
+| Cubic v2 | Martian 50-PR aggregate | 57.8% | 57.8% | 57.8% |
+| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 58.9% | 55.5% | 57.1% |
+| Augment | Martian 50-PR aggregate | 50.8% | 58.4% | 54.3% |
+| Qodo v2 | Martian 50-PR aggregate | 47.5% | 59.5% | 52.8% |
+| Cursor BugBot | Martian 50-PR aggregate | 52.8% | 43.4% | 47.6% |
+| GitLab Duo | Martian 50-PR aggregate | 46.9% | 47.4% | 47.1% |
+| Devin Review | Martian 50-PR aggregate | 59.3% | 38.7% | 46.9% |
+| Greptile v4.1 | Martian 50-PR aggregate | 44.7% | 48.6% | 46.5% |
+| Gemini Code Assist v2 | Martian 50-PR aggregate | 40.3% | 51.4% | 45.2% |
+| GitHub Copilot Review v2 | Martian 50-PR aggregate | 35.2% | 63.0% | 45.1% |
+| Sourcery | Martian 50-PR aggregate | 38.1% | 49.7% | 43.1% |
+| Claude Code | Martian 50-PR aggregate | 42.3% | 41.0% | 41.6% |
+| CodeRabbit | Martian 50-PR aggregate | 30.7% | 60.1% | 40.6% |
 | **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** |
 | **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** |
-| Claude Code | Martian 50-PR aggregate | 58.9% | 32.1% | 41.6% |
-| Cursor BugBot | Martian 50-PR aggregate | 51.9% | 32.9% | 40.3% |
-| CodeRabbit | Martian 50-PR aggregate | 31.8% | 51.4% | 39.3% |
-| Greptile v4.1 | Martian 50-PR aggregate | 34.9% | 42.9% | 38.5% |
-| GitHub Copilot Review v2 | Martian 50-PR aggregate | 31.3% | 42.9% | 36.2% |
-| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 38.7% | 33.6% | 36.0% |
-| Devin Review | Martian 50-PR aggregate | 34.9% | 37.1% | 36.0% |
-| Sourcery | Martian 50-PR aggregate | 26.5% | 35.0% | 30.2% |
-| Kodus v2 | Martian 50-PR aggregate | 20.2% | 46.4% | 28.1% |
 
 The 6-PR head-to-head gives the-guard 94.7% F1 versus 57.1% for Codex 6.1 raw (gpt-6.1-sol).
 

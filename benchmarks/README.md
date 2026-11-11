@@ -21,7 +21,7 @@ The seven-tool comparison is Ruff, Semgrep 1.185.0, code-review-graph, guard che
 | case-5 read lock, duplicate read, silent old-row fallback | 3 | 0 | 0 | 0 | 1 | 3 | 1 | 3 | 0 |
 | case-6 nested tool envelope and process adjunct as truth | 2 | 0 | 0 | 0 | review-only | 1 | 0.5 | 2 | 1 anti-architectural build_sha fix (case-6) |
 | case-7 clean owner API (false-positive control) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| **Corrupt-case total** | **12** | **0/6** | **0/6** | **0/6** | **4/6** | **6/6** | **6/6** | **6/6** | — |
+| **Corrupt-case total** | **12** | **0/6** | **0/6** | **0/6** | **4/6** | **6/6** | **6/6** | **6/6** | N/A |
 | **Violation recall** | **12** | **0/12** | **0/12** | **0/12** | **5/12** | **11/12** | **7/12** | **12/12** | 0 (12/12 root-cause aligned) |
 
 The static guard layer runs in about 40 ms with zero tokens. Noise and fix-direction results are: Ruff, Semgrep, code-review-graph, and guard check each 0; Claude Code raw 6 speculative findings (24%); Codex 6.1 raw 1 anti-architectural build_sha fix (case-6); and the-guard full 0, with 12/12 fixes aligned to root causes. The complete path attributes findings to guard rule IDs and had no clean-case false positives.
@@ -32,17 +32,24 @@ Aggregate comparison (`the-guard` and `Codex 6.1 raw` evaluated locally with `gp
 
 | Product | Evaluated scope | Precision | Recall | F1 | Type |
 | --- | --- | ---: | ---: | ---: | --- |
-| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** | **Pre-merge architecture gate** |
-| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** | **Raw coding agent** |
-| Claude Code | Martian 50-PR aggregate | 58.9% | 32.1% | 41.6% | Agent |
-| Cursor BugBot | Martian 50-PR aggregate | 51.9% | 32.9% | 40.3% | PR bot |
-| CodeRabbit | Martian 50-PR aggregate | 31.8% | 51.4% | 39.3% | PR bot |
-| Greptile v4.1 | Martian 50-PR aggregate | 34.9% | 42.9% | 38.5% | Graph PR bot |
-| GitHub Copilot Review v2 | Martian 50-PR aggregate | 31.3% | 42.9% | 36.2% | Platform review |
-| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 38.7% | 33.6% | 36.0% | PR agent |
-| Devin Review | Martian 50-PR aggregate | 34.9% | 37.1% | 36.0% | Autonomous agent |
-| Sourcery | Martian 50-PR aggregate | 26.5% | 35.0% | 30.2% | Refactoring bot |
-| Kodus v2 | Martian 50-PR aggregate | 20.2% | 46.4% | 28.1% | PR bot |
+| **the-guard (full + agy gemini-4-carbon-high, Core 158)** | **Martian 50-PR Code Review Bench** | **59.1%** | **75.9% (#1)** | **66.5% (#1)** | Pre-merge architecture gate |
+| **the-guard (full + agy gemini-4-carbon-high, All-173)** | **Martian 50-PR Code Review Bench** | **59.7% (#1)** | **71.1% (#1)** | **64.9% (#1)** | Pre-merge architecture gate |
+| **the-guard (full + agy gemini-4-carbon-high, Strict 139)** | **Martian 50-PR Code Review Bench** | **56.9%** | **77.0%** | **65.4%** | Pre-merge architecture gate |
+| Cubic v2 | Martian 50-PR aggregate | 57.8% | 57.8% | 57.8% | Martian benchmark system |
+| Qodo Extended v2 / PR-Agent | Martian 50-PR aggregate | 58.9% | 55.5% | 57.1% | Martian benchmark system |
+| Augment | Martian 50-PR aggregate | 50.8% | 58.4% | 54.3% | Martian benchmark system |
+| Qodo v2 | Martian 50-PR aggregate | 47.5% | 59.5% | 52.8% | Martian benchmark system |
+| Cursor BugBot | Martian 50-PR aggregate | 52.8% | 43.4% | 47.6% | Martian benchmark system |
+| GitLab Duo | Martian 50-PR aggregate | 46.9% | 47.4% | 47.1% | Martian benchmark system |
+| Devin Review | Martian 50-PR aggregate | 59.3% | 38.7% | 46.9% | Martian benchmark system |
+| Greptile v4.1 | Martian 50-PR aggregate | 44.7% | 48.6% | 46.5% | Martian benchmark system |
+| Gemini Code Assist v2 | Martian 50-PR aggregate | 40.3% | 51.4% | 45.2% | Martian benchmark system |
+| GitHub Copilot Review v2 | Martian 50-PR aggregate | 35.2% | 63.0% | 45.1% | Martian benchmark system |
+| Sourcery | Martian 50-PR aggregate | 38.1% | 49.7% | 43.1% | Martian benchmark system |
+| Claude Code | Martian 50-PR aggregate | 42.3% | 41.0% | 41.6% | Martian benchmark system |
+| CodeRabbit | Martian 50-PR aggregate | 30.7% | 60.1% | 40.6% | Martian benchmark system |
+| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** | Pre-merge architecture gate |
+| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** | Raw coding agent |
 
 The local comparisons use the same PR snapshots:
 
@@ -113,9 +120,9 @@ The full run covers 50 pull requests, ten each from Sentry, Grafana, Cal.com, Di
 | --- | ---: | ---: | ---: | ---: |
 | Grafana (Go) | 67.9% | 76.0% | 71.7% | 80.0% / 71.1% |
 | Cal.com (TypeScript) | 59.6% | 83.8% | 69.7% | 91.4% / 74.4% |
-| Sentry (Python) | 61.5% | 72.7% | 66.7% | — |
-| Discourse (Ruby) | 58.0% | 76.3% | 65.9% | — |
-| Keycloak (Java) | 50.0% | 68.0% | 57.6% | — |
+| Sentry (Python) | 61.5% | 72.7% | 66.7% | 66.7% / 60.0% |
+| Discourse (Ruby) | 58.0% | 76.3% | 65.9% | 75.7% / 65.1% |
+| Keycloak (Java) | 50.0% | 68.0% | 57.6% | 65.0% / 52.0% |
 
 ### Recall by severity and category
 

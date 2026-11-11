@@ -194,15 +194,19 @@ Martian 的 50 个 PR 汇总结果如下：
 | **the-guard（full + agy gemini-4-carbon-high，Core 158）** | **59.1%** | **75.9%（第 1）** | **66.5%（第 1）** |
 | **the-guard（full + agy gemini-4-carbon-high，All-173）** | **59.7%（第 1）** | **71.1%（第 1）** | **64.9%（第 1）** |
 | **the-guard（full + agy gemini-4-carbon-high，Strict 139）** | **56.9%** | **77.0%** | **65.4%** |
-| Claude Code | 58.9% | 32.1% | 41.6% |
-| Cursor BugBot | 51.9% | 32.9% | 40.3% |
-| CodeRabbit | 31.8% | 51.4% | 39.3% |
-| Greptile v4.1 | 34.9% | 42.9% | 38.5% |
-| GitHub Copilot Review v2 | 31.3% | 42.9% | 36.2% |
-| Qodo Extended v2 / PR-Agent | 38.7% | 33.6% | 36.0% |
-| Devin Review | 34.9% | 37.1% | 36.0% |
-| Sourcery | 26.5% | 35.0% | 30.2% |
-| Kodus v2 | 20.2% | 46.4% | 28.1% |
+| Cubic v2 | 57.8% | 57.8% | 57.8% |
+| Qodo Extended v2 / PR-Agent | 58.9% | 55.5% | 57.1% |
+| Augment | 50.8% | 58.4% | 54.3% |
+| Qodo v2 | 47.5% | 59.5% | 52.8% |
+| Cursor BugBot | 52.8% | 43.4% | 47.6% |
+| GitLab Duo | 46.9% | 47.4% | 47.1% |
+| Devin Review | 59.3% | 38.7% | 46.9% |
+| Greptile v4.1 | 44.7% | 48.6% | 46.5% |
+| Gemini Code Assist v2 | 40.3% | 51.4% | 45.2% |
+| GitHub Copilot Review v2 | 35.2% | 63.0% | 45.1% |
+| Sourcery | 38.1% | 49.7% | 43.1% |
+| Claude Code | 42.3% | 41.0% | 41.6% |
+| CodeRabbit | 30.7% | 60.1% | 40.6% |
 
 6-PR 头对头中，the-guard 的 F1 为 94.7%，Codex 6.1 裸审查（gpt-6.1-sol）为 57.1%。
 
