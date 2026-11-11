@@ -347,7 +347,7 @@ def _has_explicit_topology_contract(
 ) -> bool:
     if loaded_boundary_docs:
         return True
-    def applies(rule: dict[str, Any]) -> bool:
+    def applies(rule: dict[str, Any], key: str) -> bool:
         if module_path is None:
             return True
         scope_prefixes = rule.get("scope_prefixes")
@@ -361,7 +361,10 @@ def _has_explicit_topology_contract(
         path_values = []
         if isinstance(rule.get("from"), str):
             path_values.append(rule["from"])
-        path_values.extend(owner for owner in rule.get("owners", []) if isinstance(owner, str))
+        if key != "exclusive_sql_owners":
+            path_values.extend(
+                owner for owner in rule.get("owners", []) if isinstance(owner, str)
+            )
         if path_values and not any(
             module_path == path
             or module_path.startswith(path.rstrip("/") + "/")
@@ -386,7 +389,7 @@ def _has_explicit_topology_contract(
         "forbidden_patterns",
     ):
         if any(
-            isinstance(rule, dict) and applies(rule)
+            isinstance(rule, dict) and applies(rule, key)
             for rule in topology.get(key, [])
         ):
             return True

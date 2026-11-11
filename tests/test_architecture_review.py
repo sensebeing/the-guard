@@ -918,6 +918,20 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             _git(repo, "commit", "-m", "unbound change")
             prompt = build_review_prompt(repo, collect_review_scope(repo))
             self.assertIn("## Unbound Module Topology Guidance", prompt)
+
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(
+                '{"topology": {"exclusive_sql_owners": [{"table": "jobs", "owners": ["services/owner.py"]}]}}\n',
+                encoding="utf-8",
+            )
+            (repo / "services/b").mkdir(parents=True)
+            (repo / "services/b/main.py").write_text("y = 2\n", encoding="utf-8")
+            _git(repo, "add", ".guard/config.json", "services/b/main.py")
+            _git(repo, "commit", "-m", "global owner topology rule")
+            prompt = build_review_prompt(repo, collect_review_scope(repo))
+            self.assertNotIn("## Unbound Module Topology Guidance", prompt)
             self.assertNotIn("## Boundary reference: services/a/", prompt)
 
         with tempfile.TemporaryDirectory() as td:
