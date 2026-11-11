@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 import shutil
 import subprocess
@@ -430,15 +431,11 @@ CASES: tuple[GuardBenchCase, ...] = (
 )
 
 
-def validate_policy(repo_dir: Path) -> None:
-    load_policy(repo_dir)
-
-
 def evaluate_deterministic_checks(repo_dir: Path) -> dict[str, Any]:
     results: dict[str, Any] = {"cases": [], "passed": True}
     for case in CASES:
         git(repo_dir, "switch", case.branch)
-        validate_policy(repo_dir)
+        load_policy(repo_dir)
         findings = run_topology_guard(repo_dir, changed_files(repo_dir, "main"), base="main")
         observed = tuple(sorted({finding.rule_id for finding in findings}))
         expected = tuple(sorted(case.expected_static_rule_ids))
@@ -449,7 +446,19 @@ def evaluate_deterministic_checks(repo_dir: Path) -> dict[str, Any]:
     return results
 
 
-def run_review(repo_dir: Path, provider: str) -> dict[str, Any]:
+def run_review(
+    repo_dir: Path,
+    provider: str,
+    static_cases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    static_by_branch = (
+        {
+            case["branch"]: tuple(case["observed_static_rule_ids"])
+            for case in static_cases
+        }
+        if static_cases is not None
+        else {}
+    )
     reviews = []
     for case in CASES:
         git(repo_dir, "switch", case.branch)
@@ -459,16 +468,19 @@ def run_review(repo_dir: Path, provider: str) -> dict[str, Any]:
                 repo_dir, main_branch="main", explicit_provider=provider, force=True
             )
             observed = tuple(sorted({finding.rule_id for finding in outcome.blocking_findings}))
-            observed_static = tuple(
-                sorted(
-                    {
-                        finding.rule_id
-                        for finding in run_topology_guard(
-                            repo_dir, changed_files(repo_dir, "main"), base="main"
-                        )
-                    }
+            if static_cases is None:
+                observed_static = tuple(
+                    sorted(
+                        {
+                            finding.rule_id
+                            for finding in run_topology_guard(
+                                repo_dir, changed_files(repo_dir, "main"), base="main"
+                            )
+                        }
+                    )
                 )
-            )
+            else:
+                observed_static = static_by_branch[case.branch]
             combined_rule_ids = tuple(sorted(set(observed_static) | set(observed)))
             if case.category == "clean":
                 passed = outcome.verdict == "GO" and not observed and not observed_static
@@ -491,32 +503,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", choices=("codex", "claude", "agy"), default="codex")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    temp_dir = None
-    if args.repo_dir:
-        repo = build_guardbench_repo(args.repo_dir)
+    with ExitStack() as stack:
+        bench_root = args.repo_dir
+        if bench_root is None:
+            bench_root = Path(
+                stack.enter_context(tempfile.TemporaryDirectory(prefix="guardbench-"))
+            )
+        repo = build_guardbench_repo(bench_root)
         result = evaluate_deterministic_checks(repo)
-    else:
-        temp_dir = tempfile.TemporaryDirectory(prefix="guardbench-")
-        repo = build_guardbench_repo(Path(temp_dir.name))
-        result = evaluate_deterministic_checks(repo)
-    if args.with_review:
-        result["review"] = run_review(repo, args.provider)
-        result["passed"] = result["passed"] and result["review"]["passed"]
-    if temp_dir is not None:
-        temp_dir.cleanup()
-    if args.json:
-        print(json.dumps(result, indent=2))
-    else:
-        print("GuardBench deterministic checks")
-        for case in result["cases"]:
-            status = "PASS" if case["passed"] else "FAIL"
-            print(f"{status:4} {case['branch']}: {', '.join(case['observed_static_rule_ids']) or 'no findings'}")
         if args.with_review:
-            print("GuardBench architecture review")
-            for case in result["review"]["cases"]:
+            result["review"] = run_review(repo, args.provider, result["cases"])
+            result["passed"] = result["passed"] and result["review"]["passed"]
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print("GuardBench deterministic checks")
+            for case in result["cases"]:
                 status = "PASS" if case["passed"] else "FAIL"
-                print(f"{status:4} {case['branch']}: {case['verdict']} (expected {case['expected_verdict']})")
-        print("PASS" if result["passed"] else "FAIL")
+                print(f"{status:4} {case['branch']}: {', '.join(case['observed_static_rule_ids']) or 'no findings'}")
+            if args.with_review:
+                print("GuardBench architecture review")
+                for case in result["review"]["cases"]:
+                    status = "PASS" if case["passed"] else "FAIL"
+                    print(f"{status:4} {case['branch']}: {case['verdict']} (expected {case['expected_verdict']})")
+            print("PASS" if result["passed"] else "FAIL")
     return 0 if result["passed"] else 2
 
 
