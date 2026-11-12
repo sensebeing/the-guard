@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
-import json
 import subprocess
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
-from ..policy import Policy, load_policy
+from ..policy import load_policy
 from .contract import (
     CODE_EXTENSIONS,
     CONFIG_I18N_EXTENSIONS,
@@ -33,6 +31,7 @@ from .session import (
     ReviewResult,
     ReviewSessionState,
 )
+from .session import compute_review_contract_digest
 from .session import (
     load_review_session as _load_session_record,
 )
@@ -99,29 +98,6 @@ def load_review_session(
 
 def save_review_session(repo_root: Path, state: ReviewSessionState) -> Path:
     return _save_session_record(git_common_dir(repo_root), state)
-
-
-def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
-    """Hash reviewer source, repository configuration, and policy rules."""
-    digest = hashlib.sha256()
-    reviewer_dir = Path(__file__).parent
-    for name in ("cli.py", "contract.py", "engine.py", "prompt.py", "provider.py", "repository.py", "runner.py", "session.py"):
-        path = reviewer_dir / name
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
-    payload = {
-        "config": asdict(config),
-        "policy": {
-            "manifest_schema": policy.schema,
-            "rules": [
-                {"id": rule.id, "severity": rule.severity, "scope": list(rule.scope),
-                 "summary": rule.summary, "details": rule.details, "detail_body": rule.detail_body}
-                for rule in policy.rules
-            ],
-        },
-    }
-    digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    return digest.hexdigest()
 
 
 def review_logs_dir(repo_root: Path, env: dict[str, str] | None = None) -> Path:
