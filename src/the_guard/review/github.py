@@ -10,8 +10,8 @@ from typing import Any
 from .session import BlockingFinding
 
 THE_GUARD_REVIEW_MARKER = "<!-- the-guard-review -->"
-_TARGET_RE = re.compile(r"^(?P<owner>[^/\\s]+)/(?P<repo>[^/#\\s]+)#(?P<number>\\d+)\\s*$")
-_URL_RE = re.compile(r"^https://github\\.com/(?P<owner>[^/\\s]+)/(?P<repo>[^/\\s#]+)/pull/(?P<number>\\d+)(?:/[^\\s]*)?\\s*$")
+_TARGET_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^/#\s]+)#(?P<number>\d+)\s*$")
+_URL_RE = re.compile(r"^https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+)/pull/(?P<number>\d+)(?:/[^\s]*)?\s*$")
 
 
 def parse_github_pr_target(target: str) -> tuple[str, str, int]:
