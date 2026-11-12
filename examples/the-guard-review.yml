@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: ./
+      - uses: sensebeing/the-guard@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           app-id: ${{ secrets.THE_GUARD_APP_ID }}
