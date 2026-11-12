@@ -98,7 +98,7 @@ guard init --preset full --with-hooks
 | --- | --- | --- |
 | `local-hooks` | `guard init --with-hooks` | 本地 `pre-push` 钩子在推送主分支前核验该范围的 `GO` 回执。 |
 | `github-pr` | `guard init --with-github-workflow` | 推送功能分支、创建 GitHub PR，用 `guard review --github-pr <owner/repo#number>` 以 `the-guard-reviewer[bot]` 发布审查，再用 `gh pr merge` 合入；本地 `pre-push` 钩子仍会拒绝直接推送主分支。 |
-| `both` | `guard init --with-hooks --with-github-workflow` | GitHub PR 审查工作流加本地回执门禁。 |
+| `both` | `guard init --with-hooks --with-github-workflow` | 安装 GitHub PR 审查工作流，直接推送主分支仍需本地 `GO` 回执。 |
 
 GitHub PR 模式会写入 `.github/workflows/the-guard-review.yml`，需要 `THE_GUARD_APP_ID` 与 `THE_GUARD_PRIVATE_KEY` 仓库密钥。
 
@@ -160,7 +160,7 @@ flowchart TD
 3. 在功能分支提交代码后运行 `guard review`，由另一个独立审查会话对本次已提交的改动做架构审查。
 4. 遇到阻塞项时，从架构源头修正整类问题；如果现有实现确实符合模块合同，可用 `guard review --note "<代码位置与合同证据>"` 提交证据发起抗辩。
 5. 推送主分支前，通过 `guard check-push`（或 `--with-hooks` 安装的 `pre-push` 钩子）核验本地 `GO` 回执。
-6. 在 GitHub PR 模式（`review.integration_mode=github-pr` 或 `both`）下，推送功能分支、用 `gh pr create` 创建 PR，以 `guard review --github-pr <owner/repo#number>` 发布独立审查，再用 `gh pr merge` 合入；直接推送 `main` 会被拒绝。
+6. 在 GitHub PR 模式（`review.integration_mode=github-pr`）下，推送功能分支、用 `gh pr create` 创建 PR，以 `guard review --github-pr <owner/repo#number>` 发布独立审查，再用 `gh pr merge` 合入；直接推送 `main` 会被拒绝。`both` 模式同时提供 PR 工作流，但直接推送主分支仍受本地 `GO` 回执门禁约束。
 
 ### 日常场景示例
 

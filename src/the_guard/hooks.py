@@ -12,7 +12,14 @@ from .review.repository import collect_review_scope, resolve_or_carry_forward_re
 from .topology import run_topology_guard
 
 
-def install_hooks(root: Path | str) -> Path:
+HOOK_CONTENT = (
+    "#!/bin/sh\n# Managed by the-guard\n"
+    'exec guard hook main-push-gate --repo-root "$(git rev-parse --show-toplevel)"\n'
+)
+
+
+def hook_install_plan(root: Path | str) -> Path:
+    """Resolve the managed pre-push hook without writing; refuse to replace a customized one."""
     root = Path(root).resolve()
     proc = subprocess.run(
         ["git", "rev-parse", "--git-path", "hooks"],
@@ -25,13 +32,17 @@ def install_hooks(root: Path | str) -> Path:
     if not directory.is_absolute():
         directory = root / directory
     hook = directory / "pre-push"
-    content = '#!/bin/sh\n# Managed by the-guard\nexec guard hook main-push-gate --repo-root "$(git rev-parse --show-toplevel)"\n'
-    if hook.exists() and hook.read_text() != content:
+    if hook.exists() and hook.read_text() != HOOK_CONTENT:
         raise ValueError(
             f"Refusing to overwrite existing hook: {hook}; chain guard hook main-push-gate explicitly"
         )
-    directory.mkdir(parents=True, exist_ok=True)
-    hook.write_text(content)
+    return hook
+
+
+def install_hooks(root: Path | str) -> Path:
+    hook = hook_install_plan(root)
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(HOOK_CONTENT)
     hook.chmod(0o755)
     return hook
 
@@ -51,7 +62,7 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
         if len(fields) != 4:
             raise ValueError("Invalid git pre-push input")
         _, local_sha, remote_ref, remote_sha = fields
-        if remote_ref != "refs/heads/" + config.main_branch or set(local_sha) == {"0"}:
+        if remote_ref != "refs/heads/" + config.main_branch:
             continue
         if config.review.get("integration_mode") == "github-pr":
             print(
@@ -63,6 +74,8 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
                 file=sys.stderr,
             )
             return 2
+        if set(local_sha) == {"0"}:
+            continue
         if local_sha != head:
             raise ValueError(
                 "Review the actual pushed commit as HEAD before pushing the protected branch"

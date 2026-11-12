@@ -60,8 +60,8 @@ agent instructions so future agents read them before coding.
    open a GitHub PR, publish the independent review with
    `guard review --github-pr <owner/repo#number>`, and merge with `gh pr merge`. The local
    `pre-push` hook is still installed and rejects direct pushes to the main branch.
-3. **both** (`guard init --with-hooks --with-github-workflow`): the PR workflow plus the local
-   receipt gate.
+3. **both** (`guard init --with-hooks --with-github-workflow`): the PR workflow is installed, and
+   the local receipt gate still governs direct pushes to the main branch.
 
 Pass `--integration-mode <local-hooks|github-pr|both>` to set the mode explicitly; otherwise
 `init` derives it from the install flags. GitHub PR mode installs

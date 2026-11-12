@@ -99,7 +99,7 @@ Choose how reviewed changes reach `main`; `--integration-mode` sets the mode exp
 | --- | --- | --- |
 | `local-hooks` | `guard init --with-hooks` | The local `pre-push` hook verifies a `GO` receipt for the pushed range before a push to the main branch. |
 | `github-pr` | `guard init --with-github-workflow` | Push topic branches, open a GitHub PR, publish `guard review --github-pr <owner/repo#number>` as `the-guard-reviewer[bot]`, and merge with `gh pr merge`; the local `pre-push` hook still rejects direct pushes to the main branch. |
-| `both` | `guard init --with-hooks --with-github-workflow` | The GitHub PR review workflow plus the local receipt gate. |
+| `both` | `guard init --with-hooks --with-github-workflow` | The GitHub PR review workflow is installed, and direct pushes to the main branch still require a local `GO` receipt. |
 
 GitHub PR mode writes `.github/workflows/the-guard-review.yml` and expects the
 `THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository secrets.
@@ -162,7 +162,7 @@ flowchart TD
 3. Commit changes on a topic branch and run `guard review` so a separate reviewer agent audits the committed diff against your rules.
 4. When the reviewer flags a structural issue, fix the root cause across the pattern, or rebut with code and contract evidence via `guard review --note "<evidence>"`.
 5. Run `guard check-push` (or use the `pre-push` hook installed by `--with-hooks`) to verify that a valid `GO` receipt matches the committed patch before pushing to `main`.
-6. In GitHub PR mode (`review.integration_mode=github-pr` or `both`), push the topic branch, open a PR with `gh pr create`, publish the independent review with `guard review --github-pr <owner/repo#number>`, and merge with `gh pr merge`; direct pushes to `main` are rejected.
+6. In GitHub PR mode (`review.integration_mode=github-pr`), push the topic branch, open a PR with `gh pr create`, publish the independent review with `guard review --github-pr <owner/repo#number>`, and merge with `gh pr merge`; direct pushes to `main` are rejected. With `both`, the PR workflow is available and direct pushes to `main` remain gated by the local `GO` receipt check.
 
 ### An example from daily work
 

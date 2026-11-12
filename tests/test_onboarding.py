@@ -140,8 +140,44 @@ class GithubPrIntegrationModeTests(unittest.TestCase):
             self.assertEqual(main_push_gate(self.root, direct), 2)
         self.assertIn("review.integration_mode=github-pr", stderr.getvalue())
         self.assertIn("gh pr merge", stderr.getvalue())
+        deletion = f"(delete) {'0' * 40} refs/heads/main {head}\n"
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main_push_gate(self.root, deletion), 2)
         topic = f"refs/heads/feat/topic {head} refs/heads/feat/topic {head}\n"
         self.assertEqual(main_push_gate(self.root, topic), 0)
+
+    def test_both_mode_keeps_the_local_receipt_gate_for_direct_pushes(self):
+        self.init_repo()
+        initialize(self.root, integration_mode="both")
+        self.assertTrue((self.root / ".github/workflows/the-guard-review.yml").exists())
+        self.assertTrue((self.root / ".git/hooks/pre-push").exists())
+        base = self.git("rev-parse", "HEAD")
+        self.write("src/api.py", "x = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "change")
+        head = self.git("rev-parse", "HEAD")
+        direct = f"refs/heads/feat/topic {head} refs/heads/main {base}\n"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(main_push_gate(self.root, direct), 2)
+        self.assertIn("missing review receipt", stderr.getvalue())
+        self.assertNotIn("review.integration_mode=github-pr", stderr.getvalue())
+
+    def test_conflicting_workflow_fails_before_policy_writes(self):
+        self.write(".github/workflows/the-guard-review.yml", "name: custom\n")
+        with self.assertRaises(ValueError):
+            initialize(self.root, with_github_workflow=True)
+        self.assertFalse((self.root / ".guard/config.json").exists())
+        self.assertFalse((self.root / "AGENTS.md").exists())
+        self.assertFalse((self.root / "docs/standards/rules").exists())
+
+    def test_conflicting_hook_fails_before_policy_writes(self):
+        self.init_repo()
+        self.write(".git/hooks/pre-push", "#!/bin/sh\ncustom\n")
+        with self.assertRaises(ValueError):
+            initialize(self.root, integration_mode="github-pr")
+        self.assertFalse((self.root / ".guard/config.json").exists())
+        self.assertFalse((self.root / "AGENTS.md").exists())
 
     def test_integration_mode_validation_rejects_unknown_values(self):
         self.write(

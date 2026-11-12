@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from .config import REVIEW_INTEGRATION_MODES, load_config, repository_path
-from .hooks import install_hooks
+from .hooks import hook_install_plan, install_hooks
 from .topology import discover_topology
 
 CORE = (
@@ -40,15 +40,21 @@ jobs:
 WORKFLOW_PATH = ".github/workflows/the-guard-review.yml"
 
 
-def install_github_workflow(root: Path | str) -> Path:
+def workflow_install_plan(root: Path | str) -> Path:
+    """Resolve the managed review workflow without writing; refuse to replace a customized one."""
     target = repository_path(Path(root).resolve(), WORKFLOW_PATH)
     if target.exists():
         existing = target.read_text()
-        if existing == WORKFLOW_TEMPLATE or "uses: ./" in existing:
-            return target
-        raise ValueError(f"Refusing to overwrite customized workflow: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(WORKFLOW_TEMPLATE)
+        if existing != WORKFLOW_TEMPLATE and "uses: ./" not in existing:
+            raise ValueError(f"Refusing to overwrite customized workflow: {target}")
+    return target
+
+
+def install_github_workflow(root: Path | str) -> Path:
+    target = workflow_install_plan(root)
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(WORKFLOW_TEMPLATE)
     return target
 
 
@@ -151,6 +157,14 @@ def initialize(
     )
     if effective_mode is not None:
         config.setdefault("review", {})["integration_mode"] = effective_mode
+    install_workflow = with_github_workflow or effective_mode in {"github-pr", "both"}
+    install_local_hooks = (
+        with_hooks or effective_mode in {"local-hooks", "github-pr", "both"}
+    ) and (root / ".git").exists()
+    if install_workflow:
+        workflow_install_plan(root)
+    if install_local_hooks:
+        hook_install_plan(root)
     destination.mkdir(parents=True, exist_ok=True)
     for target, content in files.items():
         target.write_text(content)
@@ -161,11 +175,10 @@ def initialize(
     alias = root / "CLAUDE.md"
     if manifest_file == "AGENTS.md" and not alias.exists() and not alias.is_symlink():
         alias.symlink_to("AGENTS.md")
-    if with_github_workflow or effective_mode in {"github-pr", "both"}:
+    if install_workflow:
         install_github_workflow(root)
-    if with_hooks or effective_mode in {"local-hooks", "github-pr", "both"}:
-        if (root / ".git").exists():
-            install_hooks(root)
+    if install_local_hooks:
+        install_hooks(root)
     return {
         "preset": preset,
         "rules": len(slugs),

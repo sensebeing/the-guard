@@ -32,8 +32,8 @@ its policy and module contracts define the rules, not this skill.
 
 ## GitHub PR mode
 
-When `.guard/config.json` sets `review.integration_mode` to `github-pr` or `both`, the main branch
-is integrated through GitHub pull requests rather than direct pushes:
+When `.guard/config.json` sets `review.integration_mode` to `github-pr`, the main branch is
+integrated through GitHub pull requests rather than direct pushes:
 
 1. Commit on the topic branch, push it, and open a PR with `gh pr create`.
 2. Run `guard review --github-pr <owner/repo#number>` to audit the committed diff and publish the
@@ -41,6 +41,9 @@ is integrated through GitHub pull requests rather than direct pushes:
    `--note` evidence and rerun until `GO`.
 3. Merge with `gh pr merge`. In `github-pr` mode the local `pre-push` hook rejects direct pushes
    to the main branch; do not bypass it.
+
+With `both`, the PR workflow is available for review and merge, while direct pushes to the main
+branch remain gated by the local `GO` receipt check.
 
 ## Report the evidence
 
