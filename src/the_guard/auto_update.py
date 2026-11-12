@@ -443,10 +443,13 @@ def maybe_trigger_background_auto_update(
                 _subprocess_run(["git", "-C", str(checkout), "branch", "--show-current"], 20).strip() == "main"
                 and not _subprocess_run(["git", "-C", str(checkout), "status", "--porcelain"], 20).strip()
             )
+            checkout_sha = _subprocess_run(["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"], 20).strip()
             local_digest = compute_package_tree_digest(checkout / "src/the_guard")
             installed_dir = _installed_guard_package_dir(resolved_home)
             installed_digest = compute_package_tree_digest(installed_dir) if installed_dir else metadata.get("installed_tree_digest")
-            local_sync_needed = clean_main and local_digest != installed_digest
+            local_sync_needed = clean_main and (
+                checkout_sha != metadata.get("installed_sha") or local_digest != installed_digest
+            )
         except (OSError, ValueError, subprocess.SubprocessError):
             local_sync_needed = False
     if cooldown < 30:
