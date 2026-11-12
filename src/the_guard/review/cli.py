@@ -13,7 +13,7 @@ from .github import publish_github_pr_review
 
 from ..config import load_config
 from ..policy import PolicyError
-from .contract import PROVIDERS
+from .contract import PROVIDERS, validate_review_output
 from .engine import run_architecture_review
 from .provider import probe_environment, resolve_provider_order
 from .repository import collect_review_scope, resolve_or_carry_forward_receipt
@@ -32,28 +32,6 @@ def _parse_provider_model(value: str) -> tuple[str, dict[str, str]]:
     if provider not in PROVIDERS or not sep or not model or (colon and not effort):
         raise argparse.ArgumentTypeError("Expected provider=model[:effort]")
     return provider, {"model": model, **({"effort": effort} if effort else {})}
-
-
-def _validate_publish_input(data: object) -> dict[str, object]:
-    if not isinstance(data, dict) or "verdict" not in data or "summary" not in data:
-        raise ValueError("Input JSON must contain verdict and summary")
-    if data["verdict"] not in ("GO", "NO-GO") or not isinstance(data["summary"], str):
-        raise ValueError("Input JSON does not match the review output contract")
-    if not isinstance(data.get("reviewed_head_sha"), str) or not data["reviewed_head_sha"]:
-        raise ValueError("Input JSON does not match the review output contract")
-    findings = data.get("blocking_findings")
-    if not isinstance(findings, list):
-        raise ValueError("Input JSON does not match the review output contract")
-    origins = {"initial_full_scope", "prior_unresolved", "introduced_by_delta"}
-    required = {"rule_id", "file", "line", "issue", "required_fix", "finding_origin"}
-    for finding in findings:
-        if not isinstance(finding, dict) or set(finding) != required:
-            raise ValueError("Input JSON does not match the review output contract")
-        if not all(isinstance(finding[key], str) for key in ("rule_id", "file", "issue", "required_fix")):
-            raise ValueError("Input JSON does not match the review output contract")
-        if not isinstance(finding["line"], int) or isinstance(finding["line"], bool) or finding["finding_origin"] not in origins:
-            raise ValueError("Input JSON does not match the review output contract")
-    return data
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -93,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "publish-github":
             source = sys.stdin.read() if args.input_json == "-" else Path(args.input_json).read_text()
             data = json.loads(source)
-            data = _validate_publish_input(data)
+            data = validate_review_output(data)
             receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
             if args.json:
                 print(json.dumps(receipt, indent=2))

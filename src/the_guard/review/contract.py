@@ -240,3 +240,32 @@ REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
     "required": ["verdict", "summary", "blocking_findings", "reviewed_head_sha"],
     "additionalProperties": False,
 }
+
+
+def validate_review_output(data: object) -> dict[str, Any]:
+    """Validate the canonical JSON payload accepted by review consumers."""
+    if not isinstance(data, dict):
+        raise ValueError("Input JSON must contain verdict and summary")
+    required_root = {"verdict", "summary", "blocking_findings", "reviewed_head_sha"}
+    if set(data) != required_root:
+        if "verdict" not in data or "summary" not in data:
+            raise ValueError("Input JSON must contain verdict and summary")
+        raise ValueError("Input JSON does not match the review output contract")
+    if data["verdict"] not in ("GO", "NO-GO") or not isinstance(data["summary"], str):
+        raise ValueError("Input JSON does not match the review output contract")
+    if not isinstance(data["reviewed_head_sha"], str) or not data["reviewed_head_sha"]:
+        raise ValueError("Input JSON does not match the review output contract")
+    findings = data["blocking_findings"]
+    if not isinstance(findings, list):
+        raise ValueError("Input JSON does not match the review output contract")
+    allowed_origins = {"initial_full_scope", "prior_unresolved", "introduced_by_delta"}
+    finding_keys = {"rule_id", "file", "line", "issue", "required_fix", "finding_origin"}
+    for finding in findings:
+        if not isinstance(finding, dict) or set(finding) != finding_keys:
+            raise ValueError("Input JSON does not match the review output contract")
+        if not all(isinstance(finding[key], str) for key in ("rule_id", "file", "issue", "required_fix")):
+            raise ValueError("Input JSON does not match the review output contract")
+        origin = finding["finding_origin"]
+        if not isinstance(finding["line"], int) or isinstance(finding["line"], bool) or not isinstance(origin, str) or origin not in allowed_origins:
+            raise ValueError("Input JSON does not match the review output contract")
+    return data
