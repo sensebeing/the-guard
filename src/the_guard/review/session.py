@@ -49,6 +49,11 @@ def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
     return digest.hexdigest()
 
 
+def contract_digest_matches(stored_digest: str, policy: Policy, config: GuardConfig) -> bool:
+    """Return whether persisted session evidence belongs to the current contract."""
+    return bool(stored_digest) and stored_digest == compute_review_contract_digest(policy, config)
+
+
 @dataclass(frozen=True)
 class ReviewResult:
     verdict: str

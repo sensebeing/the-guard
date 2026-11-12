@@ -39,6 +39,7 @@ from .runner import (
     _parse_findings,
 )
 from .session import (
+    contract_digest_matches,
     UTC,
     ReviewResult,
     ReviewRunLogger,
@@ -79,9 +80,8 @@ def run_architecture_review(
     current_contract_digest = compute_review_contract_digest(policy, contract_config)
     branch = current_branch_name(repo_root)
     prior_session = None if force else load_review_session(repo_root, branch)
-    contract_changed = (
-        prior_session is not None
-        and prior_session.contract_digest != current_contract_digest
+    contract_changed = prior_session is not None and not contract_digest_matches(
+        prior_session.contract_digest, policy, contract_config
     )
     if contract_changed:
         prior_session = None

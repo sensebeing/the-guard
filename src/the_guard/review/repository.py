@@ -31,7 +31,7 @@ from .session import (
     ReviewResult,
     ReviewSessionState,
 )
-from .session import compute_review_contract_digest
+from .session import compute_review_contract_digest, contract_digest_matches
 from .session import (
     load_review_session as _load_session_record,
 )
@@ -552,11 +552,10 @@ def resolve_or_carry_forward_receipt(
         or not session.last_head_sha
     ):
         return None
-    current_contract_digest = compute_review_contract_digest(
-        load_policy(repo_root, revision=scope.head_sha),
-        load_config(repo_root, revision=scope.head_sha),
-    )
-    if session.contract_digest != current_contract_digest:
+    current_policy = load_policy(repo_root, revision=scope.head_sha)
+    current_config = load_config(repo_root, revision=scope.head_sha)
+    current_contract_digest = compute_review_contract_digest(current_policy, current_config)
+    if not contract_digest_matches(session.contract_digest, current_policy, current_config):
         return None
     prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
     if prior_receipt is None:
