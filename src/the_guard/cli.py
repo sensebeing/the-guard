@@ -21,6 +21,7 @@ from .hooks import edit_guard, main_push_gate
 from .init import initialize
 from .policy import PolicyError, load_policy
 from .review.cli import main as review_main
+from .review.github import publish_github_pr_review
 from .topology import discover_topology, run_topology_guard
 
 
@@ -42,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--file", action="append", default=[])
         if name == "check":
             p.add_argument("--policy-only", action="store_true")
+            p.add_argument("--github-pr", default=None)
+            p.add_argument("--github-dry-run", action="store_true")
         if name == "init":
             p.add_argument("--preset", choices=["core", "full"], default="core")
             p.add_argument("--rules-dir", default="docs/standards/rules")
@@ -159,27 +162,90 @@ def main(argv: list[str] | None = None) -> int:
             load_policy(root)
             if args.policy_only and args.base is None:
                 should_trigger_auto_update = True
-                print('{"status": "GO"}' if args.json else "GO: policy valid")
+                gh_receipt = None
+                if args.github_pr:
+                    head_sha = None
+                    try:
+                        head_sha = subprocess.run(
+                            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                            capture_output=True, text=True,
+                        ).stdout.strip()
+                    except (OSError, subprocess.SubprocessError):
+                        head_sha = None
+                    base_name = args.base or cfg.main_branch
+                    gh_receipt = publish_github_pr_review(
+                        args.github_pr,
+                        verdict="GO",
+                        summary=f"Deterministic policy and topology check passed with 0 findings (base {base_name}).",
+                        findings=[], commit_id=head_sha, dry_run=args.github_dry_run,
+                    )
+                if args.json:
+                    output = {"status": "GO"}
+                    if gh_receipt is not None:
+                        output["github_review"] = gh_receipt
+                    print(json.dumps(output))
+                else:
+                    print("GO: policy valid")
                 return 0
         base = resolve_changed_base(root, args.base, main_branch=cfg.main_branch)
         if args.command == "check" and args.policy_only:
             should_trigger_auto_update = True
-            print('{"status": "GO"}' if args.json else "GO: policy valid")
+            gh_receipt = None
+            if args.github_pr:
+                head_sha = None
+                try:
+                    head_sha = subprocess.run(
+                        ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                        capture_output=True, text=True,
+                    ).stdout.strip()
+                except (OSError, subprocess.SubprocessError):
+                    head_sha = None
+                gh_receipt = publish_github_pr_review(
+                    args.github_pr,
+                    verdict="GO",
+                    summary=f"Deterministic policy and topology check passed with 0 findings (base {base}).",
+                    findings=[], commit_id=head_sha, dry_run=args.github_dry_run,
+                )
+            if args.json:
+                output = {"status": "GO"}
+                if gh_receipt is not None:
+                    output["github_review"] = gh_receipt
+                print(json.dumps(output))
+            else:
+                print("GO: policy valid")
             return 0
         findings = run_topology_guard(
             root, args.file or changed_files(root, base), base=base, config=cfg
         )
         should_trigger_auto_update = args.command == "check"
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "status": "NO-GO" if findings else "GO",
-                        "findings": [asdict(f) for f in findings],
-                    },
-                    indent=2,
-                )
+        gh_receipt = None
+        if args.command == "check" and args.github_pr:
+            head_sha = None
+            try:
+                head_sha = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                    capture_output=True, text=True,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                head_sha = None
+            verdict = "NO-GO" if findings else "GO"
+            summary = (
+                f"Deterministic policy and topology check found {len(findings)} blocking violation(s) (base {base})."
+                if findings
+                else f"Deterministic policy and topology check passed with 0 findings (base {base})."
             )
+            gh_receipt = publish_github_pr_review(
+                args.github_pr, verdict=verdict, summary=summary, findings=findings,
+                commit_id=head_sha, dry_run=args.github_dry_run,
+            )
+        if args.json:
+            output = {
+                "status": "NO-GO" if findings else "GO",
+                "findings": [asdict(f) for f in findings],
+            }
+            if gh_receipt is not None:
+                output["github_review"] = gh_receipt
+            print(json.dumps(output, indent=2))
         else:
             for f in findings:
                 print(f"{f.path}:{f.line}: {f.rule_id}: {f.message}")

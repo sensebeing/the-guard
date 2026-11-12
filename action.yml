@@ -6,17 +6,40 @@ inputs:
     default: codex
   github-token:
     default: ${{ github.token }}
+  app-id:
+    default: ''
+  private-key:
+    default: ''
   publish-review:
     default: 'true'
 runs:
   using: composite
   steps:
+    - id: app-token
+      if: inputs.app-id != '' && inputs.private-key != ''
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
     - shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
       run: python3 -m pip install "$GITHUB_ACTION_PATH"
-    - shell: bash
-      run: guard check --base "origin/${GITHUB_BASE_REF:-main}"
     - if: inputs.publish-review == 'true' && github.event_name == 'pull_request'
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github-token }}
-      run: guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json
+        GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+      run: |
+        check_status=0
+        if guard probe --priority-order "${{ inputs.provider }}" >/dev/null 2>&1; then
+          guard check --base "origin/${GITHUB_BASE_REF:-main}" || check_status=$?
+          guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json
+        else
+          guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json || check_status=$?
+        fi
+        [[ "$check_status" -eq 0 || "$check_status" -eq 2 ]]
+    - if: inputs.publish-review != 'true' || github.event_name != 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+      run: guard check --base "origin/${GITHUB_BASE_REF:-main}"

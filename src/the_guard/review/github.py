@@ -26,21 +26,29 @@ def parse_github_pr_target(target: str) -> tuple[str, str, int]:
 
 
 def _field(finding: BlockingFinding | dict[str, Any], name: str, *aliases: str) -> Any:
+    keys = (name, *aliases)
     if isinstance(finding, dict):
-        for key in (name, *aliases):
+        for key in keys:
             if key in finding:
                 return finding[key]
         return ""
-    return getattr(finding, name, "")
+    for key in keys:
+        value = getattr(finding, key, "")
+        if value != "":
+            return value
+    return ""
 
 
 def format_finding_comment(finding: BlockingFinding | dict[str, Any]) -> str:
     rule_id = _field(finding, "rule_id")
-    file = _field(finding, "file")
+    file = _field(finding, "file", "path")
     line = _field(finding, "line")
-    issue = _field(finding, "issue", "title", "why_it_violates")
+    issue = _field(finding, "issue", "title", "why_it_violates", "message")
     required_fix = _field(finding, "required_fix", "required_refactoring")
-    return f"{THE_GUARD_REVIEW_MARKER}\n**[{rule_id}]** `{file}:{line}`\n\n**Issue:** {issue}\n\n**Required fix:** {required_fix}"
+    comment = f"{THE_GUARD_REVIEW_MARKER}\n**[{rule_id}]** `{file}:{line}`\n\n**Issue:** {issue}"
+    if required_fix:
+        comment += f"\n\n**Required fix:** {required_fix}"
+    return comment
 
 
 def build_github_review_payload(verdict: str, summary: str, findings: Sequence[BlockingFinding | dict[str, Any]], *, commit_id: str | None = None) -> dict[str, Any]:
@@ -48,7 +56,7 @@ def build_github_review_payload(verdict: str, summary: str, findings: Sequence[B
     comments: list[dict[str, Any]] = []
     body_findings: list[str] = []
     for finding in findings:
-        file = str(_field(finding, "file") or "")
+        file = str(_field(finding, "file", "path") or "")
         try:
             line = int(_field(finding, "line") or 0)
         except (TypeError, ValueError):
