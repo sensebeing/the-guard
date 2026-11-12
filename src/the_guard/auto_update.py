@@ -554,6 +554,8 @@ def maybe_delegate_to_checkout(
             current_repo = PACKAGE_DIR.parents[1]
             if (current_repo / ".git").exists():
                 baseline_sha = _subprocess_run(["git", "-C", str(current_repo), "rev-parse", "HEAD"], 20).strip()
+        if not baseline_sha:
+            return None
         if baseline_sha:
             ancestry = subprocess.run(
                 ["git", "-C", str(checkout), "merge-base", "--is-ancestor", str(baseline_sha), checkout_sha],

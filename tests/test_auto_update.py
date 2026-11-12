@@ -35,6 +35,13 @@ class AutoUpdateTests(unittest.TestCase):
             subprocess.run(["git", "init", "-b", "main", str(checkout)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
             subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"], check=True, capture_output=True)
+            baseline = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+            (checkout / "README.md").write_text("newer checkout\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(checkout), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "advance"], check=True, capture_output=True)
+            state = root_path / "state"
+            state.mkdir()
+            (state / "auto_update.json").write_text(json.dumps({"source_sha": baseline}), encoding="utf-8")
             origin = root_path / "origin.git"
             subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", str(origin)], check=True)
@@ -66,11 +73,18 @@ class AutoUpdateTests(unittest.TestCase):
             subprocess.run(["git", "init", "-b", "main", str(checkout)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
             subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"], check=True, capture_output=True)
+            baseline = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+            (checkout / "README.md").write_text("newer checkout\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(checkout), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "advance"], check=True, capture_output=True)
+            state = root_path / "state"
+            state.mkdir()
+            (state / "auto_update.json").write_text(json.dumps({"source_sha": baseline}), encoding="utf-8")
             consumer = root_path / "consumer"
             subprocess.run(["git", "init", str(consumer)], check=True, capture_output=True)
             env = {"THE_GUARD_AUTO_UPDATE": "1", "PATH": os.environ.get("PATH", "")}
             with mock.patch.object(auto_update, "PACKAGE_DIR", root_path / "installed/src/the_guard"), mock.patch.object(auto_update, "maybe_trigger_background_auto_update", return_value=False):
-                code = auto_update.maybe_delegate_to_checkout(["status", "--json"], active_repo_root=consumer, home_dir=home, state_dir=root_path / "state", gemini_dir=root_path / "gemini", env=env)
+                code = auto_update.maybe_delegate_to_checkout(["status", "--json"], active_repo_root=consumer, home_dir=home, state_dir=state, gemini_dir=root_path / "gemini", env=env)
             self.assertEqual(code, 0)
             self.assertIsNone(auto_update.maybe_delegate_to_checkout(["status"], active_repo_root=consumer, home_dir=home, env={**env, "THE_GUARD_DELEGATED": "1"}))
             (checkout / "dirty.txt").write_text("dirty\n", encoding="utf-8")
