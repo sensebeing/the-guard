@@ -91,7 +91,10 @@ class GithubReviewTests(unittest.TestCase):
     def test_cli_publish_dry_run_and_malformed_json(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "review.json"
-            path.write_text(json.dumps({"verdict": "GO", "summary": "ok"}), encoding="utf-8")
+            path.write_text(
+                json.dumps({"verdict": "GO", "summary": "ok", "reviewed_head_sha": "a" * 40, "blocking_findings": []}),
+                encoding="utf-8",
+            )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 code = review_main(["publish-github", "--pr", "sensebeing/the-guard#1", "--input-json", str(path), "--dry-run", "--json"])

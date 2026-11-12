@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
 
+from .contract import BlockingFinding
+
 RECEIPT_SCHEMA = "the-guard-receipt/v1"
 SESSION_SCHEMA = "the-guard-session/v1"
 LOG_META_SCHEMA = "the-guard-log-meta/v1"
@@ -19,16 +21,6 @@ MAX_RETAINED_RUN_LOGS = 90
 MAX_RETAINED_LOGS_PER_WORKTREE = 8
 MAX_RETAINED_SESSIONS = 30
 MAX_RETAINED_RECEIPTS = 200
-
-
-@dataclass(frozen=True)
-class BlockingFinding:
-    rule_id: str
-    file: str
-    line: int
-    issue: str
-    required_fix: str
-    finding_origin: str = "initial_full_scope"
 
 
 @dataclass(frozen=True)

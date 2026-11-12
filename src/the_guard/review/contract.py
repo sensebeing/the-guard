@@ -70,6 +70,18 @@ class ReviewTimeoutError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class BlockingFinding:
+    """A structured architecture finding shared by review and publication adapters."""
+
+    rule_id: str
+    file: str
+    line: int
+    issue: str
+    required_fix: str
+    finding_origin: str = "initial_full_scope"
+
+
+@dataclass(frozen=True)
 class SubmoduleChange:
     path: str
     old_sha: str

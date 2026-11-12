@@ -25,10 +25,11 @@ from .contract import (
     ReviewTimeoutError,
     build_agy_readonly_settings,
     CODEX_DISABLED_FEATURES,
+    BlockingFinding,
 )
 from .provider import isolated_codex_home
 from .repository import current_branch_name, git_common_dir
-from .session import BlockingFinding, ReviewRunLogger
+from .session import ReviewRunLogger
 
 
 def _extract_verdict_json(raw_output: str) -> dict[str, Any]:

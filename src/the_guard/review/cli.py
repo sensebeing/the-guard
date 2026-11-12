@@ -34,6 +34,28 @@ def _parse_provider_model(value: str) -> tuple[str, dict[str, str]]:
     return provider, {"model": model, **({"effort": effort} if effort else {})}
 
 
+def _validate_publish_input(data: object) -> dict[str, object]:
+    if not isinstance(data, dict) or "verdict" not in data or "summary" not in data:
+        raise ValueError("Input JSON must contain verdict and summary")
+    if data["verdict"] not in ("GO", "NO-GO") or not isinstance(data["summary"], str):
+        raise ValueError("Input JSON does not match the review output contract")
+    if not isinstance(data.get("reviewed_head_sha"), str) or not data["reviewed_head_sha"]:
+        raise ValueError("Input JSON does not match the review output contract")
+    findings = data.get("blocking_findings")
+    if not isinstance(findings, list):
+        raise ValueError("Input JSON does not match the review output contract")
+    origins = {"initial_full_scope", "prior_unresolved", "introduced_by_delta"}
+    required = {"rule_id", "file", "line", "issue", "required_fix", "finding_origin"}
+    for finding in findings:
+        if not isinstance(finding, dict) or set(finding) != required:
+            raise ValueError("Input JSON does not match the review output contract")
+        if not all(isinstance(finding[key], str) for key in ("rule_id", "file", "issue", "required_fix")):
+            raise ValueError("Input JSON does not match the review output contract")
+        if not isinstance(finding["line"], int) or isinstance(finding["line"], bool) or finding["finding_origin"] not in origins:
+            raise ValueError("Input JSON does not match the review output contract")
+    return data
+
+
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     if not values or values[0].startswith("-"):
@@ -71,8 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "publish-github":
             source = sys.stdin.read() if args.input_json == "-" else Path(args.input_json).read_text()
             data = json.loads(source)
-            if not isinstance(data, dict) or "verdict" not in data or "summary" not in data:
-                raise ValueError("Input JSON must contain verdict and summary")
+            data = _validate_publish_input(data)
             receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
             if args.json:
                 print(json.dumps(receipt, indent=2))
@@ -121,7 +142,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.github_pr:
             gh_receipt = publish_github_pr_review(args.github_pr, verdict=result.verdict, summary=result.summary, findings=result.blocking_findings, commit_id=getattr(result, "reviewed_head_sha", None) or getattr(result, "head_sha", None), dry_run=args.github_dry_run)
         if args.json:
-            print(json.dumps({**asdict(result), **({"github_review": gh_receipt} if gh_receipt else {})}, indent=2))
+            output = asdict(result)
+            output["reviewed_head_sha"] = output.pop("head_sha")
+            print(json.dumps({**output, **({"github_review": gh_receipt} if gh_receipt else {})}, indent=2))
             return 0 if result.verdict == "GO" else 2
         lines = [
             f"## Architecture Review: {result.verdict}",

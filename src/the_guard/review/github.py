@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Sequence
 from typing import Any
 
-from .session import BlockingFinding
+from .contract import BlockingFinding
 
 THE_GUARD_REVIEW_MARKER = "<!-- the-guard-review -->"
 _TARGET_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^/#\s]+)#(?P<number>\d+)\s*$")
