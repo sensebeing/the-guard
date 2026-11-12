@@ -53,6 +53,16 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
         _, local_sha, remote_ref, remote_sha = fields
         if remote_ref != "refs/heads/" + config.main_branch or set(local_sha) == {"0"}:
             continue
+        if config.review.get("integration_mode") == "github-pr":
+            print(
+                "NO-GO: repository uses GitHub PR mode (review.integration_mode=github-pr); "
+                "direct push to refs/heads/"
+                + config.main_branch
+                + " is disabled. Push a topic branch, open a PR with gh pr create, "
+                "run guard review --github-pr <owner/repo#number>, and merge via gh pr merge.",
+                file=sys.stderr,
+            )
+            return 2
         if local_sha != head:
             raise ValueError(
                 "Review the actual pushed commit as HEAD before pushing the protected branch"

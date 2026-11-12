@@ -13,6 +13,7 @@ DEFAULT_MANIFEST_TAG = "the-guard-policy"
 DEFAULT_SCHEMA = "the-guard-policy/v1"
 DEFAULT_DETAIL_MANIFEST = "AGENTS.md#engineering-quality-policy"
 DEFAULT_RULE_PREFIX = "guard."
+REVIEW_INTEGRATION_MODES = ("local-hooks", "github-pr", "both")
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,13 @@ def _string_list(value: object, label: str) -> None:
 
 def _validate_sections(data: dict[str, Any]) -> None:
     review = data.get("review", {})
+    if (
+        "integration_mode" in review
+        and review["integration_mode"] not in REVIEW_INTEGRATION_MODES
+    ):
+        raise ValueError(
+            "review.integration_mode must be local-hooks, github-pr, or both"
+        )
     for key in (
         "reviewable_extensions",
         "reviewable_prefixes",

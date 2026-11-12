@@ -30,7 +30,7 @@ uv run python -m unittest discover -s tests -v
 uv run guard check --base origin/main
 ```
 
-Commit on your topic branch before independent review:
+Commit on your topic branch and review before submission:
 
 ```sh
 uv run guard review
@@ -44,7 +44,17 @@ See the [daily skill](skills/the-guard/SKILL.md) for the complete loop.
 
 ## Submit a pull request
 
-Describe the concrete problem, resulting behavior, and verification results. Disclose checks that
+This repository uses GitHub PR mode (`review.integration_mode=github-pr`): changes must be
+committed on a topic branch, pushed to `origin`, and merged through GitHub rather than pushed
+directly to `main`. Open the PR and publish the independent review to it:
+
+```sh
+gh pr create --fill
+uv run guard review --github-pr sensebeing/the-guard#<number>
+```
+
+The review is published as `the-guard-reviewer[bot]` through the repository's GitHub App. Describe
+the concrete problem, resulting behavior, and verification results. Disclose checks that
 could not run and unresolved findings. Never include credentials or private reviewer inputs/logs.
-Maintainers review contributions and decide when to integrate them; a local receipt does not
-replace that decision or grant permission to push to `main`.
+Merge the reviewed PR with `gh pr merge`; the local `pre-push` hook rejects direct pushes to `main`
+in this mode.

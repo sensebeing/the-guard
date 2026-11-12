@@ -16,7 +16,7 @@ from .auto_update import (
     maybe_trigger_background_auto_update,
     self_update,
 )
-from .config import load_config
+from .config import REVIEW_INTEGRATION_MODES, load_config
 from .distill import distill
 from .finding import Finding
 from .git_helpers import changed_files, resolve_changed_base
@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--rules-dir", default="docs/standards/rules")
             p.add_argument("--manifest-file", default="AGENTS.md")
             p.add_argument("--with-hooks", action="store_true")
+            p.add_argument("--with-github-workflow", action="store_true")
+            p.add_argument(
+                "--integration-mode",
+                choices=list(REVIEW_INTEGRATION_MODES),
+                default=None,
+            )
         if name == "topology":
             p.add_argument("action", choices=["sync", "check"])
         if name == "hook":
@@ -176,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
                         rules_dir=args.rules_dir,
                         manifest_file=args.manifest_file,
                         with_hooks=args.with_hooks,
+                        with_github_workflow=args.with_github_workflow,
+                        integration_mode=args.integration_mode,
                     ),
                     indent=2,
                 )

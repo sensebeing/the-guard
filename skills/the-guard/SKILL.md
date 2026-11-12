@@ -30,6 +30,18 @@ its policy and module contracts define the rules, not this skill.
    receipt establishes review readiness, not permission to merge, push, or publish; follow the
    user's authorization and repository integration process.
 
+## GitHub PR mode
+
+When `.guard/config.json` sets `review.integration_mode` to `github-pr` or `both`, the main branch
+is integrated through GitHub pull requests rather than direct pushes:
+
+1. Commit on the topic branch, push it, and open a PR with `gh pr create`.
+2. Run `guard review --github-pr <owner/repo#number>` to audit the committed diff and publish the
+   attributable review as `the-guard-reviewer[bot]`. Resolve blocking findings or submit
+   `--note` evidence and rerun until `GO`.
+3. Merge with `gh pr merge`. In `github-pr` mode the local `pre-push` hook rejects direct pushes
+   to the main branch; do not bypass it.
+
 ## Report the evidence
 
 Report the checked scope, static result, committed revision, independent review verdict, and
