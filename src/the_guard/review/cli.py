@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
+import select
 import sys
 from pathlib import Path
 from dataclasses import asdict
@@ -17,6 +19,36 @@ from .contract import PROVIDERS, validate_review_output
 from .engine import run_architecture_review
 from .provider import probe_environment, resolve_provider_order
 from .repository import collect_review_scope, resolve_or_carry_forward_receipt
+
+
+def _read_nonblocking_stdin_text(timeout_sec: float = 0.05) -> str | None:
+    """Read currently available stdin without waiting for a future writer."""
+    if sys.stdin.isatty():
+        return None
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout_sec)
+    except (io.UnsupportedOperation, TypeError, ValueError, OSError):
+        # In-memory streams used by callers and tests do not expose a file
+        # descriptor; reading them directly is already nonblocking.
+        text = sys.stdin.read()
+        return text if text.strip() else None
+    if not ready:
+        return None
+
+    try:
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+            if not ready:
+                break
+        text = b"".join(chunks).decode("utf-8")
+    except (io.UnsupportedOperation, ValueError, OSError):
+        text = sys.stdin.read()
+    return text if text.strip() else None
 
 
 def _parse_priority_order(value: str) -> list[str]:
@@ -48,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--reprobe", action="store_true")
         if name == "publish-github":
             p.add_argument("--pr", required=True)
-            p.add_argument("--input-json", default="-")
+            p.add_argument("--input-json", default=None)
             p.add_argument("--dry-run", action="store_true")
             p.add_argument("--json", action="store_true")
         if name == "run":
@@ -69,8 +101,25 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(root)
         main_branch = args.main_branch or config.main_branch
         if args.command == "publish-github":
-            source = sys.stdin.read() if args.input_json == "-" else Path(args.input_json).read_text()
-            data = json.loads(source)
+            if args.input_json is None or args.input_json == "-":
+                source = _read_nonblocking_stdin_text()
+            else:
+                source = Path(args.input_json).read_text(encoding="utf-8")
+            if source is not None:
+                data = json.loads(source)
+            else:
+                scope = collect_review_scope(root, main_branch=main_branch)
+                receipt = resolve_or_carry_forward_receipt(root, scope)
+                if receipt is None:
+                    raise ValueError(
+                        "No review verdict provided via --input-json/stdin and no cached review receipt found for current HEAD; run `guard review run --github-pr <pr>` first."
+                    )
+                data = {
+                    "verdict": receipt["verdict"],
+                    "summary": receipt["summary"],
+                    "blocking_findings": [],
+                    "reviewed_head_sha": receipt["head_sha"],
+                }
             data = validate_review_output(data)
             receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
             if args.json:
