@@ -3,7 +3,7 @@
 - `config` validates repository-owned settings; `policy` validates manifest and rule documents.
 - `finding` defines the static diagnostic contract; `git_helpers` reads historical file content.
 - `topology` owns language analysis, declared dependency constraints and module discovery.
-- `review/contract` owns reviewer types and wire schema; `repository` owns Git scope and patch identity;
+- `review/contract` owns reviewer types and wire schema; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope and patch identity;
   `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
   `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;
   `engine` composes review and continuation. These modules do not implement product policy semantics.

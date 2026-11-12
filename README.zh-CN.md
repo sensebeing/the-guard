@@ -231,6 +231,8 @@ Martian 的 50 个 PR 汇总结果如下：
 guard probe --priority-order codex,claude,agy
 guard probe --provider-model codex=gpt-6.1-sol:high
 guard review --provider codex
+guard review --json --github-pr owner/repo#123
+guard review publish-github --pr owner/repo#123 --input-json review.json --json
 guard review run --force
 guard review check-push
 ```
@@ -347,3 +349,11 @@ uv run guard check --base origin/main
 ## 许可证
 
 [MIT](LICENSE)
+
+### GitHub Action
+
+在工作流中使用 `sensebeing/the-guard@main` 运行检查并发布 PR 审查。
+
+```yaml
+- uses: sensebeing/the-guard@main
+```

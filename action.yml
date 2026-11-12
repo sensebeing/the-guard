@@ -1,0 +1,22 @@
+name: the-guard
+inputs:
+  preset:
+    default: full
+  provider:
+    default: codex
+  github-token:
+    default: ${{ github.token }}
+  publish-review:
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 -m pip install "$GITHUB_ACTION_PATH"
+    - shell: bash
+      run: guard check --base "origin/${GITHUB_BASE_REF:-main}"
+    - if: inputs.publish-review == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json

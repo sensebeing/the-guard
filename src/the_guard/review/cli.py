@@ -7,6 +7,9 @@ import json
 import os
 import sys
 from pathlib import Path
+from dataclasses import asdict
+
+from .github import publish_github_pr_review
 
 from ..config import load_config
 from ..policy import PolicyError
@@ -37,16 +40,24 @@ def main(argv: list[str] | None = None) -> int:
         values.insert(0, "run")
     parser = argparse.ArgumentParser(prog="guard review")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("run", "check-push", "probe"):
+    for name in ("run", "check-push", "probe", "publish-github"):
         p = sub.add_parser(name)
         p.add_argument("--repo-root", default=".")
         p.add_argument("--main-branch", default=None)
         if name in ("run", "probe"):
             p.add_argument("--reprobe", action="store_true")
+        if name == "publish-github":
+            p.add_argument("--pr", required=True)
+            p.add_argument("--input-json", default="-")
+            p.add_argument("--dry-run", action="store_true")
+            p.add_argument("--json", action="store_true")
         if name == "run":
             p.add_argument("--provider", choices=PROVIDERS)
             p.add_argument("--force", action="store_true")
             p.add_argument("--note", "--rebuttal", default="")
+            p.add_argument("--json", action="store_true")
+            p.add_argument("--github-pr", default=None, help="Publish attributable review to GitHub PR (owner/repo#number or URL)")
+            p.add_argument("--github-dry-run", action="store_true")
         if name == "probe":
             p.add_argument("--priority-order", type=_parse_priority_order)
             p.add_argument(
@@ -57,6 +68,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(root)
         main_branch = args.main_branch or config.main_branch
+        if args.command == "publish-github":
+            source = sys.stdin.read() if args.input_json == "-" else Path(args.input_json).read_text()
+            data = json.loads(source)
+            receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
+            if args.json:
+                print(json.dumps(receipt, indent=2))
+            else:
+                print(f"GitHub review: {receipt['status']} ({receipt['delivery_mode']})")
+            return 0
         if args.command == "probe":
             if args.reprobe or args.priority_order or args.provider_model:
                 result = probe_environment(
@@ -95,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             reviewer_note=args.note,
         )
+        gh_receipt = None
+        if args.github_pr:
+            gh_receipt = publish_github_pr_review(args.github_pr, verdict=result.verdict, summary=result.summary, findings=result.blocking_findings, commit_id=getattr(result, "reviewed_head_sha", None) or getattr(result, "head_sha", None), dry_run=args.github_dry_run)
+        if args.json:
+            print(json.dumps({**asdict(result), **({"github_review": gh_receipt} if gh_receipt else {})}, indent=2))
+            return 0 if result.verdict == "GO" else 2
         lines = [
             f"## Architecture Review: {result.verdict}",
             "",

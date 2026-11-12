@@ -246,6 +246,8 @@ See the [core rule definitions](docs/standards/rules/architecture-simplicity.md)
 guard probe --priority-order codex,claude,agy
 guard probe --provider-model codex=gpt-6.1-sol:high
 guard review --provider codex
+guard review --json --github-pr owner/repo#123
+guard review publish-github --pr owner/repo#123 --input-json review.json --json
 guard review run --force
 guard review check-push
 ```
@@ -364,3 +366,11 @@ If `the-guard` helps your team build with AI, a star on GitHub helps other teams
 ## License
 
 [MIT](LICENSE)
+
+### GitHub Action
+
+Use `sensebeing/the-guard@main` in a workflow to run checks and publish attributable PR reviews.
+
+```yaml
+- uses: sensebeing/the-guard@main
+```
