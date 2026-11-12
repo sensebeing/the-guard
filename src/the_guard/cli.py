@@ -13,6 +13,7 @@ from typing import Any
 
 from .auto_update import (
     guard_status,
+    maybe_delegate_to_checkout,
     maybe_trigger_background_auto_update,
     self_update,
 )
@@ -82,6 +83,15 @@ def _extract_repo_root(values: list[str]) -> Path:
     return Path(".").resolve()
 
 
+def _extract_optional_path(values: list[str], option: str) -> str | None:
+    for idx, token in enumerate(values):
+        if token == option and idx + 1 < len(values):
+            return values[idx + 1]
+        if token.startswith(option + "="):
+            return token.partition("=")[2]
+    return None
+
+
 def _publish_check_github_review(
     root: Path,
     target: str | None,
@@ -125,6 +135,16 @@ def main(argv: list[str] | None = None) -> int:
     root = _extract_repo_root(values)
     should_trigger_auto_update = False
     try:
+        if command != "self-update":
+            delegated_code = maybe_delegate_to_checkout(
+                values,
+                active_repo_root=root,
+                home_dir=_extract_optional_path(values, "--home-dir"),
+                state_dir=_extract_optional_path(values, "--state-dir"),
+                gemini_dir=_extract_optional_path(values, "--gemini-dir"),
+            )
+            if delegated_code is not None:
+                return delegated_code
         if command in {"review", "check-push", "probe"}:
             sub_values = values[1:] if command == "review" else values
             code = review_main(sub_values)
@@ -193,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(distill(root), indent=2))
             return 0
         if args.command == "hook":
+            should_trigger_auto_update = True
             return (edit_guard if args.action == "edit-guard" else main_push_gate)(
                 root, sys.stdin.read()
             )

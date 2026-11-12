@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..config import load_config
 from ..policy import load_policy
 from .prompt import (
     _sanitize_reviewer_note,
@@ -25,6 +26,7 @@ from .repository import (
     collect_incremental_scope,
     collect_review_scope,
     current_branch_name,
+    compute_review_contract_digest,
     git_common_dir,
     load_review_session,
     resolve_or_carry_forward_receipt,
@@ -37,6 +39,7 @@ from .runner import (
     _parse_findings,
 )
 from .session import (
+    contract_digest_matches,
     UTC,
     ReviewResult,
     ReviewRunLogger,
@@ -72,7 +75,18 @@ def run_architecture_review(
             mode="exempt",
         )
 
-    if not force:
+    policy = load_policy(repo_root, revision=scope.head_sha)
+    contract_config = load_config(repo_root, revision=scope.head_sha)
+    current_contract_digest = compute_review_contract_digest(policy, contract_config)
+    branch = current_branch_name(repo_root)
+    prior_session = None if force else load_review_session(repo_root, branch)
+    contract_changed = prior_session is not None and not contract_digest_matches(
+        prior_session.contract_digest, policy, contract_config
+    )
+    if contract_changed:
+        prior_session = None
+
+    if not force and not contract_changed:
         existing = resolve_or_carry_forward_receipt(repo_root, scope)
         if existing is not None:
             return ReviewResult(
@@ -91,9 +105,6 @@ def run_architecture_review(
                 log_path=str(existing.get("log_path") or ""),
             )
 
-    policy = load_policy(repo_root, revision=scope.head_sha)
-    branch = current_branch_name(repo_root)
-    prior_session = None if force else load_review_session(repo_root, branch)
     inc_scope = collect_incremental_scope(repo_root, scope, prior_session)
     prev_head_sha = prior_session.last_head_sha if prior_session is not None else None
     full_prompt_cache: str | None = None
@@ -270,6 +281,7 @@ def run_architecture_review(
             last_submodule_shas={
                 sub.path: sub.new_sha for sub in scope.submodule_changes
             },
+            contract_digest=current_contract_digest,
             round_count=(prior_session.round_count + 1)
             if (prior_session and effective_mode == "incremental")
             else 1,

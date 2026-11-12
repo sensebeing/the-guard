@@ -9,6 +9,12 @@ Use this skill in an onboarded repository. For first-time installation or a chan
 mode, use [the-guard-setup](../the-guard-setup/SKILL.md). Run commands in the target repository;
 its policy and module contracts define the rules, not this skill.
 
+Checks, reviews, and `guard hook` workflows may schedule a non-blocking background update. A
+clean newer `~/the-guard` checkout is delegated immediately and the installed uv tool is repaired
+when its commit or package-tree digest is stale; inspection of the guard checkout remains
+snapshot-bound. Review sessions start a fresh full review when reviewer contract code,
+repository configuration, or policy rules change.
+
 ## Daily loop
 
 1. **Read before editing.** Read the root policy in `AGENTS.md` (or the manifest selected by

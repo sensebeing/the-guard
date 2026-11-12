@@ -29,7 +29,10 @@ from the_guard.review.repository import (
     _is_same_per_file_branch_patch,
     load_valid_receipt,
     review_logs_dir,
+    compute_review_contract_digest,
 )
+from the_guard.config import load_config
+from the_guard.policy import load_policy
 from architecture_review_support import (
     ArchitectureReviewTestCase,
     _git,
@@ -41,6 +44,42 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
+    def test_contract_digest_change_invalidates_incremental_session_and_carry_forward(self) -> None:
+        """Changing repository config prevents carry-forward and forces a full fresh review."""
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            service = repo / "services/catalog/service.py"
+            service.parent.mkdir(parents=True, exist_ok=True)
+            service.write_text("VALUE = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "initial review scope")
+            reviewer = lambda _prompt: {"verdict": "GO", "summary": "ok", "blocking_findings": []}
+            first = run_architecture_review(repo, reviewer_fn=reviewer)
+            self.assertEqual(first.mode, "full")
+            config_path = repo / ".guard/config.json"
+            config_path.parent.mkdir(exist_ok=True)
+            config_path.write_text('{"main_branch":"main","review":{"project_title":"changed"}}\n', encoding="utf-8")
+            service.write_text("VALUE = 2\n", encoding="utf-8")
+            _git(repo, "add", ".guard/config.json", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "change review contract")
+            scope = collect_review_scope(repo)
+            self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+            second = run_architecture_review(repo, reviewer_fn=reviewer)
+            self.assertEqual(second.mode, "full")
+            saved = load_review_session(repo)
+            self.assertIsNotNone(saved)
+            self.assertTrue(saved.contract_digest)
+
+    def test_contract_digest_changes_when_repository_config_changes(self) -> None:
+        """A policy/config change must produce a new digest and invalidate old continuation evidence."""
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            first = compute_review_contract_digest(load_policy(repo), load_config(repo))
+            (repo / ".guard").mkdir(exist_ok=True)
+            (repo / ".guard/config.json").write_text('{"main_branch":"main","review":{"project_title":"changed"}}\n', encoding="utf-8")
+            second = compute_review_contract_digest(load_policy(repo), load_config(repo))
+            self.assertNotEqual(first, second)
+
     def test_conversational_incremental_review_resumes_session_and_persists_logs(
         self,
     ) -> None:

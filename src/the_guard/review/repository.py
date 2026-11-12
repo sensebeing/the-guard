@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
+from ..policy import load_policy
 from .contract import (
     CODE_EXTENSIONS,
     CONFIG_I18N_EXTENSIONS,
@@ -30,6 +31,7 @@ from .session import (
     ReviewResult,
     ReviewSessionState,
 )
+from .session import compute_review_contract_digest, contract_digest_matches
 from .session import (
     load_review_session as _load_session_record,
 )
@@ -550,6 +552,11 @@ def resolve_or_carry_forward_receipt(
         or not session.last_head_sha
     ):
         return None
+    current_policy = load_policy(repo_root, revision=scope.head_sha)
+    current_config = load_config(repo_root, revision=scope.head_sha)
+    current_contract_digest = compute_review_contract_digest(current_policy, current_config)
+    if not contract_digest_matches(session.contract_digest, current_policy, current_config):
+        return None
     prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
     if prior_receipt is None:
         return None
@@ -606,6 +613,7 @@ def resolve_or_carry_forward_receipt(
             last_submodule_shas={
                 sub.path: sub.new_sha for sub in scope.submodule_changes
             },
+            contract_digest=current_contract_digest,
             round_count=session.round_count,
             updated_at=datetime.now(UTC).isoformat(),
         ),

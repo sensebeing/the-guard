@@ -10,7 +10,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
-
+from ..config import GuardConfig
+from ..policy import Policy
 from .contract import BlockingFinding
 
 RECEIPT_SCHEMA = "the-guard-receipt/v1"
@@ -21,6 +22,36 @@ MAX_RETAINED_RUN_LOGS = 90
 MAX_RETAINED_LOGS_PER_WORKTREE = 8
 MAX_RETAINED_SESSIONS = 30
 MAX_RETAINED_RECEIPTS = 200
+
+
+def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
+    """Hash the complete reviewer contract and its policy/config dependencies."""
+    digest = hashlib.sha256()
+    source_dir = Path(__file__).parent
+    for path in sorted(source_dir.glob("*.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    for path in (Path(__file__).parents[1] / "config.py", Path(__file__).parents[1] / "policy.py"):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    payload = {
+        "config": asdict(config),
+        "policy": {
+            "manifest_schema": policy.schema,
+            "rules": [
+                {"id": rule.id, "severity": rule.severity, "scope": list(rule.scope),
+                 "summary": rule.summary, "details": rule.details, "detail_body": rule.detail_body}
+                for rule in policy.rules
+            ],
+        },
+    }
+    digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def contract_digest_matches(stored_digest: str, policy: Policy, config: GuardConfig) -> bool:
+    """Return whether persisted session evidence belongs to the current contract."""
+    return bool(stored_digest) and stored_digest == compute_review_contract_digest(policy, config)
 
 
 @dataclass(frozen=True)
@@ -50,6 +81,7 @@ class ReviewSessionState:
     last_summary: str
     last_blocking_findings: tuple[BlockingFinding, ...]
     last_submodule_shas: dict[str, str]
+    contract_digest: str = ""
     round_count: int = 1
     updated_at: str = ""
 
@@ -150,6 +182,7 @@ def load_review_session(
         last_summary=str(raw.get("last_summary") or ""),
         last_blocking_findings=findings,
         last_submodule_shas=sub_shas,
+        contract_digest=str(raw.get("contract_digest") or ""),
         round_count=int(raw.get("round_count") or 1),
         updated_at=str(raw.get("updated_at") or ""),
     )
@@ -184,6 +217,7 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
         "last_summary": state.last_summary,
         "last_blocking_findings": [asdict(f) for f in state.last_blocking_findings],
         "last_submodule_shas": dict(state.last_submodule_shas),
+        "contract_digest": state.contract_digest,
         "round_count": state.round_count,
         "updated_at": state.updated_at or datetime.now(UTC).isoformat(),
     }
