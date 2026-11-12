@@ -1,6 +1,6 @@
-# GuardBench and ReviewBench
+# GuardBench and Martian 50-PR Code Review Bench
 
-This repository ships two reproducible evaluation tracks. GuardBench is a seven-case, multi-service architectural benchmark with 12 violations across six corrupt commits and one clean change. ReviewBench records real open-source pull request comparisons. The Codex 6.1 runs use model gpt-6.1-sol with effort=medium; the public benchmark source is [withmartian/code-review-benchmark](https://github.com/withmartian/code-review-benchmark).
+This repository ships two reproducible evaluation tracks. GuardBench is a seven-case, multi-service architectural benchmark with 12 violations across six corrupt commits and one clean change. Track 2 evaluates all 50 real open-source pull requests from Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark), with full reproducible artifacts published at [sensebeing/code-review-benchmark](https://github.com/sensebeing/code-review-benchmark).
 
 Run the deterministic suite:
 
@@ -28,7 +28,7 @@ The static guard layer runs in about 40 ms with zero tokens. Noise and fix-direc
 
 ## Track 2 - Martian real open-source PRs
 
-Aggregate comparison (`the-guard` and `Codex 6.1 raw` evaluated locally with `gpt-6.1-sol` on the 6-PR real-PR suite; third-party products from Martian's 50-PR aggregate):
+Aggregate comparison across all 50 real open-source PRs in Martian's [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) (complete reproducible evaluation artifacts and interactive dashboard at [sensebeing/code-review-benchmark](https://github.com/sensebeing/code-review-benchmark)):
 
 | Product | Evaluated scope | Precision | Recall | F1 | TP / FP / FN |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -48,51 +48,6 @@ Aggregate comparison (`the-guard` and `Codex 6.1 raw` evaluated locally with `gp
 | Sourcery | Martian 50-PR aggregate | 38.1% | 49.7% | 43.1% | 86 / 140 / 87 |
 | Claude Code | Martian 50-PR aggregate | 42.3% | 41.0% | 41.6% | 71 / 97 / 102 |
 | CodeRabbit | Martian 50-PR aggregate | 30.7% | 60.1% | 40.6% | 104 / 235 / 69 |
-| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** | N/A |
-| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** | N/A |
-
-The local comparisons use the same PR snapshots:
-
-| Pull request | Codex 6.1 raw | the-guard (gpt-6.1-sol) | the-guard findings |
-| --- | --- | --- | --- |
-| getsentry/sentry#80168 | NO-GO (1 finding) | NO-GO | 3: abstract handler, non-atomic event publication, test assertion mismatch |
-| calcom/cal.com#22345 | GO (0 findings) | NO-GO | 2: weakened discriminated options contract, raw SQL not executed in org/team tests |
-| getsentry/sentry#80528 | GO (0 findings) | GO | 0; refactor preserved behavior |
-
-### Real-PR product comparison
-
-The three PRs above are the local rows in a broader 11-product comparison. The commercial and hosted products below are the Martian comparison products; their per-PR rows summarize the public benchmark results.
-
-| Product | sentry#80168 | cal.com#22345 | sentry#80528 |
-| --- | --- | --- | --- |
-| CodeRabbit | 1/2 true defects, 2 FP | 1/2 true defects, 3 FP | legacy issue plus style noise |
-| Cursor BugBot | 1/2, 2 FP | 1/2, 1 FP | GO |
-| GitHub Copilot Review v2 | 1/2, 1 FP | 1/2, 3 FP | legacy issue plus style noise |
-| Greptile v4.1 | 1/2, 1 FP | 0/2, 3 FP | GO |
-| Qodo Extended v2 / PR-Agent | 1/2 | 0/2, 0 FP | GO |
-| Claude Code | 2/2, 1 FP | 1/2, 2 FP | GO |
-| Devin | 1/2, 2 FP | 0/2, 0 FP | GO |
-| Sourcery | 1/2, 3 FP | 1/2, 0 FP | legacy issue plus style noise |
-| Kodus v2 | aggregate only | aggregate only | aggregate only |
-| Codex 6.1 raw | 1/2 | 0/2, 0 FP | 0 |
-| the-guard (gpt-6.1-sol) | 2/2 plus Kafka ordering issue | 2 blocking contract/test findings | 0, GO |
-
-### ReviewBench
-
-ReviewBench contains three additional real PR comparisons used by the repository's earlier benchmark report:
-
-| Pull request | Golden findings | Codex raw | the-guard |
-| --- | --- | --- | --- |
-| PierreJanineh/TechDebtMCP#135 | 1 true positive and 1 annotated ReDoS false positive | Finds the ReDoS false positive; misses the true positive | Finds the true positive with guard.no-silent-fallback; 0 annotated false positives |
-| AA-Factory/aafactory-prototype#17 | 3 test-contract findings | Finds 2/3 | Finds 3/3 with guard.test-case-quality |
-| allan-mobley-jr/gimmes#468 | 1 stale-volume filter finding | Finds 1/1 | Finds 1/1 with owner-contract evidence |
-
-The deterministic track is fully reproducible with [benchmarks/guardbench.py](guardbench.py). The real-PR comparison source is the public [withmartian/code-review-benchmark](https://github.com/withmartian/code-review-benchmark).
-
-## Full 50-PR Martian Code Review Bench
-
-The complete 50-PR Martian evaluation artifacts are published at [sensebeing/code-review-benchmark](https://github.com/sensebeing/code-review-benchmark), including [benchmark_data.json](https://github.com/sensebeing/code-review-benchmark/blob/main/offline/results/benchmark_data.json) and the [interactive dashboard](https://github.com/sensebeing/code-review-benchmark/blob/main/offline/analysis/benchmark_dashboard.html).
-
 
 ### Per-repository Core profile
 
