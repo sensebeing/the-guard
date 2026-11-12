@@ -2,6 +2,14 @@
 
 Read the engineering policy and module boundaries before changing code.
 
+## Integration workflow
+
+This repository uses GitHub PR mode (`review.integration_mode=github-pr`): commit changes on a
+topic branch, push it to `origin`, open a GitHub PR with `gh pr create`, review it with
+`guard review --github-pr sensebeing/the-guard#<number>` (the review is published as
+`the-guard-reviewer[bot]`), and merge with `gh pr merge` rather than pushing directly to `main`.
+The local `pre-push` hook rejects direct pushes to `main` in this mode.
+
 ## Engineering Quality Policy
 
 <!-- the-guard-policy:start -->

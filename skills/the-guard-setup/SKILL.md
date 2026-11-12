@@ -52,11 +52,29 @@ agent instructions so future agents read them before coding.
 
 ## Wire the integration boundary
 
-If hook installation is authorized, `guard init --with-hooks` installs Git's `pre-push` hook.
-It refuses to replace an existing hook. If one exists, integrate `guard hook main-push-gate`
-into that hook while preserving its other checks and passing Git's complete stdin update list.
-Do not consume stdin twice. For agent post-edit hooks, invoke `guard hook edit-guard --repo-root .`
-with JSON containing `tool_input.file_path`; this checks the file after an edit, not a proposed edit.
+`review.integration_mode` in `.guard/config.json` selects how reviewed changes reach `main`:
+
+1. **local-hooks** (`guard init --with-hooks`): Git's `pre-push` hook verifies a local `GO`
+   receipt for the pushed commit range before a push to the main branch.
+2. **github-pr** (`guard init --with-github-workflow`): contributors commit on topic branches,
+   open a GitHub PR, publish the independent review with
+   `guard review --github-pr <owner/repo#number>`, and merge with `gh pr merge`. The local
+   `pre-push` hook is still installed and rejects direct pushes to the main branch.
+3. **both** (`guard init --with-hooks --with-github-workflow`): the PR workflow is installed, and
+   the local receipt gate still governs direct pushes to the main branch.
+
+Pass `--integration-mode <local-hooks|github-pr|both>` to set the mode explicitly; otherwise
+`init` derives it from the install flags. GitHub PR mode installs
+`.github/workflows/the-guard-review.yml`, which runs `sensebeing/the-guard@main` on
+`pull_request` events and publishes reviews as `the-guard-reviewer[bot]`; it expects the
+`THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository secrets. `init` refuses to overwrite a
+customized workflow, except an existing `uses: ./` workflow in the-guard's own repository.
+
+If hook installation is authorized, the pre-push hook refuses to replace an existing hook. If one
+exists, integrate `guard hook main-push-gate` into that hook while preserving its other checks and
+passing Git's complete stdin update list. Do not consume stdin twice. For agent post-edit hooks,
+invoke `guard hook edit-guard --repo-root .` with JSON containing `tool_input.file_path`; this
+checks the file after an edit, not a proposed edit.
 
 Run `guard probe` to inspect available review providers. Before merging or pushing a protected
 change, commit it on its topic branch, run `guard review`, and address all concrete blocking findings.

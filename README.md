@@ -92,6 +92,18 @@ To install all 14 rules and enable the local `pre-push` gate:
 guard init --preset full --with-hooks
 ```
 
+Choose how reviewed changes reach `main`; `--integration-mode` sets the mode explicitly, otherwise
+`init` derives it from the install flags:
+
+| Mode | Install | Integration boundary |
+| --- | --- | --- |
+| `local-hooks` | `guard init --with-hooks` | The local `pre-push` hook verifies a `GO` receipt for the pushed range before a push to the main branch. |
+| `github-pr` | `guard init --with-github-workflow` | Push topic branches, open a GitHub PR, publish `guard review --github-pr <owner/repo#number>` as `the-guard-reviewer[bot]`, and merge with `gh pr merge`; the local `pre-push` hook still rejects direct pushes to the main branch. |
+| `both` | `guard init --with-hooks --with-github-workflow` | The GitHub PR review workflow is installed, and direct pushes to the main branch still require a local `GO` receipt. |
+
+GitHub PR mode writes `.github/workflows/the-guard-review.yml` and expects the
+`THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository secrets.
+
 ### 3. Or run the setup skill
 
 Invoke `$the-guard-setup` (or `/the-guard-setup`) in your coding agent to choose `core`, `full`, `distill`, or `hybrid` interactively.
@@ -150,6 +162,7 @@ flowchart TD
 3. Commit changes on a topic branch and run `guard review` so a separate reviewer agent audits the committed diff against your rules.
 4. When the reviewer flags a structural issue, fix the root cause across the pattern, or rebut with code and contract evidence via `guard review --note "<evidence>"`.
 5. Run `guard check-push` (or use the `pre-push` hook installed by `--with-hooks`) to verify that a valid `GO` receipt matches the committed patch before pushing to `main`.
+6. In GitHub PR mode (`review.integration_mode=github-pr`), push the topic branch, open a PR with `gh pr create`, publish the independent review with `guard review --github-pr <owner/repo#number>`, and merge with `gh pr merge`; direct pushes to `main` are rejected. With `both`, the PR workflow is available and direct pushes to `main` remain gated by the local `GO` receipt check.
 
 ### An example from daily work
 
@@ -160,6 +173,7 @@ A linter sees valid syntax and types. `guard check` blocks forbidden cross-layer
 ### GitHub Action
 
 Use `sensebeing/the-guard@main` in a workflow to run checks and publish attributable PR reviews.
+`guard init --with-github-workflow` writes this template to `.github/workflows/the-guard-review.yml`.
 
 ```yaml
 - uses: sensebeing/the-guard@main
@@ -300,6 +314,9 @@ Initial reviews inspect the full changed file scope before reporting high-confid
 }
 ```
 
+The optional `review.integration_mode` key accepts `local-hooks`, `github-pr`, or `both` and
+selects the integration boundary that `guard init` records and the `pre-push` gate enforces.
+
 The policy manifest lives between `<!-- the-guard-policy:start -->` and `<!-- the-guard-policy:end -->` in `AGENTS.md`:
 
 ```yaml
@@ -338,7 +355,7 @@ guard check --file src/api.py --file app/Screen.swift --json
 
 | Command | Purpose |
 | --- | --- |
-| `guard init` | Initialize policy manifest and rule files (`--preset core\|full`, `--with-hooks`, `--rules-dir`, `--manifest-file`). |
+| `guard init` | Initialize policy manifest and rule files (`--preset core\|full`, `--with-hooks`, `--with-github-workflow`, `--integration-mode`, `--rules-dir`, `--manifest-file`). |
 | `guard check` | Validate policy manifest and run deterministic topology checks on changed files (`--policy-only`, `--base`, `--file`, `--json`). |
 | `guard topology sync` / `check` | Sync discovered module inventory into `.guard/config.json` or run topology checks standalone. |
 | `guard distill` | Emit repository module inventory, tooling signals, and code samples for agent-assisted rule distillation. |

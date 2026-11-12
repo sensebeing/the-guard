@@ -16,6 +16,8 @@
       }
     ]
   },
-  "review": {},
+  "review": {
+    "integration_mode": "github-pr"
+  },
   "detail_dir": "docs/standards/rules"
 }

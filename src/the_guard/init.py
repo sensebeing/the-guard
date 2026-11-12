@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .config import load_config, repository_path
-from .hooks import install_hooks
+from .config import REVIEW_INTEGRATION_MODES, load_config, repository_path
+from .hooks import hook_install_plan, install_hooks
 from .topology import discover_topology
 
 CORE = (
@@ -16,6 +16,47 @@ CORE = (
     "code-organization",
 )
 
+WORKFLOW_TEMPLATE = """name: the-guard review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: sensebeing/the-guard@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          app-id: ${{ secrets.THE_GUARD_APP_ID }}
+          private-key: ${{ secrets.THE_GUARD_PRIVATE_KEY }}
+"""
+
+WORKFLOW_PATH = ".github/workflows/the-guard-review.yml"
+
+
+def workflow_install_plan(root: Path | str) -> Path:
+    """Resolve the managed review workflow without writing; refuse to replace a customized one."""
+    target = repository_path(Path(root).resolve(), WORKFLOW_PATH)
+    if target.exists():
+        existing = target.read_text()
+        if existing != WORKFLOW_TEMPLATE and "uses: ./" not in existing:
+            raise ValueError(f"Refusing to overwrite customized workflow: {target}")
+    return target
+
+
+def install_github_workflow(root: Path | str) -> Path:
+    target = workflow_install_plan(root)
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(WORKFLOW_TEMPLATE)
+    return target
+
 
 def initialize(
     root: Path | str,
@@ -24,11 +65,23 @@ def initialize(
     rules_dir: str = "docs/standards/rules",
     manifest_file: str = "AGENTS.md",
     with_hooks: bool = False,
+    with_github_workflow: bool = False,
+    integration_mode: str | None = None,
 ) -> dict[str, object]:
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     if preset not in {"core", "full"}:
         raise ValueError("preset must be core or full")
+    if integration_mode is not None and integration_mode not in REVIEW_INTEGRATION_MODES:
+        raise ValueError("integration_mode must be local-hooks, github-pr, or both")
+    effective_mode = integration_mode
+    if effective_mode is None:
+        if with_hooks and with_github_workflow:
+            effective_mode = "both"
+        elif with_github_workflow:
+            effective_mode = "github-pr"
+        elif with_hooks:
+            effective_mode = "local-hooks"
     cfg = load_config(root)
     manifest = repository_path(root, manifest_file)
     destination = repository_path(root, rules_dir)
@@ -102,6 +155,16 @@ def initialize(
     config.setdefault("review", {}).setdefault(
         "extra_reviewable_paths", [rules_dir + "/**"]
     )
+    if effective_mode is not None:
+        config.setdefault("review", {})["integration_mode"] = effective_mode
+    install_workflow = with_github_workflow or effective_mode in {"github-pr", "both"}
+    install_local_hooks = (
+        with_hooks or effective_mode in {"local-hooks", "github-pr", "both"}
+    ) and (root / ".git").exists()
+    if install_workflow:
+        workflow_install_plan(root)
+    if install_local_hooks:
+        hook_install_plan(root)
     destination.mkdir(parents=True, exist_ok=True)
     for target, content in files.items():
         target.write_text(content)
@@ -112,11 +175,14 @@ def initialize(
     alias = root / "CLAUDE.md"
     if manifest_file == "AGENTS.md" and not alias.exists() and not alias.is_symlink():
         alias.symlink_to("AGENTS.md")
-    if with_hooks:
+    if install_workflow:
+        install_github_workflow(root)
+    if install_local_hooks:
         install_hooks(root)
     return {
         "preset": preset,
         "rules": len(slugs),
         "manifest": manifest_file,
         "config": ".guard/config.json",
+        "integration_mode": effective_mode,
     }

@@ -1,10 +1,14 @@
 """Policy and topology contracts must survive onboarding without project-specific defaults."""
 
+import contextlib
+import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from the_guard.init import initialize
+from the_guard.hooks import main_push_gate
+from the_guard.init import WORKFLOW_TEMPLATE, initialize
 from the_guard.config import load_config
 from the_guard.policy import load_policy, PolicyError
 from the_guard.topology import run_topology_guard, discover_topology
@@ -74,6 +78,116 @@ class OnboardingTests(unittest.TestCase):
         topology = discover_topology(self.root)
         self.assertIn("packages/api", [m["path"] for m in topology["modules"]])
         self.assertIn("Python", distill(self.root)["languages"])
+
+
+class GithubPrIntegrationModeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def write(self, path, text):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.root, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def init_repo(self):
+        self.git("init", "-b", "main")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.invalid")
+        self.write("README.md", "base\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "base")
+
+    def test_github_workflow_onboarding_sets_github_pr_mode(self):
+        initialize(self.root, with_github_workflow=True)
+        workflow = self.root / ".github/workflows/the-guard-review.yml"
+        self.assertEqual(workflow.read_text(), WORKFLOW_TEMPLATE)
+        self.assertEqual(
+            workflow.read_text(),
+            (Path(__file__).resolve().parents[1] / "examples/the-guard-review.yml").read_text(),
+        )
+        self.assertEqual(
+            load_config(self.root).review["integration_mode"], "github-pr"
+        )
+
+    def test_customized_workflow_is_preserved_only_for_self_dogfooding(self):
+        initialize(self.root, with_github_workflow=True)
+        workflow = self.root / ".github/workflows/the-guard-review.yml"
+        self.write(workflow.relative_to(self.root), "name: custom\n")
+        with self.assertRaises(ValueError):
+            initialize(self.root, with_github_workflow=True)
+        self.write(
+            workflow.relative_to(self.root),
+            "name: custom\nuses: ./\n",
+        )
+        initialize(self.root, with_github_workflow=True)
+        self.assertEqual(workflow.read_text(), "name: custom\nuses: ./\n")
+
+    def test_github_pr_mode_blocks_direct_main_push_but_allows_topic_branches(self):
+        self.init_repo()
+        initialize(self.root, integration_mode="github-pr")
+        self.assertTrue((self.root / ".git/hooks/pre-push").exists())
+        head = self.git("rev-parse", "HEAD")
+        direct = f"refs/heads/main {head} refs/heads/main {head}\n"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(main_push_gate(self.root, direct), 2)
+        self.assertIn("review.integration_mode=github-pr", stderr.getvalue())
+        self.assertIn("gh pr merge", stderr.getvalue())
+        deletion = f"(delete) {'0' * 40} refs/heads/main {head}\n"
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main_push_gate(self.root, deletion), 2)
+        topic = f"refs/heads/feat/topic {head} refs/heads/feat/topic {head}\n"
+        self.assertEqual(main_push_gate(self.root, topic), 0)
+
+    def test_both_mode_keeps_the_local_receipt_gate_for_direct_pushes(self):
+        self.init_repo()
+        initialize(self.root, integration_mode="both")
+        self.assertTrue((self.root / ".github/workflows/the-guard-review.yml").exists())
+        self.assertTrue((self.root / ".git/hooks/pre-push").exists())
+        base = self.git("rev-parse", "HEAD")
+        self.write("src/api.py", "x = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "change")
+        head = self.git("rev-parse", "HEAD")
+        direct = f"refs/heads/feat/topic {head} refs/heads/main {base}\n"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(main_push_gate(self.root, direct), 2)
+        self.assertIn("missing review receipt", stderr.getvalue())
+        self.assertNotIn("review.integration_mode=github-pr", stderr.getvalue())
+
+    def test_conflicting_workflow_fails_before_policy_writes(self):
+        self.write(".github/workflows/the-guard-review.yml", "name: custom\n")
+        with self.assertRaises(ValueError):
+            initialize(self.root, with_github_workflow=True)
+        self.assertFalse((self.root / ".guard/config.json").exists())
+        self.assertFalse((self.root / "AGENTS.md").exists())
+        self.assertFalse((self.root / "docs/standards/rules").exists())
+
+    def test_conflicting_hook_fails_before_policy_writes(self):
+        self.init_repo()
+        self.write(".git/hooks/pre-push", "#!/bin/sh\ncustom\n")
+        with self.assertRaises(ValueError):
+            initialize(self.root, integration_mode="github-pr")
+        self.assertFalse((self.root / ".guard/config.json").exists())
+        self.assertFalse((self.root / "AGENTS.md").exists())
+
+    def test_integration_mode_validation_rejects_unknown_values(self):
+        self.write(
+            ".guard/config.json",
+            json.dumps({"review": {"integration_mode": "server-side"}}),
+        )
+        with self.assertRaises(ValueError):
+            load_config(self.root)
+        with self.assertRaises(ValueError):
+            initialize(self.root, integration_mode="server-side")
 
 
 if __name__ == "__main__":
