@@ -194,7 +194,7 @@ Use `sensebeing/the-guard@main` in a workflow to run checks and publish attribut
 The complete 50-PR Martian evaluation artifacts are published at [sensebeing/code-review-benchmark](https://github.com/sensebeing/code-review-benchmark), including [benchmark_data.json](https://github.com/sensebeing/code-review-benchmark/blob/main/offline/results/benchmark_data.json) and the [interactive dashboard](https://github.com/sensebeing/code-review-benchmark/blob/main/offline/analysis/benchmark_dashboard.html).
 
 
-This README uses two tracks and Codex 6.1 (gpt-6.1-sol, effort=medium). Track 1 is the reproducible GuardBench in [benchmarks/guardbench.py](benchmarks/guardbench.py); Track 2 uses Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) plus three same-commit comparisons. Full cases and commands are in [benchmarks/README.md](benchmarks/README.md).
+This README uses two tracks. Track 1 is the reproducible GuardBench in [benchmarks/guardbench.py](benchmarks/guardbench.py) (Codex 6.1 `gpt-6.1-sol`, `effort=medium`); Track 2 evaluates all 50 real open-source PRs in Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark). Full details and per-repository breakdowns are in [benchmarks/README.md](benchmarks/README.md).
 
 ### Track 1 - GuardBench
 
@@ -212,7 +212,7 @@ Seven multi-service commits contain 12 violations across seven tools: Ruff, Semg
 
 ### Track 2 - real open-source PRs
 
-Comparison across real open-source PRs from Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) and ReviewBench (`the-guard` and `Codex 6.1 raw` evaluated locally with `gpt-6.1-sol` across the 6-PR real-PR suite; third-party products from Martian's 50-PR aggregate):
+Comparison across all 50 real open-source PRs from Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) (Sentry, Grafana, Cal.com, Discourse, and Keycloak):
 
 | Product | Evaluated scope | Precision | Recall | F1 |
 | --- | --- | ---: | ---: | ---: |
@@ -232,25 +232,6 @@ Comparison across real open-source PRs from Martian's public [code-review-benchm
 | Sourcery | Martian 50-PR aggregate | 38.1% | 49.7% | 43.1% |
 | Claude Code | Martian 50-PR aggregate | 42.3% | 41.0% | 41.6% |
 | CodeRabbit | Martian 50-PR aggregate | 30.7% | 60.1% | 40.6% |
-| **the-guard (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **90.0%** | **100.0%** | **94.7%** |
-| **Codex 6.1 raw (gpt-6.1-sol)** | **6-PR real-PR suite (3 Martian + 3 ReviewBench)** | **80.0%** | **44.4%** | **57.1%** |
-
-The 6-PR head-to-head gives the-guard 94.7% F1 versus 57.1% for Codex 6.1 raw (gpt-6.1-sol).
-
-Same-commit head-to-head on Martian real open-source PRs ([getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168), [calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345), [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528)):
-
-| Product | sentry#80168 (2 blocking defects) | cal.com#22345 (2 contract/test defects) | sentry#80528 (clean refactor control) |
-| --- | --- | --- | --- |
-| **the-guard (gpt-6.1-sol)** | **2/2 + Kafka non-atomic publish (0 FP)** | **2/2 blocking contract & SQL test gaps (0 FP)** | **GO (0 FP)** |
-| **Codex 6.1 raw (gpt-6.1-sol)** | 1/2 (missed test assertion mismatch) | 0/2 (false GO) | GO (0 FP) |
-| Claude Code | 2/2, 1 FP | 1/2, 2 FP | GO (0 FP) |
-| Cursor BugBot | 1/2, 2 FP | 1/2, 1 FP | GO (0 FP) |
-| Qodo Extended v2 / PR-Agent | 1/2, 0 FP | 0/2, 0 FP | GO (0 FP) |
-| Greptile v4.1 | 1/2, 1 FP | 0/2, 3 FP | GO (0 FP) |
-| GitHub Copilot Review v2 | 1/2, 1 FP | 1/2, 3 FP | Legacy issue + style noise |
-| CodeRabbit | 1/2, 2 FP | 1/2, 3 FP | Legacy issue + style noise |
-| Devin Review | 1/2, 2 FP | 0/2, 0 FP | GO (0 FP) |
-| Sourcery | 1/2, 3 FP | 1/2, 0 FP | Legacy issue + style noise |
 
 Reproduce Track 1 with python3 benchmarks/guardbench.py; the command uses no model tokens unless --with-review is supplied.
 

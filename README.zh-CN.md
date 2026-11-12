@@ -188,7 +188,7 @@ flowchart TD
 
 ## 基准评测
 
-本文采用两条轨道，所有 Codex 评测统一使用 Codex 6.1（gpt-6.1-sol，effort=medium）。轨道 1 是 [benchmarks/guardbench.py](benchmarks/guardbench.py) 中可复现的 GuardBench；轨道 2 使用 Martian 公开的 [code-review-benchmark](https://github.com/withmartian/code-review-benchmark)，并补充三个相同提交的对比。完整案例、命令见 [benchmarks/README.md](benchmarks/README.md)。
+本文采用两条轨道：轨道 1 是 [benchmarks/guardbench.py](benchmarks/guardbench.py) 中可复现的 GuardBench（Codex 评测使用 `gpt-6.1-sol, effort=medium`）；轨道 2 使用 Martian 公开的 50-PR [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) 全集。完整分析与分仓库明细见 [benchmarks/README.md](benchmarks/README.md)。
 
 ### 轨道 1 - GuardBench
 
@@ -229,10 +229,6 @@ Martian 的 50 个 PR 汇总结果如下：
 | Sourcery | 38.1% | 49.7% | 43.1% |
 | Claude Code | 42.3% | 41.0% | 41.6% |
 | CodeRabbit | 30.7% | 60.1% | 40.6% |
-
-6-PR 头对头中，the-guard 的 F1 为 94.7%，Codex 6.1 裸审查（gpt-6.1-sol）为 57.1%。
-
-本机逐 PR 对比覆盖 [getsentry/sentry#80168](https://github.com/getsentry/sentry/pull/80168)、[calcom/cal.com#22345](https://github.com/calcom/cal.com/pull/22345) 和 [getsentry/sentry#80528](https://github.com/getsentry/sentry/pull/80528)。the-guard 依次返回 NO-GO（3 项）、NO-GO（2 项）和 GO；Codex 6.1 裸审查依次返回 NO-GO（1 项）、GO 和 GO。ReviewBench 的三个 PR 对比仍单独记录在基准 README。
 
 用 python3 benchmarks/guardbench.py 复现轨道 1；除非传入 --with-review，否则不消耗模型 Token。
 
