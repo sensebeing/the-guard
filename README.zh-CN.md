@@ -157,6 +157,14 @@ flowchart TD
 
 传统 Linter 看到语法和类型合法就会放行。`guard check` 会拦截前端对内部存储层的越界引用，`guard review` 则对照订单服务的职责合同，依据 `guard.single-source-of-truth` 指出前端重复实现了状态机，要求改为读取后端返回的字段。设计师把这条反馈发回给她的 Agent，改成直接读取后端字段，重跑 `guard review` 拿到 `GO` 回执后即可合入主干。
 
+### GitHub Action
+
+在工作流中使用 `sensebeing/the-guard@main` 运行检查并发布 PR 审查。
+
+```yaml
+- uses: sensebeing/the-guard@main
+```
+
 ## 与现有工具如何配合
 
 | 工具类别 | 擅长解决什么 | `the-guard` 补充什么 |
@@ -318,6 +326,7 @@ guard check --file src/api.py --file app/Screen.swift --json
 | `guard distill` | 输出模块清单、工具链信号与代码样本，供 Agent 提炼项目专属架构规则。 |
 | `guard review` / `guard review run` | 对已提交变更执行独立 Agent 架构审查（`--provider`、`--force`、`--note`）。 |
 | `guard check-push` | 校验当前 `HEAD` 是否具备有效 `GO` 审查回执或属于免审范围（普通文档或纯锁文件变更）。 |
+| `guard review publish-github` | 从 JSON 输入发布可归因的 GitHub PR 审查（`--pr`、`--input-json`、`--dry-run`、`--json`）。 |
 | `guard probe` | 探测并配置本机可用的审查 Agent CLI（`--priority-order`、`--provider-model`、`--reprobe`）。 |
 | `guard hook edit-guard` | 供编码 Agent 挂载的编辑后置钩子（从标准输入 JSON 读取 `tool_input.file_path`）。 |
 | `guard hook main-push-gate` | Git `pre-push` 门禁钩子，保护主分支在缺少有效回执时拒绝推送。 |
@@ -349,11 +358,3 @@ uv run guard check --base origin/main
 ## 许可证
 
 [MIT](LICENSE)
-
-### GitHub Action
-
-在工作流中使用 `sensebeing/the-guard@main` 运行检查并发布 PR 审查。
-
-```yaml
-- uses: sensebeing/the-guard@main
-```

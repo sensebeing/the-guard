@@ -81,9 +81,9 @@ def publish_github_pr_review(target: str, *, verdict: str, summary: str, finding
     if payload["comments"] and ("422" in stderr or "Unprocessable Entity" in stderr):
         fallback = dict(payload)
         fallback["comments"] = []
-        all_findings = [format_finding_comment(f) for f in findings]
-        if all_findings:
-            fallback["body"] = payload["body"] + "\n\n" + "\n\n---\n\n".join(all_findings)
+        inline_findings = [comment["body"] for comment in payload["comments"]]
+        if inline_findings:
+            fallback["body"] = payload["body"] + "\n\n" + "\n\n---\n\n".join(inline_findings)
         fallback_result = subprocess.run(command, input=json.dumps(fallback), text=True, capture_output=True)
         if fallback_result.returncode != 0:
             raise RuntimeError(fallback_result.stderr or stderr)

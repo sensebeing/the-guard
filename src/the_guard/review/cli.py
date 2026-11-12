@@ -71,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "publish-github":
             source = sys.stdin.read() if args.input_json == "-" else Path(args.input_json).read_text()
             data = json.loads(source)
+            if not isinstance(data, dict) or "verdict" not in data or "summary" not in data:
+                raise ValueError("Input JSON must contain verdict and summary")
             receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
             if args.json:
                 print(json.dumps(receipt, indent=2))

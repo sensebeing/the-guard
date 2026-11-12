@@ -157,6 +157,14 @@ Suppose a designer asks her coding agent to add an order-status badge to a scree
 
 A linter sees valid syntax and types. `guard check` blocks forbidden cross-layer imports deterministically, and `guard review` cites the orders service contract under `guard.single-source-of-truth` and asks the agent to consume the backend's canonical status field. The designer hands that feedback to her agent, switches the UI to read the backend field, reruns `guard review` for a `GO` receipt, and merges cleanly.
 
+### GitHub Action
+
+Use `sensebeing/the-guard@main` in a workflow to run checks and publish attributable PR reviews.
+
+```yaml
+- uses: sensebeing/the-guard@main
+```
+
 ## Where it fits
 
 | Tool category | What it does best | What `the-guard` adds |
@@ -333,6 +341,7 @@ guard check --file src/api.py --file app/Screen.swift --json
 | `guard distill` | Emit repository module inventory, tooling signals, and code samples for agent-assisted rule distillation. |
 | `guard review` / `guard review run` | Run independent agent architecture review on committed changes (`--provider`, `--force`, `--note`). |
 | `guard check-push` | Verify that current `HEAD` has a matching `GO` review receipt or is review-exempt (ordinary prose or lockfile-only changes). |
+| `guard review publish-github` | Publish an attributable GitHub PR review from JSON input (`--pr`, `--input-json`, `--dry-run`, `--json`). |
 | `guard probe` | Discover and configure local reviewer agent CLIs (`--priority-order`, `--provider-model`, `--reprobe`). |
 | `guard hook edit-guard` | Post-edit hook for coding agents (reads `tool_input.file_path` from JSON stdin). |
 | `guard hook main-push-gate` | Git `pre-push` hook enforcing valid review receipts before pushing to protected branches. |
@@ -366,11 +375,3 @@ If `the-guard` helps your team build with AI, a star on GitHub helps other teams
 ## License
 
 [MIT](LICENSE)
-
-### GitHub Action
-
-Use `sensebeing/the-guard@main` in a workflow to run checks and publish attributable PR reviews.
-
-```yaml
-- uses: sensebeing/the-guard@main
-```
