@@ -66,8 +66,6 @@ removes a historical check. Explain the invariant and causal impact of every fin
 """
 
 
-
-
 def _sanitize_reviewer_note(note: str) -> str:
     cleaned = note.strip().replace("```", "'''")
     return cleaned[:MAX_REVIEWER_NOTE_CHARS] + (
