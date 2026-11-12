@@ -15,20 +15,14 @@ inputs:
 runs:
   using: composite
   steps:
-    - id: app-token
-      if: inputs.app-id != '' && inputs.private-key != ''
-      uses: actions/create-github-app-token@v1
-      with:
-        app-id: ${{ inputs.app-id }}
-        private-key: ${{ inputs.private-key }}
     - shell: bash
       env:
-        GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
       run: python3 -m pip install "$GITHUB_ACTION_PATH"
     - if: inputs.publish-review == 'true' && github.event_name == 'pull_request'
       shell: bash
       env:
-        GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
         THE_GUARD_GITHUB_APP_ID: ${{ inputs.app-id }}
         THE_GUARD_GITHUB_PRIVATE_KEY: ${{ inputs.private-key }}
       run: |
@@ -43,7 +37,7 @@ runs:
     - if: inputs.publish-review != 'true' || github.event_name != 'pull_request'
       shell: bash
       env:
-        GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
         THE_GUARD_GITHUB_APP_ID: ${{ inputs.app-id }}
         THE_GUARD_GITHUB_PRIVATE_KEY: ${{ inputs.private-key }}
       run: guard check --base "origin/${GITHUB_BASE_REF:-main}"
