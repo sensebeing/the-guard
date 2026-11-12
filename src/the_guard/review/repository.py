@@ -105,7 +105,7 @@ def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
     """Hash reviewer source, repository configuration, and policy rules."""
     digest = hashlib.sha256()
     reviewer_dir = Path(__file__).parent
-    for name in ("contract.py", "engine.py", "prompt.py", "provider.py", "repository.py", "runner.py", "session.py"):
+    for name in ("cli.py", "contract.py", "engine.py", "prompt.py", "provider.py", "repository.py", "runner.py", "session.py"):
         path = reviewer_dir / name
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
