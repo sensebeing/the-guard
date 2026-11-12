@@ -326,7 +326,7 @@ def self_update(
                         reinstalled = True
                     elif not needs_reinstall:
                         report["cli_status"] = "up_to_date"
-                    if reinstalled or not manages_uv_tool or installed_digest == checkout_digest:
+                    if reinstalled or (not explicit and not manages_uv_tool) or installed_digest == checkout_digest:
                         report["installed_sha"] = after_sha
                         report["installed_tree_digest"] = checkout_digest
                 report["head_sha"] = _subprocess_run(
