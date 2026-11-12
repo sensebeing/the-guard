@@ -47,7 +47,6 @@ def main(argv: list[str] | None = None) -> int:
         if name in ("run", "probe"):
             p.add_argument("--reprobe", action="store_true")
         if name == "publish-github":
-            p.add_argument("--repo-root", default=".")
             p.add_argument("--pr", required=True)
             p.add_argument("--input-json", default="-")
             p.add_argument("--dry-run", action="store_true")
