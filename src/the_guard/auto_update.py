@@ -547,6 +547,21 @@ def maybe_delegate_to_checkout(
             return None
         if _subprocess_run(["git", "-C", str(checkout), "status", "--porcelain"], 20).strip():
             return None
+        checkout_sha = _subprocess_run(["git", "-C", str(checkout), "rev-parse", "HEAD"], 20).strip()
+        metadata = _load_json_dict(state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=eff_env) / "auto_update.json")
+        baseline_sha = metadata.get("installed_sha") or metadata.get("source_sha")
+        if not baseline_sha:
+            current_repo = PACKAGE_DIR.parents[1]
+            if (current_repo / ".git").exists():
+                baseline_sha = _subprocess_run(["git", "-C", str(current_repo), "rev-parse", "HEAD"], 20).strip()
+        if baseline_sha:
+            ancestry = subprocess.run(
+                ["git", "-C", str(checkout), "merge-base", "--is-ancestor", str(baseline_sha), checkout_sha],
+                check=False,
+                capture_output=True,
+            )
+            if ancestry.returncode != 0 or checkout_sha == baseline_sha:
+                return None
         if _is_same_git_repo(PACKAGE_DIR.parents[1], checkout) or compute_package_tree_digest(checkout / "src/the_guard") == compute_package_tree_digest(PACKAGE_DIR):
             return None
     except (OSError, ValueError, subprocess.SubprocessError):
