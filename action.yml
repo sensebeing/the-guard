@@ -29,6 +29,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+        THE_GUARD_GITHUB_APP_ID: ${{ inputs.app-id }}
+        THE_GUARD_GITHUB_PRIVATE_KEY: ${{ inputs.private-key }}
       run: |
         if guard probe --priority-order "${{ inputs.provider }}" >/dev/null 2>&1; then
           check_status=0
@@ -42,4 +44,6 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+        THE_GUARD_GITHUB_APP_ID: ${{ inputs.app-id }}
+        THE_GUARD_GITHUB_PRIVATE_KEY: ${{ inputs.private-key }}
       run: guard check --base "origin/${GITHUB_BASE_REF:-main}"
