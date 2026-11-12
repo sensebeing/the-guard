@@ -315,16 +315,19 @@ def self_update(
                     guard_bin = resolved_home / ".local/bin/guard"
                     is_real_home = resolved_home == Path.home().resolve()
                     has_installed_guard = guard_bin.exists() or (is_real_home and bool(shutil.which("guard")))
+                    reinstalled = False
                     if (
                         needs_reinstall and not explicit and shutil.which("uv")
                         and has_installed_guard
                     ):
                         _subprocess_run(["uv", "tool", "install", "--force", str(checkout)], 60)
                         report["cli_status"] = "reinstalled"
+                        reinstalled = True
                     elif not needs_reinstall:
                         report["cli_status"] = "up_to_date"
-                    report["installed_sha"] = after_sha
-                    report["installed_tree_digest"] = checkout_digest
+                    if reinstalled or installed_digest == checkout_digest:
+                        report["installed_sha"] = after_sha
+                        report["installed_tree_digest"] = checkout_digest
                 report["head_sha"] = _subprocess_run(
                     ["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"], 20
                 ).strip()

@@ -104,7 +104,9 @@ def save_review_session(repo_root: Path, state: ReviewSessionState) -> Path:
 def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
     """Hash reviewer source, repository configuration, and policy rules."""
     digest = hashlib.sha256()
-    for path in (Path(__file__).with_name("prompt.py"), Path(__file__).with_name("contract.py")):
+    reviewer_dir = Path(__file__).parent
+    for name in ("contract.py", "engine.py", "prompt.py", "provider.py", "repository.py", "runner.py", "session.py"):
+        path = reviewer_dir / name
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
     payload = {
