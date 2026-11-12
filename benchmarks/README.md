@@ -1,6 +1,6 @@
 # GuardBench and ReviewBench
 
-This repository ships two reproducible evaluation tracks. GuardBench is a seven-case, multi-service architectural benchmark with 12 violations across six corrupt commits and one clean change. ReviewBench records real open-source pull request comparisons. The Codex 6.1 runs use model gpt-6.1-sol with effort=medium; the public benchmark source is [sensebeing/code-review-benchmark](https://github.com/sensebeing/code-review-benchmark).
+This repository ships two reproducible evaluation tracks. GuardBench is a seven-case, multi-service architectural benchmark with 12 violations across six corrupt commits and one clean change. ReviewBench records real open-source pull request comparisons. The Codex 6.1 runs use model gpt-6.1-sol with effort=medium; the public benchmark source is [withmartian/code-review-benchmark](https://github.com/withmartian/code-review-benchmark).
 
 Run the deterministic suite:
 
@@ -87,7 +87,7 @@ ReviewBench contains three additional real PR comparisons used by the repository
 | AA-Factory/aafactory-prototype#17 | 3 test-contract findings | Finds 2/3 | Finds 3/3 with guard.test-case-quality |
 | allan-mobley-jr/gimmes#468 | 1 stale-volume filter finding | Finds 1/1 | Finds 1/1 with owner-contract evidence |
 
-The deterministic track is fully reproducible with [benchmarks/guardbench.py](guardbench.py). The real-PR comparison source is the public [sensebeing/code-review-benchmark](https://github.com/sensebeing/code-review-benchmark).
+The deterministic track is fully reproducible with [benchmarks/guardbench.py](guardbench.py). The real-PR comparison source is the public [withmartian/code-review-benchmark](https://github.com/withmartian/code-review-benchmark).
 
 ## Full 50-PR Martian Code Review Bench
 

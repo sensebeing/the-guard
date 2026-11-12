@@ -6,8 +6,10 @@ import argparse
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from .auto_update import (
     guard_status,
@@ -16,6 +18,7 @@ from .auto_update import (
 )
 from .config import load_config
 from .distill import distill
+from .finding import Finding
 from .git_helpers import changed_files, resolve_changed_base
 from .hooks import edit_guard, main_push_gate
 from .init import initialize
@@ -71,6 +74,43 @@ def _extract_repo_root(values: list[str]) -> Path:
         if token.startswith("--repo-root="):
             return Path(token.partition("=")[2]).resolve()
     return Path(".").resolve()
+
+
+def _publish_check_github_review(
+    root: Path,
+    target: str | None,
+    *,
+    base: str,
+    findings: Sequence[Finding],
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    if not target:
+        return None
+    head_sha = None
+    try:
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    verdict = "NO-GO" if findings else "GO"
+    summary = (
+        f"Deterministic policy and topology check found {len(findings)} blocking violation(s) (base {base})."
+        if findings
+        else f"Deterministic policy and topology check passed with 0 findings (base {base})."
+    )
+    return publish_github_pr_review(
+        target,
+        verdict=verdict,
+        summary=summary,
+        findings=findings,
+        commit_id=head_sha,
+        dry_run=dry_run,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -160,84 +200,26 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(root)
         if args.command == "check":
             load_policy(root)
-            if args.policy_only and args.base is None:
-                should_trigger_auto_update = True
-                gh_receipt = None
-                if args.github_pr:
-                    head_sha = None
-                    try:
-                        head_sha = subprocess.run(
-                            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
-                            capture_output=True, text=True,
-                        ).stdout.strip()
-                    except (OSError, subprocess.SubprocessError):
-                        head_sha = None
-                    base_name = args.base or cfg.main_branch
-                    gh_receipt = publish_github_pr_review(
-                        args.github_pr,
-                        verdict="GO",
-                        summary=f"Deterministic policy and topology check passed with 0 findings (base {base_name}).",
-                        findings=[], commit_id=head_sha, dry_run=args.github_dry_run,
-                    )
-                if args.json:
-                    output = {"status": "GO"}
-                    if gh_receipt is not None:
-                        output["github_review"] = gh_receipt
-                    print(json.dumps(output))
-                else:
-                    print("GO: policy valid")
-                return 0
-        base = resolve_changed_base(root, args.base, main_branch=cfg.main_branch)
-        if args.command == "check" and args.policy_only:
-            should_trigger_auto_update = True
-            gh_receipt = None
-            if args.github_pr:
-                head_sha = None
-                try:
-                    head_sha = subprocess.run(
-                        ["git", "rev-parse", "HEAD"], cwd=root, check=True,
-                        capture_output=True, text=True,
-                    ).stdout.strip()
-                except (OSError, subprocess.SubprocessError):
-                    head_sha = None
-                gh_receipt = publish_github_pr_review(
-                    args.github_pr,
-                    verdict="GO",
-                    summary=f"Deterministic policy and topology check passed with 0 findings (base {base}).",
-                    findings=[], commit_id=head_sha, dry_run=args.github_dry_run,
-                )
-            if args.json:
-                output = {"status": "GO"}
-                if gh_receipt is not None:
-                    output["github_review"] = gh_receipt
-                print(json.dumps(output))
-            else:
-                print("GO: policy valid")
-            return 0
-        findings = run_topology_guard(
-            root, args.file or changed_files(root, base), base=base, config=cfg
+        base = (
+            args.base or cfg.main_branch
+            if args.command == "check" and args.policy_only
+            else resolve_changed_base(root, args.base, main_branch=cfg.main_branch)
+        )
+        findings = (
+            []
+            if args.command == "check" and args.policy_only
+            else run_topology_guard(
+                root, args.file or changed_files(root, base), base=base, config=cfg
+            )
         )
         should_trigger_auto_update = args.command == "check"
-        gh_receipt = None
-        if args.command == "check" and args.github_pr:
-            head_sha = None
-            try:
-                head_sha = subprocess.run(
-                    ["git", "rev-parse", "HEAD"], cwd=root, check=True,
-                    capture_output=True, text=True,
-                ).stdout.strip()
-            except (OSError, subprocess.SubprocessError):
-                head_sha = None
-            verdict = "NO-GO" if findings else "GO"
-            summary = (
-                f"Deterministic policy and topology check found {len(findings)} blocking violation(s) (base {base})."
-                if findings
-                else f"Deterministic policy and topology check passed with 0 findings (base {base})."
-            )
-            gh_receipt = publish_github_pr_review(
-                args.github_pr, verdict=verdict, summary=summary, findings=findings,
-                commit_id=head_sha, dry_run=args.github_dry_run,
-            )
+        gh_receipt = _publish_check_github_review(
+            root,
+            args.github_pr if args.command == "check" else None,
+            base=base,
+            findings=findings,
+            dry_run=args.github_dry_run if args.command == "check" else False,
+        )
         if args.json:
             output = {
                 "status": "NO-GO" if findings else "GO",

@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 from the_guard.review.cli import main as review_main
+from the_guard.cli import main as guard_main
+from the_guard.finding import Finding
 from the_guard.review.github import (
     build_github_review_payload,
     parse_github_pr_target,
@@ -20,6 +22,24 @@ from the_guard.review.github import (
 
 
 class GithubReviewTests(unittest.TestCase):
+    def test_static_finding_maps_to_inline_comment_without_required_fix(self) -> None:
+        finding = Finding("guard.service-boundaries", "src/a.py", 12, "bad import")
+        payload = build_github_review_payload("NO-GO", "summary", [finding])
+        self.assertEqual(payload["comments"][0]["path"], "src/a.py")
+        self.assertEqual(payload["comments"][0]["line"], 12)
+        self.assertIn("bad import", payload["comments"][0]["body"])
+        self.assertNotIn("**Required fix:**", payload["comments"][0]["body"])
+
+    def test_guard_check_policy_only_publishes_github_dry_run(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = guard_main([
+                "check", "--policy-only", "--github-pr", "owner/repo#42",
+                "--github-dry-run", "--json",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["github_review"]["delivery_mode"], "dry_run")
+
     def test_parse_targets_and_rejects_invalid_values(self) -> None:
         self.assertEqual(parse_github_pr_target("owner/repo#42"), ("owner", "repo", 42))
         self.assertEqual(

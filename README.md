@@ -180,7 +180,7 @@ Use `sensebeing/the-guard@main` in a workflow to run checks and publish attribut
 The complete 50-PR Martian evaluation artifacts are published at [sensebeing/code-review-benchmark](https://github.com/sensebeing/code-review-benchmark), including [benchmark_data.json](https://github.com/sensebeing/code-review-benchmark/blob/main/offline/results/benchmark_data.json) and the [interactive dashboard](https://github.com/sensebeing/code-review-benchmark/blob/main/offline/analysis/benchmark_dashboard.html).
 
 
-This README uses two tracks and Codex 6.1 (gpt-6.1-sol, effort=medium). Track 1 is the reproducible GuardBench in [benchmarks/guardbench.py](benchmarks/guardbench.py); Track 2 uses Martian's public [code-review-benchmark](https://github.com/sensebeing/code-review-benchmark) plus three same-commit comparisons. Full cases and commands are in [benchmarks/README.md](benchmarks/README.md).
+This README uses two tracks and Codex 6.1 (gpt-6.1-sol, effort=medium). Track 1 is the reproducible GuardBench in [benchmarks/guardbench.py](benchmarks/guardbench.py); Track 2 uses Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) plus three same-commit comparisons. Full cases and commands are in [benchmarks/README.md](benchmarks/README.md).
 
 ### Track 1 - GuardBench
 
@@ -198,7 +198,7 @@ Seven multi-service commits contain 12 violations across seven tools: Ruff, Semg
 
 ### Track 2 - real open-source PRs
 
-Comparison across real open-source PRs from Martian's public [code-review-benchmark](https://github.com/sensebeing/code-review-benchmark) and ReviewBench (`the-guard` and `Codex 6.1 raw` evaluated locally with `gpt-6.1-sol` across the 6-PR real-PR suite; third-party products from Martian's 50-PR aggregate):
+Comparison across real open-source PRs from Martian's public [code-review-benchmark](https://github.com/withmartian/code-review-benchmark) and ReviewBench (`the-guard` and `Codex 6.1 raw` evaluated locally with `gpt-6.1-sol` across the 6-PR real-PR suite; third-party products from Martian's 50-PR aggregate):
 
 | Product | Evaluated scope | Precision | Recall | F1 |
 | --- | --- | ---: | ---: | ---: |

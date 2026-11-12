@@ -30,14 +30,14 @@ runs:
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
       run: |
-        check_status=0
         if guard probe --priority-order "${{ inputs.provider }}" >/dev/null 2>&1; then
+          check_status=0
           guard check --base "origin/${GITHUB_BASE_REF:-main}" || check_status=$?
           guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json
+          exit "$check_status"
         else
-          guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json || check_status=$?
+          guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json
         fi
-        [[ "$check_status" -eq 0 || "$check_status" -eq 2 ]]
     - if: inputs.publish-review != 'true' || github.event_name != 'pull_request'
       shell: bash
       env:

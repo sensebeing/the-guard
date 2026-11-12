@@ -177,7 +177,7 @@ flowchart TD
 
 ## 基准评测
 
-本文采用两条轨道，所有 Codex 评测统一使用 Codex 6.1（gpt-6.1-sol，effort=medium）。轨道 1 是 [benchmarks/guardbench.py](benchmarks/guardbench.py) 中可复现的 GuardBench；轨道 2 使用 Martian 公开的 [code-review-benchmark](https://github.com/sensebeing/code-review-benchmark)，并补充三个相同提交的对比。完整案例、命令见 [benchmarks/README.md](benchmarks/README.md)。
+本文采用两条轨道，所有 Codex 评测统一使用 Codex 6.1（gpt-6.1-sol，effort=medium）。轨道 1 是 [benchmarks/guardbench.py](benchmarks/guardbench.py) 中可复现的 GuardBench；轨道 2 使用 Martian 公开的 [code-review-benchmark](https://github.com/withmartian/code-review-benchmark)，并补充三个相同提交的对比。完整案例、命令见 [benchmarks/README.md](benchmarks/README.md)。
 
 ### 轨道 1 - GuardBench
 
