@@ -568,6 +568,7 @@ def maybe_delegate_to_checkout(
             return None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    maybe_trigger_background_auto_update(active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir, gemini_dir=gemini_dir, env=eff_env, force_local_sync=True)
     child_env = {**eff_env, "PYTHONPATH": os.pathsep.join(filter(None, [str(checkout / "src"), eff_env.get("PYTHONPATH", "")])), "THE_GUARD_DELEGATED": "1"}
-    return subprocess.run([sys.executable, "-m", "the_guard.cli", *argv], env=child_env, check=False).returncode
+    proc = subprocess.run([sys.executable, "-m", "the_guard.cli", *argv], env=child_env, check=False)
+    maybe_trigger_background_auto_update(active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir, gemini_dir=gemini_dir, env=eff_env, force_local_sync=True)
+    return proc.returncode
