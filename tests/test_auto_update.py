@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +20,62 @@ from the_guard.cli import build_parser, main
 
 
 class AutoUpdateTests(unittest.TestCase):
+    def test_self_update_reinstalls_uv_tool_when_head_already_pulled(self) -> None:
+        """A stale installed commit is repaired even when git pull has no new commit."""
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            home = root_path / "home"
+            checkout = home / "the-guard"
+            state = root_path / "state"
+            gemini = root_path / "gemini"
+            (checkout / "src/the_guard").mkdir(parents=True)
+            (checkout / "src/the_guard/__init__.py").write_text("__version__ = '1'\n", encoding="utf-8")
+            (checkout / "src/the_guard/runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (checkout / "pyproject.toml").write_text("[project]\nname='the-guard'\nversion='1'\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-b", "main", str(checkout)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"], check=True, capture_output=True)
+            origin = root_path / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", str(origin)], check=True)
+            subprocess.run(["git", "-C", str(checkout), "push", "-u", "origin", "main"], check=True, capture_output=True)
+            guard_bin = home / ".local/bin/guard"
+            guard_bin.parent.mkdir(parents=True)
+            guard_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            guard_bin.chmod(0o755)
+            uv_log = root_path / "uv.log"
+            fake_uv = root_path / "uv"
+            fake_uv.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{uv_log}'\n", encoding="utf-8")
+            fake_uv.chmod(0o755)
+            env = {"PATH": f"{root_path}:{os.environ.get('PATH', '')}"}
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(auto_update, "PACKAGE_DIR", root_path / "installed/src/the_guard"):
+                report = auto_update.self_update(home_dir=home, state_dir=state, gemini_dir=gemini, env=env)
+            self.assertEqual(report["cli_status"], "reinstalled")
+            self.assertTrue(uv_log.read_text(encoding="utf-8").startswith("tool install --force"))
+            self.assertEqual(report["installed_sha"], report["head_sha"])
+
+    def test_maybe_delegate_to_checkout_runs_newer_clean_main_and_skips_dirty_or_delegated(self) -> None:
+        """A newer clean checkout delegates once, while recursion and dirty trees are rejected."""
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            home = root_path / "home"
+            checkout = home / "the-guard"
+            (checkout / "src/the_guard").mkdir(parents=True)
+            (checkout / "src/the_guard/__init__.py").write_text("", encoding="utf-8")
+            (checkout / "src/the_guard/cli.py").write_text("print('{\\\"delegated\\\": true}')\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-b", "main", str(checkout)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"], check=True, capture_output=True)
+            consumer = root_path / "consumer"
+            subprocess.run(["git", "init", str(consumer)], check=True, capture_output=True)
+            env = {"THE_GUARD_AUTO_UPDATE": "1", "PATH": os.environ.get("PATH", "")}
+            with mock.patch.object(auto_update, "PACKAGE_DIR", root_path / "installed/src/the_guard"), mock.patch.object(auto_update, "maybe_trigger_background_auto_update", return_value=False):
+                code = auto_update.maybe_delegate_to_checkout(["status", "--json"], active_repo_root=consumer, home_dir=home, state_dir=root_path / "state", gemini_dir=root_path / "gemini", env=env)
+            self.assertEqual(code, 0)
+            self.assertIsNone(auto_update.maybe_delegate_to_checkout(["status"], active_repo_root=consumer, home_dir=home, env={**env, "THE_GUARD_DELEGATED": "1"}))
+            (checkout / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            self.assertIsNone(auto_update.maybe_delegate_to_checkout(["status"], active_repo_root=consumer, home_dir=home, env=env))
+
     def test_linked_worktree_counts_as_same_guard_repository(self) -> None:
         """A linked worktree must not delegate or update during snapshot-bound self-inspection."""
         with tempfile.TemporaryDirectory() as root:
@@ -479,6 +536,18 @@ class AutoUpdateTests(unittest.TestCase):
                     0,
                 )
                 trigger.assert_called_once_with(active_repo_root=root_path.resolve())
+
+    def test_hook_command_triggers_background_auto_update(self) -> None:
+        """Hook-driven workflows schedule the same background update as checks."""
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            with (
+                mock.patch("the_guard.cli.edit_guard", return_value=0),
+                mock.patch("the_guard.cli.maybe_trigger_background_auto_update") as trigger,
+                mock.patch("sys.stdin", io.StringIO("{}")),
+            ):
+                self.assertEqual(main(["hook", "edit-guard", "--repo-root", str(root_path)]), 0)
+            trigger.assert_called_once_with(active_repo_root=root_path.resolve())
 
 
 if __name__ == "__main__":
