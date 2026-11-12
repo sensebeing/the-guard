@@ -262,6 +262,8 @@ def self_update(
         "status": "failed",
         "source_status": "failed",
         "head_sha": existing.get("head_sha"),
+        "source_sha": existing.get("source_sha"),
+        "source_tree_digest": existing.get("source_tree_digest"),
         "installed_sha": existing.get("installed_sha"),
         "installed_tree_digest": existing.get("installed_tree_digest"),
         "cli_status": "skipped",
@@ -302,6 +304,8 @@ def self_update(
                     ).strip()
                     report["source_status"] = "updated" if after_sha != before_sha else "up_to_date"
                     checkout_digest = compute_package_tree_digest(checkout / "src/the_guard")
+                    report["source_sha"] = after_sha
+                    report["source_tree_digest"] = checkout_digest
                     installed_dir = _installed_guard_package_dir(resolved_home)
                     installed_digest = (
                         compute_package_tree_digest(installed_dir) if installed_dir else None
@@ -326,7 +330,7 @@ def self_update(
                         reinstalled = True
                     elif not needs_reinstall:
                         report["cli_status"] = "up_to_date"
-                    if reinstalled or (not explicit and not manages_uv_tool) or installed_digest == checkout_digest:
+                    if reinstalled or installed_digest == checkout_digest:
                         report["installed_sha"] = after_sha
                         report["installed_tree_digest"] = checkout_digest
                 report["head_sha"] = _subprocess_run(
@@ -448,8 +452,12 @@ def maybe_trigger_background_auto_update(
             local_digest = compute_package_tree_digest(checkout / "src/the_guard")
             installed_dir = _installed_guard_package_dir(resolved_home)
             installed_digest = compute_package_tree_digest(installed_dir) if installed_dir else metadata.get("installed_tree_digest")
+            guard_bin = resolved_home / ".local/bin/guard"
+            managed_install = guard_bin.exists() or (resolved_home == Path.home().resolve() and bool(shutil.which("guard")))
+            baseline_sha = metadata.get("installed_sha") if managed_install else metadata.get("source_sha")
+            baseline_digest = installed_digest if managed_install else metadata.get("source_tree_digest")
             local_sync_needed = clean_main and (
-                checkout_sha != metadata.get("installed_sha") or local_digest != installed_digest
+                checkout_sha != baseline_sha or local_digest != baseline_digest
             )
         except (OSError, ValueError, subprocess.SubprocessError):
             local_sync_needed = False
