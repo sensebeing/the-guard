@@ -29,7 +29,10 @@ from the_guard.review.repository import (
     _is_same_per_file_branch_patch,
     load_valid_receipt,
     review_logs_dir,
+    compute_review_contract_digest,
 )
+from the_guard.config import load_config
+from the_guard.policy import load_policy
 from architecture_review_support import (
     ArchitectureReviewTestCase,
     _git,
@@ -41,6 +44,16 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
+    def test_contract_digest_changes_when_repository_config_changes(self) -> None:
+        """A policy/config change must produce a new digest and invalidate old continuation evidence."""
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            first = compute_review_contract_digest(load_policy(repo), load_config(repo))
+            (repo / ".guard").mkdir(exist_ok=True)
+            (repo / ".guard/config.json").write_text('{"main_branch":"main","review":{"project_title":"changed"}}\n', encoding="utf-8")
+            second = compute_review_contract_digest(load_policy(repo), load_config(repo))
+            self.assertNotEqual(first, second)
+
     def test_conversational_incremental_review_resumes_session_and_persists_logs(
         self,
     ) -> None:

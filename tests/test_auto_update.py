@@ -19,6 +19,18 @@ from the_guard.cli import build_parser, main
 
 
 class AutoUpdateTests(unittest.TestCase):
+    def test_linked_worktree_counts_as_same_guard_repository(self) -> None:
+        """A linked worktree must not delegate or update during snapshot-bound self-inspection."""
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            repo = root_path / "repo"
+            subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+            (repo / "marker").write_text("main\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "marker"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
+            linked = root_path / "linked"
+            subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", "feature", str(linked)], check=True, capture_output=True)
+            self.assertTrue(auto_update._is_same_git_repo(repo, linked))
     def test_parser_exposes_self_update_and_status_contracts(self) -> None:
         """CLI parser exposes checkout, home, state, gemini, quiet, and json flags."""
         parser = build_parser()

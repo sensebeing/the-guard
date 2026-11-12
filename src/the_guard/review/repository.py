@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import subprocess
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
+from ..policy import Policy, load_policy
 from .contract import (
     CODE_EXTENSIONS,
     CONFIG_I18N_EXTENSIONS,
@@ -96,6 +99,27 @@ def load_review_session(
 
 def save_review_session(repo_root: Path, state: ReviewSessionState) -> Path:
     return _save_session_record(git_common_dir(repo_root), state)
+
+
+def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
+    """Hash reviewer source, repository configuration, and policy rules."""
+    digest = hashlib.sha256()
+    for path in (Path(__file__).with_name("prompt.py"), Path(__file__).with_name("contract.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    payload = {
+        "config": asdict(config),
+        "policy": {
+            "manifest_schema": policy.schema,
+            "rules": [
+                {"id": rule.id, "severity": rule.severity, "scope": list(rule.scope),
+                 "summary": rule.summary, "details": rule.details, "detail_body": rule.detail_body}
+                for rule in policy.rules
+            ],
+        },
+    }
+    digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def review_logs_dir(repo_root: Path, env: dict[str, str] | None = None) -> Path:
@@ -550,6 +574,12 @@ def resolve_or_carry_forward_receipt(
         or not session.last_head_sha
     ):
         return None
+    current_contract_digest = compute_review_contract_digest(
+        load_policy(repo_root, revision=scope.head_sha),
+        load_config(repo_root, revision=scope.head_sha),
+    )
+    if session.contract_digest != current_contract_digest:
+        return None
     prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
     if prior_receipt is None:
         return None
@@ -606,6 +636,7 @@ def resolve_or_carry_forward_receipt(
             last_submodule_shas={
                 sub.path: sub.new_sha for sub in scope.submodule_changes
             },
+            contract_digest=current_contract_digest,
             round_count=session.round_count,
             updated_at=datetime.now(UTC).isoformat(),
         ),

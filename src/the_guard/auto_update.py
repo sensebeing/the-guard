@@ -131,6 +131,18 @@ def _subprocess_run(command: list[str], timeout: int) -> str:
     return result.stdout or result.stderr
 
 
+def _is_same_git_repo(path_a: Path, path_b: Path) -> bool:
+    """Treat linked worktrees sharing one git common dir as the same checkout."""
+    try:
+        if path_a.expanduser().resolve() == path_b.expanduser().resolve():
+            return True
+        common_a = _subprocess_run(["git", "-C", str(path_a), "rev-parse", "--path-format=absolute", "--git-common-dir"], 20).strip()
+        common_b = _subprocess_run(["git", "-C", str(path_b), "rev-parse", "--path-format=absolute", "--git-common-dir"], 20).strip()
+        return bool(common_a and common_b) and Path(common_a).resolve() == Path(common_b).resolve()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 def _discover_checkout(
     explicit: str | Path | None,
     home_dir: Path,
@@ -301,9 +313,11 @@ def self_update(
                         or (installed_digest is not None and installed_digest != checkout_digest)
                     )
                     guard_bin = resolved_home / ".local/bin/guard"
+                    is_real_home = resolved_home == Path.home().resolve()
+                    has_installed_guard = guard_bin.exists() or (is_real_home and bool(shutil.which("guard")))
                     if (
                         needs_reinstall and not explicit and shutil.which("uv")
-                        and (guard_bin.exists() or shutil.which("guard"))
+                        and has_installed_guard
                     ):
                         _subprocess_run(["uv", "tool", "install", "--force", str(checkout)], 60)
                         report["cli_status"] = "reinstalled"
@@ -404,7 +418,7 @@ def maybe_trigger_background_auto_update(
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
     if active_repo_root is not None:
         checkout, _ = _discover_checkout(None, resolved_home)
-        if checkout is not None and Path(active_repo_root).expanduser().resolve() == checkout:
+        if checkout is not None and _is_same_git_repo(Path(active_repo_root), checkout):
             return False
     resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=eff_env)
     resolved_gemini = gemini_dir_for(
@@ -511,14 +525,14 @@ def maybe_delegate_to_checkout(
     checkout = resolved_home / "the-guard"
     if not (checkout / "src/the_guard").is_dir():
         return None
-    if active_repo_root is not None and Path(active_repo_root).expanduser().resolve() == checkout.resolve():
+    if active_repo_root is not None and _is_same_git_repo(Path(active_repo_root), checkout):
         return None
     try:
         if _subprocess_run(["git", "-C", str(checkout), "branch", "--show-current"], 20).strip() != "main":
             return None
         if _subprocess_run(["git", "-C", str(checkout), "status", "--porcelain"], 20).strip():
             return None
-        if checkout.resolve() == PACKAGE_DIR.parents[1].resolve() or compute_package_tree_digest(checkout / "src/the_guard") == compute_package_tree_digest(PACKAGE_DIR):
+        if _is_same_git_repo(PACKAGE_DIR.parents[1], checkout) or compute_package_tree_digest(checkout / "src/the_guard") == compute_package_tree_digest(PACKAGE_DIR):
             return None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None

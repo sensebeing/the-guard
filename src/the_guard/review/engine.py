@@ -15,7 +15,6 @@ from .prompt import (
     _sanitize_reviewer_note,
     build_incremental_review_prompt,
     build_review_prompt,
-    compute_review_contract_digest,
 )
 from .provider import (
     record_working_provider,
@@ -27,6 +26,7 @@ from .repository import (
     collect_incremental_scope,
     collect_review_scope,
     current_branch_name,
+    compute_review_contract_digest,
     git_common_dir,
     load_review_session,
     resolve_or_carry_forward_receipt,
@@ -81,7 +81,6 @@ def run_architecture_review(
     prior_session = None if force else load_review_session(repo_root, branch)
     contract_changed = (
         prior_session is not None
-        and bool(prior_session.contract_digest)
         and prior_session.contract_digest != current_contract_digest
     )
     if contract_changed:
