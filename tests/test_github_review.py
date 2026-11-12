@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -33,8 +34,8 @@ EMPTY_APP_ENV = {
 
 
 class _FakeUrlResponse:
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self._body = json.dumps(payload).encode("utf-8")
+    def __init__(self, payload: dict[str, Any] | bytes) -> None:
+        self._body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
 
     def read(self) -> bytes:
         return self._body
@@ -227,6 +228,64 @@ class GithubReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, EMPTY_APP_ENV, clear=True):
             token = resolve_github_app_token("owner", "repo", config_path=Path(root) / "missing.json")
         self.assertIsNone(token)
+
+    def test_resolve_github_app_token_returns_none_when_app_not_installed(self) -> None:
+        signing = subprocess.CompletedProcess([], 0, stdout=b"rsa-signature", stderr=b"")
+        not_found = urllib.error.HTTPError("https://api.github.com/repos/owner/repo/installation", 404, "Not Found", None, None)
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "github-app.json"
+            config_path.write_text(json.dumps({"app_id": 42, "private_key": "inline"}), encoding="utf-8")
+            with mock.patch.dict(os.environ, EMPTY_APP_ENV, clear=True), \
+                    mock.patch("the_guard.review.github.subprocess.run", return_value=signing), \
+                    mock.patch("the_guard.review.github.urllib.request.urlopen", side_effect=not_found):
+                token = resolve_github_app_token("owner", "repo", config_path=config_path)
+        self.assertIsNone(token)
+
+    def test_resolve_github_app_token_propagates_configured_app_failures(self) -> None:
+        signing = subprocess.CompletedProcess([], 0, stdout=b"rsa-signature", stderr=b"")
+        cases = {
+            "authentication": ({"side_effect": urllib.error.HTTPError("https://api.github.com", 401, "Unauthorized", None, None)}, urllib.error.HTTPError),
+            "transport": ({"side_effect": urllib.error.URLError("offline")}, urllib.error.URLError),
+            "malformed_response": ({"return_value": _FakeUrlResponse(b"not-json")}, ValueError),
+        }
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "github-app.json"
+            config_path.write_text(json.dumps({"app_id": 42, "private_key": "inline"}), encoding="utf-8")
+            for name, (urlopen_kwargs, expected) in cases.items():
+                with self.subTest(name), mock.patch.dict(os.environ, EMPTY_APP_ENV, clear=True), \
+                        mock.patch("the_guard.review.github.subprocess.run", return_value=signing), \
+                        mock.patch("the_guard.review.github.urllib.request.urlopen", **urlopen_kwargs):
+                    with self.assertRaises(expected):
+                        resolve_github_app_token("owner", "repo", config_path=config_path)
+
+    def test_resolve_github_app_token_propagates_configured_app_signing_failure(self) -> None:
+        failure = subprocess.CalledProcessError(1, ["openssl", "dgst", "-sha256", "-sign"])
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "github-app.json"
+            config_path.write_text(json.dumps({"app_id": 42, "private_key": "inline"}), encoding="utf-8")
+            with mock.patch.dict(os.environ, EMPTY_APP_ENV, clear=True), \
+                    mock.patch("the_guard.review.github.subprocess.run", side_effect=failure):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    resolve_github_app_token("owner", "repo", config_path=config_path)
+
+    def test_resolve_github_app_token_rejects_incomplete_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "github-app.json"
+            config_path.write_text(json.dumps({"app_id": 42}), encoding="utf-8")
+            with mock.patch.dict(os.environ, EMPTY_APP_ENV, clear=True):
+                with self.assertRaises(ValueError):
+                    resolve_github_app_token("owner", "repo", config_path=config_path)
+            partial_env = {**EMPTY_APP_ENV, "THE_GUARD_GITHUB_APP_ID": "42"}
+            with mock.patch.dict(os.environ, partial_env, clear=True):
+                with self.assertRaises(ValueError):
+                    resolve_github_app_token("owner", "repo", config_path=Path(root) / "missing.json")
+
+    def test_publish_fails_closed_when_configured_app_token_fails(self) -> None:
+        with mock.patch("the_guard.review.github.resolve_github_app_token", side_effect=urllib.error.URLError("offline")), \
+                mock.patch("the_guard.review.github.subprocess.run") as run:
+            with self.assertRaises(urllib.error.URLError):
+                publish_github_pr_review("owner/repo#42", verdict="GO", summary="ok", findings=[])
+        run.assert_not_called()
 
     def test_cli_publish_dry_run_and_malformed_json(self) -> None:
         with tempfile.TemporaryDirectory() as root:

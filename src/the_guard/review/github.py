@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -90,24 +91,35 @@ class _GithubAppCredentials:
     private_key_path: Path | None = None
 
 
-def _load_github_app_credentials(config_path: Path | None) -> _GithubAppCredentials | None:
+def _environment_github_app_credentials() -> _GithubAppCredentials | None:
     app_id = os.environ.get("THE_GUARD_GITHUB_APP_ID", "").strip()
     private_key = os.environ.get("THE_GUARD_GITHUB_PRIVATE_KEY", "")
     key_path = os.environ.get("THE_GUARD_GITHUB_PRIVATE_KEY_PATH", "").strip()
-    if app_id and (private_key.strip() or key_path):
-        return _GithubAppCredentials(app_id, private_key, Path(key_path) if key_path else None)
+    if not app_id and not private_key.strip() and not key_path:
+        return None
+    if not app_id or not (private_key.strip() or key_path):
+        raise ValueError("GitHub App environment credentials need THE_GUARD_GITHUB_APP_ID and THE_GUARD_GITHUB_PRIVATE_KEY or THE_GUARD_GITHUB_PRIVATE_KEY_PATH")
+    return _GithubAppCredentials(app_id, private_key, Path(key_path) if key_path else None)
+
+
+def _config_file_github_app_credentials(config_path: Path | None) -> _GithubAppCredentials | None:
     path = config_path or Path.home() / _GITHUB_APP_CONFIG_RELATIVE_PATH
-    if not path.is_file():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        return None
-    file_app_id = str(data.get("app_id") or "").strip()
-    file_private_key = str(data.get("private_key") or "")
-    file_key_path = str(data.get("private_key_path") or "").strip()
-    if not file_app_id or not (file_private_key.strip() or file_key_path):
-        return None
-    return _GithubAppCredentials(file_app_id, file_private_key, Path(file_key_path) if file_key_path else None)
+        raise ValueError(f"GitHub App config must be a JSON object: {path}")
+    app_id = str(data.get("app_id") or "").strip()
+    private_key = str(data.get("private_key") or "")
+    key_path = str(data.get("private_key_path") or "").strip()
+    if not app_id or not (private_key.strip() or key_path):
+        raise ValueError(f"GitHub App config needs app_id and private_key or private_key_path: {path}")
+    return _GithubAppCredentials(app_id, private_key, Path(key_path) if key_path else None)
+
+
+def _load_github_app_credentials(config_path: Path | None) -> _GithubAppCredentials | None:
+    return _environment_github_app_credentials() or _config_file_github_app_credentials(config_path)
 
 
 def _base64url(value: bytes) -> str:
@@ -159,27 +171,31 @@ def _github_api_request(url: str, *, method: str, jwt: str) -> dict[str, Any]:
     return data
 
 
-def _github_app_installation_token(jwt: str, owner: str, repo: str) -> str:
-    installation = _github_api_request(f"{_GITHUB_API_URL}/repos/{owner}/{repo}/installation", method="GET", jwt=jwt)
+def _github_app_installation_token(jwt: str, owner: str, repo: str) -> str | None:
+    try:
+        installation = _github_api_request(f"{_GITHUB_API_URL}/repos/{owner}/{repo}/installation", method="GET", jwt=jwt)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
     access_token = _github_api_request(f"{_GITHUB_API_URL}/app/installations/{installation['id']}/access_tokens", method="POST", jwt=jwt)
     return str(access_token["token"])
 
 
 def resolve_github_app_token(owner: str, repo: str, *, config_path: Path | None = None) -> str | None:
-    """Return a GitHub App installation token for owner/repo, or None when the App is not configured.
+    """Return a GitHub App installation token for owner/repo, or None when no App credential applies.
 
     Credentials come from the THE_GUARD_GITHUB_APP_ID and THE_GUARD_GITHUB_PRIVATE_KEY /
     THE_GUARD_GITHUB_PRIVATE_KEY_PATH environment variables, or from config_path (default:
-    ~/.config/the-guard/github-app.json). Unconfigured environments and repositories without
-    an App installation resolve to None so publication falls back to GH_TOKEN / gh CLI auth.
+    ~/.config/the-guard/github-app.json). None means the App is genuinely unconfigured or
+    GitHub confirms the repository has no App installation, so publication falls back to
+    GH_TOKEN / gh CLI auth. Signing, authentication, transport and malformed-response
+    failures for configured credentials raise instead of downgrading to another identity.
     """
-    try:
-        credentials = _load_github_app_credentials(config_path)
-        if credentials is None:
-            return None
-        return _github_app_installation_token(_sign_github_app_jwt(credentials), owner, repo)
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError):
+    credentials = _load_github_app_credentials(config_path)
+    if credentials is None:
         return None
+    return _github_app_installation_token(_sign_github_app_jwt(credentials), owner, repo)
 
 
 def publish_github_pr_review(target: str, *, verdict: str, summary: str, findings: Sequence[BlockingFinding | dict[str, Any]], commit_id: str | None = None, dry_run: bool = False) -> dict[str, Any]:
