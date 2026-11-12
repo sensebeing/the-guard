@@ -50,6 +50,7 @@ class ReviewSessionState:
     last_summary: str
     last_blocking_findings: tuple[BlockingFinding, ...]
     last_submodule_shas: dict[str, str]
+    contract_digest: str = ""
     round_count: int = 1
     updated_at: str = ""
 
@@ -150,6 +151,7 @@ def load_review_session(
         last_summary=str(raw.get("last_summary") or ""),
         last_blocking_findings=findings,
         last_submodule_shas=sub_shas,
+        contract_digest=str(raw.get("contract_digest") or ""),
         round_count=int(raw.get("round_count") or 1),
         updated_at=str(raw.get("updated_at") or ""),
     )
@@ -184,6 +186,7 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
         "last_summary": state.last_summary,
         "last_blocking_findings": [asdict(f) for f in state.last_blocking_findings],
         "last_submodule_shas": dict(state.last_submodule_shas),
+        "contract_digest": state.contract_digest,
         "round_count": state.round_count,
         "updated_at": state.updated_at or datetime.now(UTC).isoformat(),
     }

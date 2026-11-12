@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shlex
 from collections.abc import Sequence
@@ -12,6 +13,7 @@ from typing import Any
 
 from ..config import load_config
 from ..policy import Policy, load_policy
+from ..config import GuardConfig
 from .contract import (
     DEFAULT_INCREMENTAL_DIFF_MAX_CHARS,
     MAX_REVIEWER_NOTE_CHARS,
@@ -64,6 +66,25 @@ Preserve authentication, tenancy, authorization, idempotency, and concurrency pr
 Authorized simplification with equivalent protection is not a defect merely because it
 removes a historical check. Explain the invariant and causal impact of every finding.
 """
+
+
+def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
+    """Return a stable digest for reviewer instructions and repository policy."""
+    digest = hashlib.sha256()
+    for path in (Path(__file__), Path(__file__).with_name("contract.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    policy_payload = {
+        "manifest_schema": policy.schema,
+        "rules": [
+            {"id": r.id, "severity": r.severity, "scope": list(r.scope),
+             "summary": r.summary, "details": r.details, "detail_body": r.detail_body}
+            for r in policy.rules
+        ],
+    }
+    payload = {"config": asdict(config), "policy": policy_payload}
+    digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _sanitize_reviewer_note(note: str) -> str:
