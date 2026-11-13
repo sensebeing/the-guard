@@ -102,6 +102,17 @@ class GithubReviewTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), published)
         self.assertEqual(publish.call_args.kwargs["commit_id"], "b" * 40)
 
+    def test_cli_publish_rejects_whitespace_only_piped_stdin(self) -> None:
+        errors = io.StringIO()
+        with mock.patch("the_guard.review.cli.load_config", return_value=SimpleNamespace(main_branch="main")), \
+                mock.patch("the_guard.review.cli._read_nonblocking_stdin_text", return_value="   \n"), \
+                mock.patch("the_guard.review.cli.resolve_or_carry_forward_receipt") as resolve, \
+                contextlib.redirect_stderr(errors):
+            code = review_main(["publish-github", "--pr", "sensebeing/the-guard#1"])
+        self.assertEqual(code, 3)
+        self.assertIn("Expecting value", errors.getvalue())
+        resolve.assert_not_called()
+
     def test_static_finding_maps_to_inline_comment_without_required_fix(self) -> None:
         finding = Finding("guard.service-boundaries", "src/a.py", 12, "bad import")
         payload = build_github_review_payload("NO-GO", "summary", [finding])
