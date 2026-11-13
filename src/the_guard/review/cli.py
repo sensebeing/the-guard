@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
-import select
 import sys
 from pathlib import Path
 from dataclasses import asdict
@@ -19,38 +17,6 @@ from .contract import PROVIDERS, validate_review_output
 from .engine import run_architecture_review
 from .provider import probe_environment, resolve_provider_order
 from .repository import collect_review_scope, resolve_or_carry_forward_receipt
-
-
-def _read_nonblocking_stdin_text(timeout_sec: float = 0.05) -> str | None:
-    """Read currently available stdin without waiting for a future writer."""
-    if sys.stdin.isatty():
-        return None
-    if isinstance(sys.stdin, io.StringIO):
-        text = sys.stdin.read()
-        return text if text != "" else None
-    try:
-        fileno = sys.stdin.fileno()
-    except (AttributeError, io.UnsupportedOperation):
-        # In-memory streams used by callers and tests do not expose a file
-        # descriptor; reading them directly is already nonblocking.
-        text = sys.stdin.read()
-        return text if text != "" else None
-    ready, _, _ = select.select([fileno], [], [], timeout_sec)
-    if not ready:
-        return None
-
-    chunks: list[bytes] = []
-    while True:
-        chunk = os.read(fileno, 65536)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        ready, _, _ = select.select([fileno], [], [], 0.0)
-        if not ready:
-            break
-    if not chunks:
-        return None
-    return b"".join(chunks).decode("utf-8")
 
 
 def _parse_priority_order(value: str) -> list[str]:
@@ -103,20 +69,16 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(root)
         main_branch = args.main_branch or config.main_branch
         if args.command == "publish-github":
-            if args.input_json is None or args.input_json == "-":
-                source = _read_nonblocking_stdin_text()
-            else:
-                source = Path(args.input_json).read_text(encoding="utf-8")
-            if source is not None:
-                data = json.loads(source)
-            elif args.input_json == "-":
-                raise ValueError("Empty stdin for --input-json -")
+            if args.input_json == "-":
+                data = json.loads(sys.stdin.read())
+            elif args.input_json is not None:
+                data = json.loads(Path(args.input_json).read_text(encoding="utf-8"))
             else:
                 scope = collect_review_scope(root, main_branch=main_branch)
                 receipt = resolve_or_carry_forward_receipt(root, scope)
                 if receipt is None:
                     raise ValueError(
-                        "No review verdict provided via --input-json/stdin and no cached review receipt found for current HEAD; run `guard review run --github-pr <pr>` first."
+                        "No review verdict provided via --input-json and no cached review receipt found for current HEAD; run `guard review run --github-pr <pr>` or pass `--input-json <path|->`."
                     )
                 data = {
                     "verdict": receipt["verdict"],
