@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--reprobe", action="store_true")
         if name == "publish-github":
             p.add_argument("--pr", required=True)
-            p.add_argument("--input-json", default="-")
+            p.add_argument("--input-json", default=None)
             p.add_argument("--dry-run", action="store_true")
             p.add_argument("--json", action="store_true")
         if name == "run":
@@ -69,8 +69,23 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(root)
         main_branch = args.main_branch or config.main_branch
         if args.command == "publish-github":
-            source = sys.stdin.read() if args.input_json == "-" else Path(args.input_json).read_text()
-            data = json.loads(source)
+            if args.input_json == "-":
+                data = json.loads(sys.stdin.read())
+            elif args.input_json is not None:
+                data = json.loads(Path(args.input_json).read_text(encoding="utf-8"))
+            else:
+                scope = collect_review_scope(root, main_branch=main_branch)
+                receipt = resolve_or_carry_forward_receipt(root, scope)
+                if receipt is None:
+                    raise ValueError(
+                        "No review verdict provided via --input-json and no cached review receipt found for current HEAD; run `guard review run --github-pr <pr>` or pass `--input-json <path|->`."
+                    )
+                data = {
+                    "verdict": receipt["verdict"],
+                    "summary": receipt["summary"],
+                    "blocking_findings": [],
+                    "reviewed_head_sha": scope.head_sha,
+                }
             data = validate_review_output(data)
             receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
             if args.json:

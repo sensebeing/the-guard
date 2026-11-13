@@ -14,6 +14,7 @@ import unittest
 import urllib.error
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 from unittest import mock
 
 from the_guard.review.cli import main as review_main
@@ -53,6 +54,66 @@ def _jwt_claims(jwt: str) -> dict[str, Any]:
 
 
 class GithubReviewTests(unittest.TestCase):
+    def test_cli_publish_uses_cached_receipt_when_input_json_omitted(self) -> None:
+        cached = {
+            "verdict": "GO",
+            "summary": "cached review",
+            "head_sha": "c" * 40,
+        }
+        published = {"status": "dry_run", "delivery_mode": "dry_run"}
+        output = io.StringIO()
+        stdin = mock.Mock()
+        with mock.patch("the_guard.review.cli.load_config", return_value=SimpleNamespace(main_branch="main")), \
+                mock.patch("the_guard.review.cli.sys.stdin", stdin), \
+                mock.patch("the_guard.review.cli.collect_review_scope", return_value=SimpleNamespace(head_sha="a" * 40)), \
+                mock.patch("the_guard.review.cli.resolve_or_carry_forward_receipt", return_value=cached), \
+                mock.patch("the_guard.review.cli.publish_github_pr_review", return_value=published) as publish, \
+                contextlib.redirect_stdout(output):
+            code = review_main(["publish-github", "--pr", "sensebeing/the-guard#1", "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()), published)
+        self.assertEqual(publish.call_args.kwargs["commit_id"], "a" * 40)
+        stdin.read.assert_not_called()
+
+    def test_cli_publish_without_input_or_receipt_fails_immediately(self) -> None:
+        errors = io.StringIO()
+        with mock.patch("the_guard.review.cli.load_config", return_value=SimpleNamespace(main_branch="main")), \
+                mock.patch("the_guard.review.cli.collect_review_scope", return_value=object()), \
+                mock.patch("the_guard.review.cli.resolve_or_carry_forward_receipt", return_value=None), \
+                contextlib.redirect_stderr(errors):
+            code = review_main(["publish-github", "--pr", "sensebeing/the-guard#1"])
+        self.assertEqual(code, 3)
+        self.assertIn("No review verdict provided via --input-json", errors.getvalue())
+
+    def test_cli_publish_accepts_stdin_with_explicit_dash(self) -> None:
+        payload = {
+            "verdict": "GO",
+            "summary": "piped review",
+            "blocking_findings": [],
+            "reviewed_head_sha": "b" * 40,
+        }
+        published = {"status": "dry_run", "delivery_mode": "dry_run"}
+        output = io.StringIO()
+        with mock.patch("the_guard.review.cli.load_config", return_value=SimpleNamespace(main_branch="main")), \
+                mock.patch("the_guard.review.cli.sys.stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch("the_guard.review.cli.publish_github_pr_review", return_value=published) as publish, \
+                contextlib.redirect_stdout(output):
+            code = review_main(["publish-github", "--pr", "sensebeing/the-guard#1", "--input-json", "-", "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()), published)
+        self.assertEqual(publish.call_args.kwargs["commit_id"], "b" * 40)
+
+    def test_cli_publish_rejects_whitespace_only_piped_stdin(self) -> None:
+        errors = io.StringIO()
+        with mock.patch("the_guard.review.cli.load_config", return_value=SimpleNamespace(main_branch="main")), \
+                mock.patch("the_guard.review.cli.sys.stdin", io.StringIO("   \n")), \
+                mock.patch("the_guard.review.cli.resolve_or_carry_forward_receipt") as resolve, \
+                contextlib.redirect_stderr(errors):
+            code = review_main(["publish-github", "--pr", "sensebeing/the-guard#1", "--input-json", "-"])
+        self.assertEqual(code, 3)
+        self.assertIn("Expecting value", errors.getvalue())
+        resolve.assert_not_called()
+
     def test_static_finding_maps_to_inline_comment_without_required_fix(self) -> None:
         finding = Finding("guard.service-boundaries", "src/a.py", 12, "bad import")
         payload = build_github_review_payload("NO-GO", "summary", [finding])
