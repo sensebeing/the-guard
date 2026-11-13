@@ -58,14 +58,14 @@ class GithubReviewTests(unittest.TestCase):
         cached = {
             "verdict": "GO",
             "summary": "cached review",
-            "head_sha": "a" * 40,
+            "head_sha": "c" * 40,
         }
         published = {"status": "dry_run", "delivery_mode": "dry_run"}
         output = io.StringIO()
         stdin = mock.Mock()
         with mock.patch("the_guard.review.cli.load_config", return_value=SimpleNamespace(main_branch="main")), \
                 mock.patch("the_guard.review.cli.sys.stdin", stdin), \
-                mock.patch("the_guard.review.cli.collect_review_scope", return_value=object()), \
+                mock.patch("the_guard.review.cli.collect_review_scope", return_value=SimpleNamespace(head_sha="a" * 40)), \
                 mock.patch("the_guard.review.cli.resolve_or_carry_forward_receipt", return_value=cached), \
                 mock.patch("the_guard.review.cli.publish_github_pr_review", return_value=published) as publish, \
                 contextlib.redirect_stdout(output):

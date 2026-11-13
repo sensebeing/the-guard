@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
                     "verdict": receipt["verdict"],
                     "summary": receipt["summary"],
                     "blocking_findings": [],
-                    "reviewed_head_sha": receipt["head_sha"],
+                    "reviewed_head_sha": scope.head_sha,
                 }
             data = validate_review_output(data)
             receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
