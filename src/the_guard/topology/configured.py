@@ -197,6 +197,27 @@ def _is_range_touched(changed: set[int] | None, start: int, end: int) -> bool:
     return changed is None or bool(changed.intersection(range(start, end + 1)))
 
 
+def check_module_imports(
+    path: str,
+    text: str,
+    changed_lines: set[int] | None,
+    config: GuardConfig,
+    *,
+    check_unregistered: bool = True,
+) -> list[Finding]:
+    """Check module permissions without rechecking unrelated configured rules."""
+    if is_excluded_topology_path(path):
+        return []
+    return _check_module_imports(
+        path,
+        extract_imports(path, text, config.module_doc_roots),
+        text.splitlines(),
+        changed_lines,
+        config,
+        check_unregistered=check_unregistered,
+    )
+
+
 def _check_module_imports(
     path: str,
     imports: list[tuple[int, int, str]],

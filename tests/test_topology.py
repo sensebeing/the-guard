@@ -17,7 +17,7 @@ from the_guard.topology import (
     sync_topology,
 )
 from the_guard.topology.configured import check_configured
-from the_guard.git_helpers import _compute_changed_lines
+from the_guard.git_helpers import BaseFileReader, BaseFileEntry, _compute_changed_lines
 from the_guard.topology.imports import (
     extract_imports,
     owner_module,
@@ -285,6 +285,102 @@ class TopologyTests(unittest.TestCase):
         )
         self.assertEqual(len(findings), 1)
         self.assertIn("forbidden", findings[0].message)
+
+    def test_tightening_checks_changed_files_and_callers_without_unrelated_debt(self):
+        topology = {
+            "layers": {"core": ["host"], "host": [], "isolated": []},
+            "enforce_module_dependencies": False,
+            "forbidden_patterns": [
+                {"literal_or_regex": "legacy_debt", "scope_prefixes": ["packages/"]}
+            ],
+            "modules": [
+                {"path": "packages/a", "layer": "core", "dependencies": []},
+                {"path": "packages/b", "layer": "host", "dependencies": []},
+            ],
+        }
+        self.config(topology)
+        self.write(
+            "packages/a/main.ts", "import '../b/main.js';\nconst legacy_debt = 1;\n"
+        )
+        self.write("packages/b/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "permissive baseline with unrelated debt")
+        topology["modules"][1]["layer"] = "isolated"
+        self.config(topology)
+        self.write(
+            "packages/a/main.ts",
+            "import '../b/main.js';\nconst legacy_debt = 1;\nconst edited = 1;\n",
+        )
+        findings = check_contract_drift(
+            self.root, [".guard/config.json", "packages/a/main.ts"], base="HEAD"
+        )
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].path, "packages/a/main.ts")
+        self.assertEqual(findings[0].line, 1)
+        self.assertIn("Layer", findings[0].message)
+        self.assertNotIn("legacy_debt", findings[0].message)
+
+    def test_snapshot_metadata_is_immutable_and_unavailable_reads_fail_closed(self):
+        self.config(
+            {"forbidden_imports": [{"from": "packages/a", "imports": ["forbidden"]}]}
+        )
+        self.write("packages/a/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "baseline")
+        base = self.git("rev-parse", "HEAD")
+        self.write("packages/a/main.ts", "import 'forbidden';\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "forbidden import")
+        self.write(".gitmodules", '[submodule "fake"]\npath = packages/a\n')
+        self.assertEqual(
+            len(
+                run_topology_guard(
+                    self.root, ["packages/a/main.ts"], base=base, revision="HEAD"
+                )
+            ),
+            1,
+        )
+        with patch.object(
+            BaseFileReader,
+            "_read_entry",
+            return_value=BaseFileEntry("unavailable", detail="blob unreadable"),
+        ):
+            with self.assertRaisesRegex(ValueError, "blob unreadable"):
+                run_topology_guard(
+                    self.root, ["packages/a/main.ts"], base=base, revision="HEAD"
+                )
+            with self.assertRaisesRegex(ValueError, "blob unreadable"):
+                check_contract_drift(self.root, [], base=base, revision="HEAD")
+        self.write("packages/a/renamed.ts", "import 'forbidden';\n")
+        self.assertIsNone(
+            BaseFileReader(self.root, "HEAD", exact=True).read("packages/a/renamed.ts")
+        )
+
+    def test_binary_assets_cannot_hide_snapshot_stale_dependencies(self):
+        self.config(
+            {
+                "enforce_module_dependencies": True,
+                "modules": [
+                    {"path": "packages/a", "dependencies": ["packages/b"]},
+                    {"path": "packages/b", "dependencies": []},
+                ],
+            }
+        )
+        self.write("packages/a/main.ts", "import '../b/main.js';\n")
+        self.write("packages/b/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "live dependency")
+        base = self.git("rev-parse", "HEAD")
+        self.write("packages/a/main.ts", "export const value = 1;\n")
+        (self.root / "packages/a/image.png").write_bytes(b"\x89PNG\x00\xff")
+        self.git("add", ".")
+        self.git("commit", "-m", "remove import with binary asset")
+        paths = ["packages/a/main.ts", "packages/a/image.png"]
+        working = check_contract_drift(self.root, paths, base=base)
+        self.write(".gitmodules", '[submodule "fake"]\npath = packages/a\n')
+        snapshot = check_contract_drift(self.root, paths, base=base, revision="HEAD")
+        self.assertEqual([f.message for f in snapshot], [f.message for f in working])
+        self.assertTrue(any("Stale dependency" in f.message for f in snapshot))
 
     def test_missing_document_grandfathering_is_per_declaration(self):
         topology = {"architecture_docs": ["docs/legacy-root.md"], "modules": [

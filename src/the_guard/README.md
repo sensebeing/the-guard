@@ -20,9 +20,10 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   `policy` adapts reader failures into policy diagnostics; `review/documents` consumes the same reader.
 - `topology/imports` owns Python/JS/TS import extraction and longest-prefix module resolution;
   `paths` owns production exclusions; `discovery` reports inventory; `configured` enforces declared
-  dependencies and layer ceilings at touched import lines. `runner` composes language checks;
+  dependencies and layer ceilings at touched import lines, with an import-only API for constraint rechecks. `runner` composes language checks;
   `audit` owns shared dependency evidence for full scans and baseline-aware contract drift,
-  scanning only affected modules and rechecking unchanged production imports when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
+  scanning only affected modules and rechecking complete production imports (including changed files
+  and callers affected by target-layer changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
   granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
 - `review/contract` owns reviewer types and wire schema; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope and patch identity;
   `documents` owns review document inventory and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
@@ -53,7 +54,8 @@ responsibilities require synchronized configuration and authoritative boundary d
 `guard topology sync` refreshes inventory without granting observed imports permission.
 
 Review CLI, check-push and protected-push checks read the exact target Git snapshot directly,
-without creating temporary worktrees. Dirty local files cannot alter the verdict. Deterministic
+without creating temporary worktrees. Exact snapshot reads use committed submodule metadata,
+reject unavailable blobs and disable working-tree rename inference; binary assets do not count as import coverage. Dirty local files cannot alter the verdict. Deterministic
 findings block provider execution and receipt acceptance; the Python review engine remains the
 pure independent-review entry point. Loaded configuration, policy and contract digests pass
 directly to review consumers instead of being reloaded by each helper.

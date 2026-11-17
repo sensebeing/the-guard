@@ -10,7 +10,7 @@ from typing import Any
 from ..finding import Finding
 from ..git_helpers import BaseFileReader, git_ok, git_stdout, submodule_paths
 from ..config import GuardConfig, load_config, repository_path
-from .configured import check_configured
+from .configured import check_module_imports
 from .discovery import discover_topology, source_files
 from .imports import (
     DETERMINISTIC_IMPORT_EXTENSIONS,
@@ -199,7 +199,7 @@ def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set
     ) or (current.get("layers") and not old.get("layers")):
         return set(modules)
     old_modules = {m["path"]: m for m in old.get("modules", [])}
-    return {
+    tightened = {
         path
         for path, module in modules.items()
         if path in old_modules
@@ -211,6 +211,19 @@ def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set
             - set(current.get("layers", {}).get(module.get("layer"), []))
         )
     }
+
+    # A target-layer change can tighten an unchanged caller's permissions too.
+    for target, module in modules.items():
+        previous = old_modules.get(target)
+        if previous is None or previous.get("layer") == module.get("layer"):
+            continue
+        for path, source in modules.items():
+            old_source = old_modules.get(path, {})
+            before = old.get("layers", {}).get(old_source.get("layer"), [])
+            after = current.get("layers", {}).get(source.get("layer"), [])
+            if previous.get("layer") in before and module.get("layer") not in after:
+                tightened.add(path)
+    return tightened
 
 
 def check_contract_drift(
@@ -228,7 +241,8 @@ def check_contract_drift(
     available = git_ok(
         root, ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"]
     )
-    reader = BaseFileReader(root, base, submodule_paths(root))
+    submodules = submodule_paths(root, revision=revision)
+    reader = BaseFileReader(root, base, submodules)
     config_path = ".guard/config.json"
     baseline = None
     if available:
@@ -317,7 +331,7 @@ def check_contract_drift(
         return findings
     tightened = _tightened_modules(config, baseline)
     snapshot_reader = (
-        BaseFileReader(root, revision, submodule_paths(root))
+        BaseFileReader(root, revision, submodules, exact=True)
         if revision is not None
         else None
     )
@@ -387,14 +401,15 @@ def check_contract_drift(
         for p in files
         if not is_excluded_topology_path(p)
         and owner_module(p, list(modules)) in scan_modules
+        and (revision is None or "\x00" not in (read_current(p) or ""))
     ]
     for path in files:
-        if owner_module(path, list(modules)) in tightened and path not in changed_files:
+        if owner_module(path, list(modules)) in tightened:
             text = read_current(path)
             if text is not None:
                 findings.extend(
-                    check_configured(
-                        path, text, None, None, config, check_unregistered=False
+                    check_module_imports(
+                        path, text, None, config, check_unregistered=False
                     )
                 )
     old_observed: dict[str, set[str]] = {}
@@ -415,7 +430,9 @@ def check_contract_drift(
         )
         if output is None:
             raise ValueError("Cannot inspect baseline module imports")
-        baseline_files = [p for p in output.split("\0") if p]
+        baseline_files = [
+            p for p in output.split("\0") if p and "\x00" not in (reader.read(p) or "")
+        ]
         old_observed, _ = _dependency_evidence(baseline, baseline_files, reader.read)
     _, stale = _dependency_evidence(
         config,

@@ -32,12 +32,13 @@ def run_topology_guard(
     root = Path(root).resolve()
     config = config or load_config(root, revision=revision)
     base = base or "origin/" + config.main_branch
-    reader = BaseFileReader(root, base, submodule_paths(root))
+    submodules = submodule_paths(root, revision=revision)
+    reader = BaseFileReader(root, base, submodules)
     base_available = not full_scan and git_ok(
         root, ["git", "rev-parse", "--verify", "--quiet", base]
     )
     snapshot_reader = (
-        BaseFileReader(root, revision, submodule_paths(root))
+        BaseFileReader(root, revision, submodules, exact=True)
         if revision is not None
         else None
     )

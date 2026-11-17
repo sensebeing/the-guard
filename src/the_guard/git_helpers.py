@@ -13,14 +13,19 @@ from typing import Literal
 GIT_TIMEOUT_SECONDS = 30
 
 
-def submodule_paths(repo_root: Path) -> tuple[str, ...]:
-    gitmodules = repo_root / ".gitmodules"
-    if not gitmodules.is_file():
-        return ()
+def submodule_paths(repo_root: Path, *, revision: str | None = None) -> tuple[str, ...]:
+    if revision is not None:
+        entry = BaseFileReader(repo_root, revision, exact=True).read(".gitmodules")
+        if entry is None:
+            return ()
+        text = entry
+    else:
+        gitmodules = repo_root / ".gitmodules"
+        if not gitmodules.is_file():
+            return ()
+        text = gitmodules.read_text(encoding="utf-8", errors="replace")
     paths: list[str] = []
-    for raw_line in gitmodules.read_text(
-        encoding="utf-8", errors="replace"
-    ).splitlines():
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line.startswith("path"):
             continue
@@ -72,6 +77,7 @@ def git(cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str] | Non
             env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
             check=False,
             text=True,
+            errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -145,21 +151,33 @@ class BaseFileReader:
     """Read base files with proven absence distinct from unavailable Git history.
 
     Caches belong to one check. The content-only read API remains available to
-    callers that do not distinguish absence from unavailable history.
+    callers that do not distinguish absence from unavailable history. Exact snapshot
+    reads disable rename/import inference and fail closed on unavailable content.
     """
 
-    def __init__(self, root: Path, base: str, submodules: tuple[str, ...] = ()):
+    def __init__(
+        self,
+        root: Path,
+        base: str,
+        submodules: tuple[str, ...] = (),
+        *,
+        exact: bool = False,
+    ):
         self.root = root
+        self.exact = exact
         self.base = base
         self.submodules = submodules
         self._base_revision: str | None = None
         self._base_checked = False
         self._renames: dict[tuple[Path, str], dict[str, str] | None] = {}
         self._entries: dict[str, BaseFileEntry] = {}
-        self._imported_trees: dict[str, str] | None = None
+        self._imported_trees: dict[str, str] | None = {} if exact else None
 
     def read(self, path: str) -> str | None:
-        return self.read_entry(path).content
+        entry = self.read_entry(path)
+        if self.exact and entry.status == "unavailable":
+            raise ValueError(entry.detail or f"Cannot read snapshot file {path}")
+        return entry.content
 
     def read_entry(self, path: str) -> BaseFileEntry:
         if path not in self._entries:
@@ -245,6 +263,8 @@ class BaseFileReader:
                 "unavailable", detail=f"Cannot inspect base path {path}"
             )
         if not tree:
+            if self.exact:
+                return BaseFileEntry("absent")
             key = (cwd, revision)
             if key not in self._renames:
                 self._renames[key] = self._rename_sources(
