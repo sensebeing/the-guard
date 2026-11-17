@@ -26,7 +26,7 @@ from .init import initialize
 from .policy import PolicyError, load_policy
 from .review.cli import main as review_main
 from .review.github import publish_github_pr_review
-from .topology import discover_topology, run_topology_guard
+from .topology import audit_topology, run_topology_guard, sync_topology
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,7 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Independent review: guard review [run|check-push|probe]. Aliases: guard check-push, guard probe.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("check", "init", "distill", "topology", "hook", "status", "self-update"):
+    for name in (
+        "check",
+        "init",
+        "distill",
+        "topology",
+        "hook",
+        "status",
+        "self-update",
+    ):
         p = sub.add_parser(name)
         if name != "self-update":
             p.add_argument("--repo-root", default=".")
@@ -61,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
             )
         if name == "topology":
-            p.add_argument("action", choices=["sync", "check"])
+            p.add_argument("action", choices=["sync", "check", "audit"])
         if name == "hook":
             p.add_argument("action", choices=["edit-guard", "main-push-gate"])
         if name in {"status", "self-update"}:
@@ -153,9 +161,10 @@ def main(argv: list[str] | None = None) -> int:
                 if sub_values and not sub_values[0].startswith("-")
                 else "run"
             )
-            should_trigger_auto_update = (
-                sub_cmd in {"run", "check-push"} and code in {0, 2}
-            )
+            should_trigger_auto_update = sub_cmd in {"run", "check-push"} and code in {
+                0,
+                2,
+            }
             return code
         parser = build_parser()
         args = parser.parse_args(values)
@@ -217,15 +226,38 @@ def main(argv: list[str] | None = None) -> int:
             return (edit_guard if args.action == "edit-guard" else main_push_gate)(
                 root, sys.stdin.read()
             )
+        if (
+            args.command == "topology"
+            and args.action in {"sync", "audit"}
+            and (args.base is not None or args.file)
+        ):
+            raise ValueError(f"topology {args.action} does not accept --base or --file")
         if args.command == "topology" and args.action == "sync":
-            path = root / ".guard/config.json"
-            load_config(root)
-            data = json.loads(path.read_text()) if path.exists() else {}
-            data.setdefault("topology", {}).update(discover_topology(root))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n")
-            print(json.dumps(data["topology"], indent=2))
+            print(json.dumps(sync_topology(root), indent=2))
             return 0
+        if args.command == "topology" and args.action == "audit":
+            report = audit_topology(root)
+            if args.json:
+                print(json.dumps(report, indent=2))
+            else:
+                for finding in report["findings"]:
+                    print(
+                        f"{finding['path']}:{finding['line']}: {finding['rule_id']}: {finding['message']}"
+                    )
+                for module in report["unregistered_modules"]:
+                    print(f"Unregistered module: {module}")
+                for item in report["missing_boundary_docs"]:
+                    print(f"Missing boundary doc: {item['module']}: {item['doc']}")
+                for item in report["stale_dependencies"]:
+                    print(
+                        f"Stale dependency: {item['module']} -> {item['unused_dependency']}"
+                    )
+                print(
+                    "Topology audit: PASS"
+                    if report["passed"]
+                    else "Topology audit: FAIL"
+                )
+            return 0 if report["passed"] else 2
         cfg = load_config(root)
         if args.command == "check":
             load_policy(root)

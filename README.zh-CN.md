@@ -318,14 +318,33 @@ rules:
 guard distill --repo-root . --json
 guard topology sync --repo-root .
 guard topology check --base origin/main
+guard topology audit --repo-root . --json
 guard check --file src/api.py --file app/Screen.swift --json
 ```
+
+用 `topology.layers` 声明各层允许依赖的目标层，例如
+`{"core": [], "plugin": ["core"]}`；未显式允许时，同层插件也不得互相导入。
+为模块填写 `layer`、单一职责 `role`、`dependencies` 与 `boundary_docs`。
+开启 `enforce_module_dependencies: true` 后，未声明的仓内导入会被拦截。
+配置加载时也校验声明依赖的层级方向，不能通过修改依赖清单放行向上依赖。
+Python AST 与 JS/TS 字面量导入共用模块解析，覆盖相对路径、多行导入、再导出、
+`require` 和动态 `import`；歧义包别名和计算生成的路径不解析，需要用明确路径建立可检查的依赖。
+
+`topology sync` 保留职责与边界文档；配置了层级或依赖约束时，也保留人工声明的依赖。
+两项同时开启时，新发现模块先作为 `unregistered_modules` 输出，需显式分配层级后再登记。
+`topology audit` 扫描仓库文本文件，包括未改动的历史代码，报告违规、缺失的声明边界文档、
+未登记模块与未使用的声明依赖。陈旧依赖检查仅适用于包含 Python/JS/TS 生产源码、
+且其余文件仅为已知文档或配置类型的模块；存在未支持的组件文件时也不推断没有导入。
+生产路径排除只作用于语言和模块依赖检查，显式配置规则仍按各自声明的范围检查。违规或缺失文档会导致失败；启用层级或依赖约束时，
+未登记模块与陈旧依赖也会导致失败。退出码为 0（通过）或 2（失败）。
+审查提示词包含完整模块与层级图，并从审查 Git 快照加载涉及模块声明的边界文档，
+每份文档最多保留 24,000 个字符。
 
 | 检查层 | 守护内容 |
 | --- | --- |
 | Python AST 检查 | 读函数或只读端点中误加写锁；同一执行路径无中间写入的重复 `await` 读取；循环或推导式内的单实体 N+1 异步读取。 |
 | Swift 词法检查 | 同一函数作用域内的重复 `await` 读取。 |
-| 声明式拓扑约束 | `forbidden_imports`（或 `module_boundaries`）、`exclusive_sql_owners`、`retired_tables` 与 `forbidden_patterns`。 |
+| 声明式拓扑约束 | 层级方向、模块声明依赖、`forbidden_imports`（或 `module_boundaries`）、`exclusive_sql_owners`、`retired_tables` 与 `forbidden_patterns`。 |
 | 历史技术债棘轮 | 结合变更行号与基线函数签名比对，未触及的历史违规不误报；触及 `retired_tables` 的文件必须实现引用数净减少。 |
 
 ### 命令与退出码
@@ -334,7 +353,7 @@ guard check --file src/api.py --file app/Screen.swift --json
 | --- | --- |
 | `guard init` | 初始化策略清单与规则文档（`--preset core\|full`、`--with-hooks`、`--with-github-workflow`、`--integration-mode`、`--rules-dir`、`--manifest-file`）。 |
 | `guard check` | 校验策略清单并对变更文件运行确定性拓扑检查（`--policy-only`、`--base`、`--file`、`--json`）。 |
-| `guard topology sync` / `check` | 扫描模块清单同步至 `.guard/config.json`，或单独运行拓扑检查。 |
+| `guard topology sync` / `check` / `audit` | 安全刷新模块清单、检查变更范围，或审计整个仓库。 |
 | `guard distill` | 输出模块清单、工具链信号与代码样本，供 Agent 提炼项目专属架构规则。 |
 | `guard review` / `guard review run` | 对已提交变更执行独立 Agent 架构审查（`--provider`、`--force`、`--note`）。 |
 | `guard check-push` | 校验当前 `HEAD` 是否具备有效 `GO` 审查回执或属于免审范围（普通文档或纯锁文件变更）。 |

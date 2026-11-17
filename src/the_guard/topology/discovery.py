@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-import ast
 import os
-import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from ..config import load_config
+from ..config import GuardConfig, load_config
+from .imports import (
+    DETERMINISTIC_IMPORT_EXTENSIONS,
+    extract_imports,
+    owner_module,
+    resolve_target_module,
+)
+from .paths import is_excluded_topology_path
 
 IGNORED = {
     ".git",
@@ -26,10 +31,14 @@ IGNORED = {
 NON_MODULE_TOP_DIRS = {
     "docs",
     "build_docs",
+    "examples",
+    "benchmarks",
     "scripts",
     "tests",
     "test",
     "bin",
+    "migrations",
+    "alembic",
     "skills",
 }
 LANGUAGES = {
@@ -38,6 +47,9 @@ LANGUAGES = {
     ".ts": "TypeScript",
     ".tsx": "TypeScript",
     ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".mjs": "JavaScript",
+    ".cjs": "JavaScript",
     ".go": "Go",
     ".rs": "Rust",
     ".java": "Java",
@@ -61,14 +73,27 @@ def source_files(root: Path) -> Iterator[Path]:
                 yield path
 
 
-def discover_topology(root: Path) -> dict[str, list[dict[str, Any]]]:
+def discover_topology(
+    root: Path, config: GuardConfig | None = None
+) -> dict[str, list[dict[str, Any]]]:
+    # Declared owners anchor inventory; only uncovered production source proposes new owners.
     root = Path(root).resolve()
-    config = load_config(root)
-    files = list(source_files(root))
+    config = config or load_config(root)
+    files = [
+        p
+        for p in source_files(root)
+        if not is_excluded_topology_path(p.relative_to(root).as_posix())
+    ]
+    declared = [m["path"] for m in config.topology.get("modules", [])]
     rooted_candidates = set()
     fallback_candidates = set()
     for path in files:
         rel = path.relative_to(root)
+        if (
+            path.suffix not in LANGUAGES
+            or owner_module(rel.as_posix(), declared) is not None
+        ):
+            continue
         parts = rel.parts
         if (
             len(parts) >= 3
@@ -81,47 +106,34 @@ def discover_topology(root: Path) -> dict[str, list[dict[str, Any]]]:
             len(parts) >= 2
             and not parts[0].startswith(".")
             and parts[0] not in NON_MODULE_TOP_DIRS
-            and (
-                path.suffix in LANGUAGES
-                or path.name
-                in (
-                    "AGENTS.md",
-                    "CLAUDE.md",
-                    "README.md",
-                    "pyproject.toml",
-                    "package.json",
-                )
-            )
         ):
             fallback_candidates.add(parts[0])
-    candidates = rooted_candidates or fallback_candidates
+    candidates = rooted_candidates | (
+        fallback_candidates - {p.split("/")[0] for p in rooted_candidates}
+    )
+    candidates.update(declared)
     modules = []
     module_imports = {}
     for directory in sorted(candidates):
         owned = [
             p
             for p in files
-            if p.relative_to(root).as_posix().startswith(directory + "/")
+            if owner_module(p.relative_to(root).as_posix(), sorted(candidates))
+            == directory
         ]
         imports = set()
         for path in owned:
-            if path.suffix == ".py":
-                try:
-                    tree = ast.parse(path.read_text(errors="replace"))
-                except (SyntaxError, UnicodeError):
-                    continue
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        imports.update(a.name for a in node.names)
-                    elif isinstance(node, ast.ImportFrom) and node.module:
-                        imports.add(node.module)
-            elif path.suffix in {".ts", ".tsx", ".js", ".jsx"}:
-                imports.update(
-                    re.findall(
-                        r"""(?:from\s+|import\s+|require\(\s*)["']([^"']+)["']""",
-                        path.read_text(errors="replace"),
-                    )
+            if path.suffix not in DETERMINISTIC_IMPORT_EXTENSIONS:
+                continue
+            relative = path.relative_to(root).as_posix()
+            for _, _, spec in extract_imports(
+                relative, path.read_text(errors="replace"), config.module_doc_roots
+            ):
+                target = resolve_target_module(
+                    relative, spec, sorted(candidates), config.module_doc_roots
                 )
+                if target:
+                    imports.add(target)
         module_imports[directory] = imports
         modules.append(
             {
@@ -137,18 +149,5 @@ def discover_topology(root: Path) -> dict[str, list[dict[str, Any]]]:
             }
         )
     for module in modules:
-        imports = module_imports[module["path"]]
-        module["dependencies"] = sorted(
-            {
-                other["path"]
-                for other in modules
-                if other != module
-                and any(
-                    name == Path(other["path"]).name
-                    or name.startswith(Path(other["path"]).name + ".")
-                    or name.startswith("@" + Path(other["path"]).name + "/")
-                    for name in imports
-                )
-            }
-        )
+        module["dependencies"] = sorted(module_imports[module["path"]])
     return {"modules": modules}

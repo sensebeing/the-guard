@@ -59,6 +59,111 @@ class ConfigurationTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-m", "change")
 
+    def test_reinitialization_preserves_governed_module_permissions(self):
+        topology = {
+            "layers": {"core": [], "plugin": ["core"]},
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/core", "layer": "core", "role": "shared state", "dependencies": [],
+                 "boundary_docs": ["docs/architecture.md"]},
+                {"path": "packages/plugin", "layer": "plugin", "role": "host adapter",
+                 "dependencies": ["packages/core"], "boundary_docs": ["docs/plugin.md"]},
+            ],
+        }
+        self.write(".guard/config.json", json.dumps({"topology": topology}))
+        self.write("packages/core/index.ts", "import '../plugin/index.ts';")
+        self.write("packages/plugin/index.ts", "export const plugin = 1;")
+        self.write("packages/new/index.ts", "export const value = 1;")
+        result = initialize(self.root, preset="full")
+        self.assertEqual(result["unregistered_modules"], ["packages/new"])
+        saved = load_config(self.root).topology
+        for old, new in zip(topology["modules"], saved["modules"]):
+            for key in ("path", "layer", "role", "dependencies", "boundary_docs"):
+                self.assertEqual(old[key], new[key])
+        # Both writers validate merged data before publishing any invalid configuration.
+        previous = (self.root / ".guard/config.json").read_text()
+        invalid = {**saved, "modules": [{"path": "../escape"}]}
+        with patch("the_guard.init.merge_topology", return_value=(invalid, [])):
+            with self.assertRaises(ValueError):
+                initialize(self.root, preset="full")
+        self.assertEqual((self.root / ".guard/config.json").read_text(), previous)
+        with patch("the_guard.topology.sync.merge_topology", return_value=(invalid, [])):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["topology", "sync", "--repo-root", str(self.root)]), 2)
+        self.assertEqual((self.root / ".guard/config.json").read_text(), previous)
+
+    def test_module_schema_and_layer_ceiling_validation(self):
+        base = {"layers": {"core": [], "plugin": ["core"]}, "enforce_module_dependencies": True,
+                "modules": [{"path": "packages/core", "layer": "core", "dependencies": []},
+                            {"path": "packages/host", "layer": "plugin", "dependencies": ["packages/core"]}]}
+        cases = [
+            ("enforce_module_dependencies", "yes"), ("layers", []),
+            ("layers", {"": []}), ("layers", {"core": ["absent"]}),
+            ("layers", {"core": "plugin"}),
+        ]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                self.write(".guard/config.json", json.dumps({"topology": {**base, key: value}}))
+                with self.assertRaises(ValueError):
+                    load_config(self.root)
+        for override in (
+            {"path": "../core"}, {"path": "/core"}, {"path": "core/"}, {"path": "core//sub"},
+            {"path": "core/./sub"}, {"path": "packages/host"},
+            {"boundary_docs": ["../secrets"]}, {"boundary_docs": ["/tmp/doc"]},
+            {"boundary_docs": ["C:\\outside"]}, {"languages": "Python"},
+            {"dependencies": [42]}, {"dependencies": ["missing"]},
+            {"dependencies": ["packages/core"]}, {"dependencies": ["packages/host"]},
+            {"role": " "}, {"layer": "missing"}, {"layer": ""},
+        ):
+            with self.subTest(override=override):
+                data = json.loads(json.dumps(base))
+                data["modules"][0].update(override)
+                self.write(".guard/config.json", json.dumps({"topology": data}))
+                with self.assertRaises(ValueError):
+                    load_config(self.root)
+        del base["modules"][0]["layer"]
+        self.write(".guard/config.json", json.dumps({"topology": base}))
+        with self.assertRaisesRegex(ValueError, "requires a layer"):
+            load_config(self.root)
+        base["enforce_module_dependencies"] = False
+        self.write(".guard/config.json", json.dumps({"topology": base}))
+        self.assertEqual(load_config(self.root).topology, base)
+        base["modules"][0].update(layer="core", dependencies=["packages/host"])
+        self.write(".guard/config.json", json.dumps({"topology": base}))
+        with self.assertRaisesRegex(ValueError, "must not depend"):
+            load_config(self.root)
+
+    def test_topology_inventory_actions_reject_diff_scope_flags(self):
+        before = (self.root / ".guard/config.json").read_text()
+        for action in ("sync", "audit"):
+            for flags in (["--base", "main"], ["--file", "src/api.py"]):
+                with self.subTest(action=action, flags=flags):
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        result = main(["topology", action, "--json", "--repo-root", str(self.root), *flags])
+                    self.assertEqual(result, 2)
+                    self.assertIn("does not accept --base or --file", err.getvalue())
+                    self.assertEqual((self.root / ".guard/config.json").read_text(), before)
+
+    def test_topology_audit_cli_full_scan_json_and_text_exit_codes(self):
+        self.write("src/api.py", 'def get_item():\n    return "FOR UPDATE"\n')
+        self.commit()
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        for output_args in (["--json"], []):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                code = main(["topology", "audit", "--repo-root", str(self.root), *output_args])
+            self.assertEqual(code, 2)
+            if output_args:
+                report = json.loads(out.getvalue())
+                self.assertFalse(report["passed"])
+                self.assertEqual(len(report["findings"]), 1)
+            else:
+                self.assertIn("Topology audit: FAIL", out.getvalue())
+                self.assertIn("src/api.py", out.getvalue())
+        self.write("src/api.py", "value = 1\n")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["topology", "audit", "--repo-root", str(self.root), "--json"]), 0)
+        self.assertTrue(json.loads(out.getvalue())["passed"])
+
     def test_production_example_loads_as_repository_config(self):
         example = Path(__file__).resolve().parents[1] / "examples/config.example.json"
         raw = example.read_text(encoding="utf-8")

@@ -322,14 +322,37 @@ Reviewer behavior can be configured with `THE_GUARD_REVIEW_CONFIG`, `THE_GUARD_R
 guard distill --repo-root . --json
 guard topology sync --repo-root .
 guard topology check --base origin/main
+guard topology audit --repo-root . --json
 guard check --file src/api.py --file app/Screen.swift --json
 ```
+
+Declare `topology.layers` as allowed target layers, for example
+`{"core": [], "plugin": ["core"]}`; sibling plugin imports are forbidden unless explicitly
+allowed. Give modules a `layer`, single-owner `role`, `dependencies`, and `boundary_docs`.
+Set `enforce_module_dependencies: true` to reject undeclared internal imports. Declared
+edges must also obey the layer ceiling at config load; editing dependencies cannot legalize
+an upward import. Python AST and JS/TS literal imports (including relative paths, multiline
+imports, re-exports, `require` and dynamic `import`) share module resolution. Ambiguous
+package aliases and computed imports are not resolved; use explicit paths for enforceable edges.
+
+`topology sync` preserves roles and boundary documents, and preserves curated dependencies
+whenever layers or dependency enforcement are configured. With both enabled, newly discovered
+modules are reported as `unregistered_modules` until you assign their layers explicitly.
+`topology audit` scans repository text files, including unchanged legacy code, and reports
+violations, missing declared boundary documents, unregistered modules and unused declared
+dependencies. Stale-dependency checks apply only to modules with Python/JS/TS production
+source whose remaining files have inert documentation/configuration extensions; unsupported
+component files also prevent assuming zero imports. Production exclusions apply to language
+and module-dependency checks; explicit configured rules still apply to their declared scopes. Violations or missing documents fail the audit; unregistered modules and stale
+dependencies additionally fail governed repositories. Exit codes are 0 (pass) and 2 (fail).
+Review prompts include the complete module/layer map and touched modules' declared boundary
+documents from the reviewed Git snapshot, capped at 24,000 characters per document.
 
 | Check layer | What it enforces |
 | --- | --- |
 | Python AST checks | Write locks inside read-only functions or endpoints; duplicate awaited reads on the same execution path without an intervening write; single-entity awaited reads inside loops or comprehensions. |
 | Swift lexical checks | Duplicate awaited reads within the same function scope. |
-| Declared topology rules | `forbidden_imports` (`module_boundaries`), `exclusive_sql_owners`, `retired_tables`, and `forbidden_patterns`. |
+| Declared topology rules | Layer ceilings, enforced module dependencies, `forbidden_imports` (`module_boundaries`), `exclusive_sql_owners`, `retired_tables`, and `forbidden_patterns`. |
 | Legacy debt ratchets | Baseline-aware line and function-signature matching so legacy files only fail when a change introduces new violations or fails to reduce touched `retired_tables` references. |
 
 ### Commands and exit codes
@@ -338,7 +361,7 @@ guard check --file src/api.py --file app/Screen.swift --json
 | --- | --- |
 | `guard init` | Initialize policy manifest and rule files (`--preset core\|full`, `--with-hooks`, `--with-github-workflow`, `--integration-mode`, `--rules-dir`, `--manifest-file`). |
 | `guard check` | Validate policy manifest and run deterministic topology checks on changed files (`--policy-only`, `--base`, `--file`, `--json`). |
-| `guard topology sync` / `check` | Sync discovered module inventory into `.guard/config.json` or run topology checks standalone. |
+| `guard topology sync` / `check` / `audit` | Safely refresh inventory, check changed scope, or audit the whole repository. |
 | `guard distill` | Emit repository module inventory, tooling signals, and code samples for agent-assisted rule distillation. |
 | `guard review` / `guard review run` | Run independent agent architecture review on committed changes (`--provider`, `--force`, `--note`). |
 | `guard check-push` | Verify that current `HEAD` has a matching `GO` review receipt or is review-exempt (ordinary prose or lockfile-only changes). |

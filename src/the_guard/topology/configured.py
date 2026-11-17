@@ -9,6 +9,8 @@ from collections.abc import Sequence
 
 from ..config import GuardConfig
 from ..finding import Finding
+from .imports import extract_imports, owner_module, resolve_target_module
+from .paths import is_excluded_topology_path
 from .rules import _line_exempts_rule
 
 
@@ -140,40 +142,11 @@ def check_configured(
                         ),
                     )
                 )
-    imports = []
-    if path.endswith(".py"):
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            tree = ast.Module(body=[], type_ignores=[])
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imports.extend((node.lineno, alias.name) for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if node.level:
-                    parts = path.removesuffix(".py").split("/")[: -node.level]
-                    if parts and parts[0] in {
-                        "src",
-                        "services",
-                        "packages",
-                        "app",
-                        "apps",
-                    }:
-                        parts = parts[1:]
-                    module = ".".join([*parts, *([module] if module else [])])
-                imports.extend(
-                    (node.lineno, module + "." + alias.name if module else alias.name)
-                    for alias in node.names
-                )
-                if module:
-                    imports.append((node.lineno, module))
-    else:
-        for number, line in enumerate(text.splitlines(), 1):
-            for match in re.finditer(
-                r"""(?:from\s+|import\s+|require\(\s*)["']([^"']+)["']""", line
-            ):
-                imports.append((number, match.group(1)))
+    imports = extract_imports(path, text, config.module_doc_roots)
+    if not is_excluded_topology_path(path):
+        findings.extend(
+            _check_module_imports(path, imports, lines, changed_lines, config)
+        )
     for rule in [
         *topology.get("forbidden_imports", []),
         *topology.get("module_boundaries", []),
@@ -185,22 +158,14 @@ def check_configured(
         )
         rule_id = rule.get("rule_id", prefix + "service-boundaries")
         reported_lines = set()
-        for number, name in imports:
+        for start, end, name in imports:
+            number = _import_finding_line(
+                start, end, lines, changed_lines, rule_id, config
+            )
             if (
-                number not in reported_lines
-                and _is_range_touched(changed_lines, number, number)
-                and not _line_exempts_rule(
-                    lines[number - 1], rule_id, exempt_tag=config.exempt_tag
-                )
-                and any(
-                    p
-                    and (
-                        name == p
-                        or name.startswith(p + ".")
-                        or name.startswith(p + "/")
-                    )
-                    for p in forbidden
-                )
+                number is not None
+                and number not in reported_lines
+                and any(_matches_import_prefix(name, p) for p in forbidden)
             ):
                 reported_lines.add(number)
                 findings.append(
@@ -222,3 +187,80 @@ def check_configured(
 
 def _is_range_touched(changed: set[int] | None, start: int, end: int) -> bool:
     return changed is None or bool(changed.intersection(range(start, end + 1)))
+
+
+def _check_module_imports(
+    path: str,
+    imports: list[tuple[int, int, str]],
+    lines: list[str],
+    changed_lines: set[int] | None,
+    config: GuardConfig,
+) -> list[Finding]:
+    topology = config.topology
+    modules = {m["path"]: m for m in topology.get("modules", [])}
+    paths = list(modules)
+    source_path = owner_module(path, paths)
+    if source_path is None:
+        return []
+    source = modules[source_path]
+    layers = topology.get("layers", {})
+    rule_id = config.rule_id_prefix + "service-boundaries"
+    findings = []
+    for start, end, spec in imports:
+        target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)
+        number = _import_finding_line(start, end, lines, changed_lines, rule_id, config)
+        if target_path is None or number is None:
+            continue
+        target = modules[target_path]
+        source_layer, target_layer = source.get("layer"), target.get("layer")
+        if (
+            layers
+            and source_layer
+            and target_layer
+            and target_layer not in layers[source_layer]
+        ):
+            message = (
+                f"Layer '{source_layer}' module '{source_path}' must not import "
+                f"layer '{target_layer}' module '{target_path}'."
+            )
+        elif topology.get(
+            "enforce_module_dependencies"
+        ) and target_path not in source.get("dependencies", []):
+            message = (
+                f"Module '{source_path}' imports undeclared dependency '{target_path}' "
+                f"(allowed: {source.get('dependencies', [])})."
+            )
+        else:
+            continue
+        findings.append(Finding(rule_id, path, number, message))
+    return findings
+
+
+def _import_finding_line(
+    start: int,
+    end: int,
+    lines: list[str],
+    changed_lines: set[int] | None,
+    rule_id: str,
+    config: GuardConfig,
+) -> int | None:
+    """Apply one touched-span/exemption policy to all import boundary checks."""
+    if not _is_range_touched(changed_lines, start, end):
+        return None
+    if any(
+        _line_exempts_rule(lines[line - 1], rule_id, exempt_tag=config.exempt_tag)
+        for line in {start, end}
+    ):
+        return None
+    return end if changed_lines is not None and start not in changed_lines else start
+
+
+def _matches_import_prefix(name: str, prefix: str) -> bool:
+    if not prefix:
+        return False
+    base = prefix.rstrip("/.")
+    return (
+        (prefix.endswith(("/", ".")) and name.startswith(prefix))
+        or name == base
+        or (bool(base) and name.startswith((base + ".", base + "/")))
+    )

@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .config import REVIEW_INTEGRATION_MODES, load_config, repository_path
+from .config import (
+    REVIEW_INTEGRATION_MODES,
+    load_config,
+    repository_path,
+    validate_config,
+)
 from .hooks import hook_install_plan, install_hooks
 from .topology import discover_topology
+from .topology.sync import merge_topology
 
 CORE = (
     "architecture-simplicity",
@@ -72,7 +78,10 @@ def initialize(
     root.mkdir(parents=True, exist_ok=True)
     if preset not in {"core", "full"}:
         raise ValueError("preset must be core or full")
-    if integration_mode is not None and integration_mode not in REVIEW_INTEGRATION_MODES:
+    if (
+        integration_mode is not None
+        and integration_mode not in REVIEW_INTEGRATION_MODES
+    ):
         raise ValueError("integration_mode must be local-hooks, github-pr, or both")
     effective_mode = integration_mode
     if effective_mode is None:
@@ -151,7 +160,9 @@ def initialize(
             "detail_dir": rules_dir,
         }
     )
-    config.setdefault("topology", {}).update(discover_topology(root))
+    config["topology"], unregistered = merge_topology(
+        cfg.topology, discover_topology(root, cfg)["modules"]
+    )
     config.setdefault("review", {}).setdefault(
         "extra_reviewable_paths", [rules_dir + "/**"]
     )
@@ -165,6 +176,7 @@ def initialize(
         workflow_install_plan(root)
     if install_local_hooks:
         hook_install_plan(root)
+    validate_config(config)
     destination.mkdir(parents=True, exist_ok=True)
     for target, content in files.items():
         target.write_text(content)
@@ -185,4 +197,5 @@ def initialize(
         "manifest": manifest_file,
         "config": ".guard/config.json",
         "integration_mode": effective_mode,
+        "unregistered_modules": unregistered,
     }

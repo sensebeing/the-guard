@@ -12,6 +12,7 @@ from typing import Any
 
 from ..config import load_config
 from ..policy import Policy, load_policy
+from ..topology.imports import owner_module
 from .contract import (
     DEFAULT_INCREMENTAL_DIFF_MAX_CHARS,
     MAX_REVIEWER_NOTE_CHARS,
@@ -56,6 +57,15 @@ routes and dual-track flags in the same change. Empty deprecated shells, new val
 into old fields, moving two state machines into one file, or copying predicates inline do
 not remove complexity. Compare implementation with the authorized design; disclaimers
 must not silently narrow accepted migration, schema, or traffic-switch obligations.
+
+## Architectural & Layer Boundary Integrity
+Verify changes against declared topology.layers, module role/dependencies, and loaded
+boundary_docs. Core, foundation, and domain modules must stay independent of concrete
+plugins, host CLIs, UI surfaces, and project-specific adapters. Block under
+guard.service-boundaries when a diff introduces or deepens upward or adapter-specific
+coupling inside a core module, such as host/plugin enums, CLI flags, concrete plugin
+names, or adapter state fields in a core store or scheduler, even when legacy coupling
+already exists nearby. Ground the boundary in the repository's declared owner contracts.
 
 ## High-Signal Blocking Only
 Block concrete violations of configured rules or owner contracts with precise code evidence.
@@ -286,35 +296,43 @@ def _render_prior_findings_section(
 
 def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
     config = load_config(repo_root, revision=scope.head_sha)
+    declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
     touched = set()
     for path in scope.reviewable_files:
-        parts = PurePosixPath(path).parts
-        if len(parts) >= 2 and parts[0] in config.module_doc_roots:
-            touched.add("/".join(parts[:2]))
-    for module in config.topology.get("modules", []):
-        if any(p.startswith(module["path"] + "/") for p in scope.reviewable_files):
-            touched.add(module["path"])
+        owner = owner_module(path, list(declared_modules))
+        if owner is not None:
+            touched.add(owner)
+        else:
+            parts = PurePosixPath(path).parts
+            if len(parts) >= 2 and parts[0] in config.module_doc_roots:
+                touched.add("/".join(parts[:2]))
     rendered_topology = dict(config.topology)
-    if "modules" in rendered_topology:
-        rendered_topology["modules"] = [
-            m for m in rendered_topology["modules"] if m.get("path") in touched
-        ]
     sections = [
         f"Project: {config.review.get('project_title', repo_root.name)}",
         "## Declared topology",
         json.dumps(rendered_topology, indent=2),
     ]
     loaded_boundary_modules: set[str] = set()
+    loaded_docs: set[str] = set()
     for module in sorted(touched):
-        for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
-            path = module + "/" + name
+        paths = list(
+            dict.fromkeys([
+                *declared_modules.get(module, {}).get("boundary_docs", []),
+                *(module + "/" + name for name in ("AGENTS.md", "CLAUDE.md", "README.md")),
+            ])
+        )
+        for path in paths:
+            if path in loaded_docs:
+                loaded_boundary_modules.add(module)
+                continue
             proc = _git(repo_root, "show", f"{scope.head_sha}:{path}", check=False)
             if proc.returncode == 0:
                 loaded_boundary_modules.add(module)
-                sections.append(
-                    f"## Boundary reference: {path}\n"
-                    + proc.stdout.decode("utf-8", errors="replace")
-                )
+                loaded_docs.add(path)
+                body = proc.stdout.decode("utf-8", errors="replace")
+                if len(body) > 24_000:
+                    body = body[:24_000] + "\n... [truncated]"
+                sections.append(f"## Boundary reference: {path}\n" + body)
     unbound_guidance_needed = (
         (
             not touched
@@ -402,7 +420,13 @@ def _has_explicit_topology_contract(
             return True
     return any(
         module.get("path") == module_path
-        and (module.get("boundary_docs") or module.get("dependencies"))
+        and (
+            module.get("boundary_docs")
+            or module.get("dependencies")
+            or topology.get("enforce_module_dependencies") is True
+            or bool(topology.get("layers") and module.get("layer"))
+            or bool(module.get("role"))
+        )
         for module in topology.get("modules", [])
         if isinstance(module, dict)
     )

@@ -50,7 +50,9 @@
         ],
         "dependencies": [
           "packages/contracts"
-        ]
+        ],
+        "layer": "domain",
+        "role": "Order lifecycle and persistence"
       },
       {
         "path": "services/billing",
@@ -62,7 +64,9 @@
         ],
         "dependencies": [
           "packages/contracts"
-        ]
+        ],
+        "layer": "domain",
+        "role": "Invoice lifecycle and persistence"
       },
       {
         "path": "packages/contracts",
@@ -72,7 +76,9 @@
         "boundary_docs": [
           "packages/contracts/README.md"
         ],
-        "dependencies": []
+        "dependencies": [],
+        "layer": "foundation",
+        "role": "Shared public data contracts"
       },
       {
         "path": "apps/web",
@@ -82,7 +88,9 @@
         "boundary_docs": [
           "apps/web/README.md"
         ],
-        "dependencies": []
+        "dependencies": [],
+        "layer": "surface",
+        "role": "Web presentation of public projections"
       }
     ],
     "forbidden_imports": [
@@ -148,6 +156,16 @@
         "rule_id": "guard.service-boundaries",
         "message": "Consume the public order projection instead of internal storage endpoints."
       }
-    ]
+    ],
+    "enforce_module_dependencies": true,
+    "layers": {
+      "foundation": [],
+      "domain": [
+        "foundation"
+      ],
+      "surface": [
+        "foundation"
+      ]
+    }
   }
 }
