@@ -32,7 +32,7 @@ from .session import (
     ReviewResult,
     ReviewSessionState,
 )
-from .session import compute_review_contract_digest, contract_digest_matches
+from .session import compute_review_contract_digest
 from .session import (
     load_review_session as _load_session_record,
 )
@@ -564,12 +564,9 @@ def resolve_or_carry_forward_receipt(
     current_contract_digest = compute_review_contract_digest(
         current_policy, current_config, repo_root=repo_root, revision=scope.head_sha
     )
-    if not contract_digest_matches(
-        session.contract_digest,
-        current_policy,
-        current_config,
-        repo_root=repo_root,
-        revision=scope.head_sha,
+    if not (
+        bool(session.contract_digest)
+        and session.contract_digest == current_contract_digest
     ):
         return None
     if existing is not None and session.last_patch_digest == scope.patch_digest:

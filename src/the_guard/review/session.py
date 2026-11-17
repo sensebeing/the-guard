@@ -13,7 +13,12 @@ from typing import IO, Any
 from ..config import GuardConfig
 from ..policy import Policy
 from .contract import BlockingFinding
-from .documents import architecture_document_paths, boundary_document_paths, read_document
+from .documents import (
+    architecture_document_paths,
+    boundary_document_paths,
+    existing_document_paths,
+    read_document,
+)
 
 RECEIPT_SCHEMA = "the-guard-receipt/v1"
 SESSION_SCHEMA = "the-guard-session/v1"
@@ -49,8 +54,11 @@ def compute_review_contract_digest(
         paths = architecture_document_paths(config)
         for module in config.topology.get("modules", []):
             paths.update(boundary_document_paths(module))
-        for path in sorted(paths):
-            body = read_document(repo_root, path, revision)
+        modes: dict[str, str] = {}
+        for path in sorted(
+            existing_document_paths(repo_root, paths, revision, snapshot_modes=modes)
+        ):
+            body = read_document(repo_root, path, revision, snapshot_modes=modes)
             if body is not None:
                 documents[path] = body
     payload = {

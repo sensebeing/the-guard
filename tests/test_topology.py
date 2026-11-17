@@ -111,6 +111,24 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(findings[0].rule_id, "guard.single-source-of-truth")
         self.assertTrue(check_contract_drift(self.root, [], base="absent-base"))
 
+    def test_missing_document_grandfathering_is_per_declaration(self):
+        topology = {"architecture_docs": ["docs/legacy-root.md"], "modules": [
+            {"path": "packages/a", "boundary_docs": ["docs/legacy-a.md"]},
+            {"path": "packages/b", "role": "Original responsibility"}]}
+        self.config(topology)
+        self.git("add", ".")
+        self.git("commit", "-m", "baseline missing declarations")
+        topology["modules"][1]["role"] = "Updated responsibility"
+        self.config(topology)
+        self.assertEqual(check_contract_drift(self.root, [".guard/config.json"], base="HEAD"), [])
+        topology["modules"][1]["boundary_docs"] = ["docs/new-b.md"]
+        self.config(topology)
+        findings = check_contract_drift(self.root, [".guard/config.json"], base="HEAD")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("docs/new-b.md", findings[0].message)
+        self.assertIn("packages/b", findings[0].message)
+        self.assertNotIn("legacy", findings[0].message)
+
     def test_self_repository_has_complete_minimal_governance(self):
         root = Path(__file__).resolve().parents[1]
         report = audit_topology(root)

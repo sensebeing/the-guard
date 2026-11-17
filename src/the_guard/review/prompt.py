@@ -26,7 +26,12 @@ from .repository import (
     _literal_pathspecs,
     _require_submodule_checkout,
 )
-from .documents import architecture_document_paths, boundary_document_paths, read_document
+from .documents import (
+    architecture_document_paths,
+    boundary_document_paths,
+    existing_document_paths,
+    read_document,
+)
 from .session import ReviewSessionState
 
 METHODOLOGY = """You are an independent Adversarial Architecture & Engineering Quality Reviewer.
@@ -323,10 +328,21 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
         "## Declared topology",
         json.dumps(rendered_topology, indent=2),
     ]
+    candidates = architecture_document_paths(config)
+    for module in touched:
+        candidates.update(
+            boundary_document_paths(declared_modules.get(module, {"path": module}))
+        )
+    modes: dict[str, str] = {}
+    existing_document_paths(repo_root, candidates, scope.head_sha, snapshot_modes=modes)
     loaded_boundary_modules: set[str] = set()
     loaded_docs: set[str] = set()
     manifest = read_document(
-        repo_root, config.manifest_file, scope.head_sha, loaded_paths=loaded_docs
+        repo_root,
+        config.manifest_file,
+        scope.head_sha,
+        loaded_paths=loaded_docs,
+        snapshot_modes=modes,
     )
     if manifest is not None:
         prose = re.sub(
@@ -353,7 +369,9 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
             architecture_loaded |= path in config.topology.get("architecture_docs", [])
             continue
         aliases: set[str] = set()
-        body = read_document(repo_root, path, scope.head_sha, loaded_paths=aliases)
+        body = read_document(
+            repo_root, path, scope.head_sha, loaded_paths=aliases, snapshot_modes=modes
+        )
         if body is not None:
             duplicate = bool(loaded_docs & aliases)
             loaded_docs.update(aliases)
@@ -366,11 +384,20 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
         declaration = declared_modules.get(module, {"path": module})
         for path in sorted(boundary_document_paths(declaration)):
             if path in loaded_docs:
-                if path in declaration.get("boundary_docs", []):
+                if path not in {
+                    config.manifest_file,
+                    "CLAUDE.md",
+                } or path in declaration.get("boundary_docs", []):
                     loaded_boundary_modules.add(module)
                 continue
             aliases = set()
-            body = read_document(repo_root, path, scope.head_sha, loaded_paths=aliases)
+            body = read_document(
+                repo_root,
+                path,
+                scope.head_sha,
+                loaded_paths=aliases,
+                snapshot_modes=modes,
+            )
             if body is not None:
                 loaded_boundary_modules.add(module)
                 duplicate = bool(loaded_docs & aliases)

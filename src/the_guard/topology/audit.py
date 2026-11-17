@@ -141,10 +141,23 @@ def check_contract_drift(
     )
     reader = BaseFileReader(root, base, submodule_paths(root))
     config_path = ".guard/config.json"
-    config_text = (
-        (root / config_path).read_text() if (root / config_path).is_file() else None
-    )
-    config_changed = not available or reader.read(config_path) != config_text
+    baseline = None
+    if available:
+        try:
+            baseline = load_config(root, revision=base)
+        except ValueError:
+            # Missing/invalid historical declarations cannot grandfather new permissions.
+            baseline = None
+    old_declared_docs = set()
+    if baseline is not None:
+        old_declared_docs.update(
+            ("<root>", doc) for doc in baseline.topology.get("architecture_docs", [])
+        )
+        old_declared_docs.update(
+            (module["path"], doc)
+            for module in baseline.topology.get("modules", [])
+            for doc in module.get("boundary_docs", [])
+        )
     rule_id = config.rule_id_prefix + "single-source-of-truth"
     findings = [
         Finding(
@@ -154,20 +167,16 @@ def check_contract_drift(
             f"Declared boundary document '{item['doc']}' for '{item['module']}' is missing; update its contract.",
         )
         for item in _missing_docs(root, config)
-        if not available or config_changed or reader.read(item["doc"]) is not None
+        if not available
+        or baseline is None
+        or (item["module"], item["doc"]) not in old_declared_docs
+        or reader.read(item["doc"]) is not None
     ]
     if not (
         config.topology.get("enforce_module_dependencies")
         or config.topology.get("layers")
     ):
         return findings
-    baseline = None
-    if available:
-        try:
-            baseline = load_config(root, revision=base)
-        except ValueError:
-            # Missing/invalid historical declarations cannot grandfather new permissions.
-            baseline = None
     modules = {m["path"]: m for m in config.topology.get("modules", [])}
     old_modules = (
         {m["path"]: m for m in baseline.topology.get("modules", [])} if baseline else {}
@@ -219,7 +228,7 @@ def check_contract_drift(
         if output is None:
             raise ValueError("Cannot inspect baseline module imports")
         old_observed, _ = _dependency_evidence(
-            baseline, output.strip("\0").split("\0"), reader.read
+            baseline, [p for p in output.split("\0") if p], reader.read
         )
     for item in stale:
         module, dependency = item["module"], item["unused_dependency"]

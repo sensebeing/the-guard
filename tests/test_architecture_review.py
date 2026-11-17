@@ -23,7 +23,7 @@ from the_guard.review.engine import (
     resolve_provider_order,
     run_architecture_review,
 )
-from the_guard.review.prompt import _render_bounded_diff_section, build_incremental_review_prompt
+from the_guard.review.prompt import _render_bounded_diff_section, _snapshot_context, build_incremental_review_prompt
 from the_guard.review.provider import (
     _has_provider_credentials,
     isolated_codex_home,
@@ -51,6 +51,7 @@ from the_guard.review.runner import (
     _verify_reviewed_head_sha,
 )
 from the_guard.config import load_config, GuardConfig
+from the_guard.review.documents import boundary_document_paths, existing_document_paths, read_document
 from the_guard.review.session import compute_review_contract_digest
 from the_guard.policy import PolicyError, load_policy
 from architecture_review_support import (
@@ -64,6 +65,42 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
+    def test_document_inventory_batches_tree_reads_and_skips_file_module_children(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            modules = []
+            for index in range(30):
+                path = f"packages/owner{index}"
+                (repo / path).mkdir(parents=True)
+                (repo / path / "README.md").write_text(f"Owner {index} boundary\n")
+                (repo / path / "main.py").write_text("value = 1\n")
+                modules.append({"path": path})
+            modules.append({"path": "src/config.py", "boundary_docs": ["docs/explicit.md"]})
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": modules}}))
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "many module contracts")
+            config = load_config(repo)
+            policy = load_policy(repo)
+            scope = collect_review_scope(repo)
+            self.assertEqual(boundary_document_paths(modules[-1]), {"docs/explicit.md"})
+            for extension in ("py", "ts", "mjs", "cjs"):
+                file_config = GuardConfig(topology={"modules": [{"path": f"src/config.{extension}"}]})
+                self.assertFalse(is_reviewable_path(f"src/config.{extension}/README.md", file_config))
+            self.assertIsNone(read_document(repo, "packages"))
+            self.assertEqual(existing_document_paths(repo, ["packages", "AGENTS.md"], None), {"AGENTS.md"})
+            for operation in (
+                lambda: compute_review_contract_digest(policy, config, repo_root=repo, revision=scope.head_sha),
+                lambda: _snapshot_context(repo, scope),
+            ):
+                with patch("subprocess.run", wraps=subprocess.run) as run:
+                    operation()
+                tree_calls = [call for call in run.call_args_list if call.args[0][:2] == ["git", "ls-tree"]]
+                self.assertEqual(len(tree_calls), 1, tree_calls)
+                self.assertIn("-z", tree_calls[0].args[0])
+                self.assertFalse(any("config.py/" in arg for arg in tree_calls[0].args[0]))
+            self.assertEqual(existing_document_paths(repo, ["packages", "AGENTS.md"], scope.head_sha), {"AGENTS.md"})
+
     def test_root_blueprint_is_snapshot_bound_in_full_and_incremental_prompts(self):
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))

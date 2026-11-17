@@ -53,6 +53,10 @@ agent instructions so future agents read them before coding.
 ## Declare and audit module boundaries
 
 After discovery, confirm module `role`, `boundary_docs`, allowed `dependencies`, and `layer`.
+Declare directory or single-file module paths; list root blueprints in `topology.architecture_docs`;
+all document paths must be safe repository-relative paths. Review automatically loads root agent
+instructions, declared/detected blueprints and touched boundaries from the committed snapshot,
+and binds review evidence to their contents.
 Use `topology.layers` to list allowed target layers (for example core: none, plugin: core),
 and `enforce_module_dependencies: true` to enforce the module allowlist. With both enabled,
 every module needs a layer; sync reports new unregistered modules instead of inventing one.
@@ -60,6 +64,9 @@ Layer-violating declared dependencies fail configuration loading. Discovery is e
 not permission to import. Run `guard topology audit --repo-root . --json` to inspect existing
 violations, missing documents, unregistered modules and unused declared dependencies; record
 legacy debt explicitly instead of treating changed-scope success as whole-repository compliance.
+Verify that branch checks reject newly missing documents and stale dependencies, and that edit
+checks reject unregistered production files under governance. Untouched legacy declarations remain
+grandfathered; update authoritative documents and configuration with responsibility changes.
 
 ## Wire the integration boundary
 
@@ -99,19 +106,3 @@ own trusted execution boundary. Do not claim a real provider review from unit te
 Validate policy and topology on the actual changed scope (`guard check --base <base>`).
 Report the chosen mode, files installed, discovered/confirmed owners, hook integration and verification.
 Distinguish successful static checks, provider availability and an actual independent review receipt.
-
-### Keep architecture contracts current
-
-Declare root blueprints with `topology.architecture_docs` (safe repository-relative paths).
-Module `path` entries support directories and individual files such as `src/core/config.py`;
-set each owner's `layer`, `role`, `dependencies` and `boundary_docs` explicitly.
-`guard review` automatically reads root agent instructions, declared blueprints and existing
-`ARCHITECTURE.md` / `docs/architecture.md` from the reviewed commit. These document snapshots
-also invalidate prior review evidence when their contents change.
-
-Branch-wide `guard check` and `guard topology check` reject newly missing declared documents
-and newly stale dependency declarations; changed production files must belong to a declared
-module when dependency/layer governance is enabled. The edit hook checks that ownership too,
-and the protected-push hook checks deterministic constraints before review exemptions or receipts.
-Untouched legacy debt stays grandfathered; use `guard topology audit` for the full inventory.
-Update configuration and authoritative boundary docs in the same change as responsibilities.

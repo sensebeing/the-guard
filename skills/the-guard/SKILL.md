@@ -40,7 +40,13 @@ repository configuration, or policy rules change.
 
 Read the full module/layer map and each touched module's `role`, `dependencies` and
 `boundary_docs`. Do not deepen host/plugin/adapter coupling in core modules merely because
-legacy coupling exists. Review loads declared documents from the committed snapshot.
+legacy coupling exists. Owners may be directories or single files. Keep their declarations and
+boundary docs synchronized with responsibility changes. Review reads root agent instructions,
+`topology.architecture_docs` and detected root blueprints from the committed snapshot, alongside
+touched boundaries; changes to these documents invalidate prior evidence.
+Branch-wide `guard check` / `guard topology check` block newly broken document declarations and
+stale dependencies while grandfathering untouched legacy declarations. Edit checks reject changed unregistered
+production source under governance; protected pushes run static checks before exemptions/receipts.
 Run `guard topology audit --json` to inspect whole-repository debt independently of changed-line
 ratchets: it reports violations, missing documents, unregistered modules and stale dependencies.
 A clean changed-scope check is not a clean whole-repository audit. `topology sync` preserves
@@ -71,19 +77,3 @@ or `pre-push` hook is not server-side branch protection.
 
 See the [workflow](../../README.md#workflow) and [CLI reference](../../README.md#topology-checks-and-cli-reference)
 for command options, exit codes, and configuration.
-
-### Keep architecture contracts current
-
-Declare root blueprints with `topology.architecture_docs` (safe repository-relative paths).
-Module `path` entries support directories and individual files such as `src/core/config.py`;
-set each owner's `layer`, `role`, `dependencies` and `boundary_docs` explicitly.
-`guard review` automatically reads root agent instructions, declared blueprints and existing
-`ARCHITECTURE.md` / `docs/architecture.md` from the reviewed commit. These document snapshots
-also invalidate prior review evidence when their contents change.
-
-Branch-wide `guard check` and `guard topology check` reject newly missing declared documents
-and newly stale dependency declarations; changed production files must belong to a declared
-module when dependency/layer governance is enabled. The edit hook checks that ownership too,
-and the protected-push hook checks deterministic constraints before review exemptions or receipts.
-Untouched legacy debt stays grandfathered; use `guard topology audit` for the full inventory.
-Update configuration and authoritative boundary docs in the same change as responsibilities.

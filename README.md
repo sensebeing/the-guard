@@ -328,7 +328,9 @@ guard check --file src/api.py --file app/Screen.swift --json
 
 Declare `topology.layers` as allowed target layers, for example
 `{"core": [], "plugin": ["core"]}`; sibling plugin imports are forbidden unless explicitly
-allowed. Give modules a `layer`, single-owner `role`, `dependencies`, and `boundary_docs`.
+allowed. Module paths support directories and single files such as `src/core/config.py`.
+Give modules a `layer`, single-owner `role`, `dependencies`, and `boundary_docs`; declare root
+blueprints in `topology.architecture_docs` using safe repository-relative paths.
 Set `enforce_module_dependencies: true` to reject undeclared internal imports. Declared
 edges must also obey the layer ceiling at config load; editing dependencies cannot legalize
 an upward import. Python AST and JS/TS literal imports (including relative paths, multiline
@@ -345,8 +347,15 @@ source whose remaining files have inert documentation/configuration extensions; 
 component files also prevent assuming zero imports. Production exclusions apply to language
 and module-dependency checks; explicit configured rules still apply to their declared scopes. Violations or missing documents fail the audit; unregistered modules and stale
 dependencies additionally fail governed repositories. Exit codes are 0 (pass) and 2 (fail).
-Review prompts include the complete module/layer map and touched modules' declared boundary
-documents from the reviewed Git snapshot, capped at 24,000 characters per document.
+Branch-wide `guard check` and `guard topology check` reject newly missing declared documents
+and newly stale dependencies while grandfathering untouched legacy declarations. With governance
+enabled, edited production files must have a registered owner, including in the edit hook;
+protected pushes run deterministic checks before review exemptions or receipts.
+Update configuration and authoritative documents together when responsibilities change.
+Review loads root agent instructions, `architecture_docs`, existing `ARCHITECTURE.md` /
+`docs/architecture.md`, the complete module/layer map and touched modules' boundary documents
+from the reviewed snapshot, capped at 24,000 characters per document. Document changes invalidate
+prior review evidence.
 
 | Check layer | What it enforces |
 | --- | --- |
@@ -399,19 +408,3 @@ If `the-guard` helps your team build with AI, a star on GitHub helps other teams
 ## License
 
 [MIT](LICENSE)
-
-### Keep architecture contracts current
-
-Declare root blueprints with `topology.architecture_docs` (safe repository-relative paths).
-Module `path` entries support directories and individual files such as `src/core/config.py`;
-set each owner's `layer`, `role`, `dependencies` and `boundary_docs` explicitly.
-`guard review` automatically reads root agent instructions, declared blueprints and existing
-`ARCHITECTURE.md` / `docs/architecture.md` from the reviewed commit. These document snapshots
-also invalidate prior review evidence when their contents change.
-
-Branch-wide `guard check` and `guard topology check` reject newly missing declared documents
-and newly stale dependency declarations; changed production files must belong to a declared
-module when dependency/layer governance is enabled. The edit hook checks that ownership too,
-and the protected-push hook checks deterministic constraints before review exemptions or receipts.
-Untouched legacy debt stays grandfathered; use `guard topology audit` for the full inventory.
-Update configuration and authoritative boundary docs in the same change as responsibilities.
