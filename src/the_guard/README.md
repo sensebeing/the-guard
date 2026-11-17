@@ -5,8 +5,8 @@
 - `topology/imports` owns Python/JS/TS import extraction and longest-prefix module resolution;
   `paths` owns production exclusions; `discovery` reports inventory; `configured` enforces declared
   dependencies and layer ceilings at touched import lines. `runner` composes language checks;
-  `audit` requests full-scan checks and reports contract drift; `sync` refreshes inventory without
-  granting observed imports permission. `config` rejects invalid layer edges before these run.
+  `audit` requests full-scan checks and reports contract drift; `sync` owns the pure inventory merge shared by sync and init without
+  granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
 - `review/contract` owns reviewer types and wire schema; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope and patch identity;
   `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
   `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;

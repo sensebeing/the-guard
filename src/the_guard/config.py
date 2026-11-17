@@ -59,9 +59,14 @@ def load_config(root: Path | str, *, revision: str | None = None) -> GuardConfig
             raw = "{}"
         else:
             raw = proc.stdout.decode("utf-8")
-    data = json.loads(raw)
+    return validate_config(json.loads(raw))
+
+
+def validate_config(data: dict[str, Any]) -> GuardConfig:
+    """Validate serialized configuration before reading or publishing it."""
     if not isinstance(data, dict):
         raise ValueError("Guard configuration must be a JSON object")
+    data = dict(data)
     unknown = set(data) - set(GuardConfig.__dataclass_fields__)
     if unknown:
         raise ValueError(f"Unknown guard configuration keys: {sorted(unknown)}")

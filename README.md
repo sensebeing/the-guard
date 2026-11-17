@@ -340,7 +340,9 @@ whenever layers or dependency enforcement are configured. With both enabled, new
 modules are reported as `unregistered_modules` until you assign their layers explicitly.
 `topology audit` scans all production source files, including unchanged legacy code, and reports
 violations, missing declared boundary documents, unregistered modules and unused declared
-dependencies. Violations or missing documents fail the audit; unregistered modules and stale
+dependencies. Stale-dependency checks apply only to modules with Python/JS/TS production
+source and no other inventoried source languages; unsupported or mixed-language modules are
+not assumed to have zero imports. Violations or missing documents fail the audit; unregistered modules and stale
 dependencies additionally fail governed repositories. Exit codes are 0 (pass) and 2 (fail).
 Review prompts include the complete module/layer map and touched modules' declared boundary
 documents from the reviewed Git snapshot, capped at 24,000 characters per document.

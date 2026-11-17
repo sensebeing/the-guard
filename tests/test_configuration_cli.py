@@ -59,6 +59,39 @@ class ConfigurationTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-m", "change")
 
+    def test_reinitialization_preserves_governed_module_permissions(self):
+        topology = {
+            "layers": {"core": [], "plugin": ["core"]},
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/core", "layer": "core", "role": "shared state", "dependencies": [],
+                 "boundary_docs": ["docs/architecture.md"]},
+                {"path": "packages/plugin", "layer": "plugin", "role": "host adapter",
+                 "dependencies": ["packages/core"], "boundary_docs": ["docs/plugin.md"]},
+            ],
+        }
+        self.write(".guard/config.json", json.dumps({"topology": topology}))
+        self.write("packages/core/index.ts", "import '../plugin/index.ts';")
+        self.write("packages/plugin/index.ts", "export const plugin = 1;")
+        self.write("packages/new/index.ts", "export const value = 1;")
+        result = initialize(self.root, preset="full")
+        self.assertEqual(result["unregistered_modules"], ["packages/new"])
+        saved = load_config(self.root).topology
+        for old, new in zip(topology["modules"], saved["modules"]):
+            for key in ("path", "layer", "role", "dependencies", "boundary_docs"):
+                self.assertEqual(old[key], new[key])
+        # Both writers validate merged data before publishing any invalid configuration.
+        previous = (self.root / ".guard/config.json").read_text()
+        invalid = {**saved, "modules": [{"path": "../escape"}]}
+        with patch("the_guard.init.merge_topology", return_value=(invalid, [])):
+            with self.assertRaises(ValueError):
+                initialize(self.root, preset="full")
+        self.assertEqual((self.root / ".guard/config.json").read_text(), previous)
+        with patch("the_guard.topology.sync.merge_topology", return_value=(invalid, [])):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["topology", "sync", "--repo-root", str(self.root)]), 2)
+        self.assertEqual((self.root / ".guard/config.json").read_text(), previous)
+
     def test_module_schema_and_layer_ceiling_validation(self):
         base = {"layers": {"core": [], "plugin": ["core"]}, "enforce_module_dependencies": True,
                 "modules": [{"path": "packages/core", "layer": "core", "dependencies": []},

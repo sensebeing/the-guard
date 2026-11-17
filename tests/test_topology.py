@@ -55,6 +55,114 @@ class TopologyTests(unittest.TestCase):
             _compute_changed_lines(base, text) if base is not None else None,
         )
 
+    def test_aliases_resolve_nested_owners_before_self_edge_filtering(self):
+        for root, extension, spec in (
+            ("src", "py", "pkg.host"),
+            ("packages", "ts", "@org/pkg/host/entry"),
+            ("packages", "ts", "pkg/host/entry.ts"),
+        ):
+            with self.subTest(spec=spec):
+                paths = [f"{root}/pkg", f"{root}/pkg/host"]
+                source = f"{root}/pkg/main.{extension}"
+                self.assertEqual(resolve_target_module(source, spec, paths), paths[1])
+                self.assertIsNone(resolve_target_module(source, spec, [*paths, "apps/pkg"]))
+                cfg = GuardConfig(topology={"enforce_module_dependencies": True, "modules": [
+                    {"path": path, "dependencies": []} for path in paths
+                ]})
+                code = f"import {spec}\n" if extension == "py" else f'import "{spec}";'
+                findings = check_configured(source, code, None, None, cfg)
+                self.assertEqual(len(findings), 1)
+                self.assertIn(paths[1], findings[0].message)
+        # A declared nested leaf can be resolved even without a declared parent.
+        self.assertEqual(resolve_target_module("src/other/main.py", "pkg.host", ["src/pkg/host"]), "src/pkg/host")
+
+    def test_template_interpolations_emit_imports_but_literal_text_is_inert(self):
+        code = '''const a = `${await import('../host/index.ts')}`;
+const b = `${`${import('../host/index.ts')}`}`;
+const c = `${({value: {load: import('../host/index.ts')}}).value}`;
+const d = '${import("ignored")}';
+const e = `import 'ignored'`;
+const f = `escaped \\${import('ignored')} and \\` import 'ignored'`;
+const g = `text
+${ /* comment import('ignored') */ await import(
+'../host/index.ts')
+}`;
+'''
+        self.assertEqual(extract_imports("packages/core/index.ts", code), [
+            (1, 1, "../host/index.ts"), (2, 2, "../host/index.ts"),
+            (3, 3, "../host/index.ts"), (8, 9, "../host/index.ts"),
+        ])
+        self.config({"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/core", "dependencies": []},
+            {"path": "packages/host", "dependencies": []},
+        ]})
+        self.write("packages/core/index.ts", code)
+        self.write("packages/host/index.ts", "export const host = 1;")
+        self.assertEqual(discover_topology(self.root)["modules"][0]["dependencies"], ["packages/host"])
+        self.assertEqual(len(audit_topology(self.root)["findings"]), 4)
+
+    def test_inventory_empty_registration_and_nested_owned_files(self):
+        self.write("packages/host/nested/index.ts", "export const value = 1;")
+        for governance in ({"enforce_module_dependencies": True}, {"layers": {"core": []}}):
+            with self.subTest(governance=governance):
+                self.config({**governance, "modules": []})
+                report = audit_topology(self.root)
+                self.assertEqual(report["unregistered_modules"], ["packages/host"])
+                self.assertFalse(report["passed"])
+        self.config({"enforce_module_dependencies": True, "layers": {"core": []}, "modules": [
+            {"path": "packages/host/nested", "layer": "core", "dependencies": []},
+        ]})
+        self.assertEqual(audit_topology(self.root)["unregistered_modules"], [])
+        result = sync_topology(self.root)
+        self.assertEqual(result["unregistered_modules"], [])
+        self.assertEqual([m["path"] for m in result["modules"]], ["packages/host/nested"])
+        self.assertEqual(result["modules"][0]["languages"], ["TypeScript"])
+        self.write("packages/host/sibling.ts", "export const sibling = 1;")
+        self.assertEqual(audit_topology(self.root)["unregistered_modules"], ["packages/host"])
+        self.assertEqual(sync_topology(self.root)["unregistered_modules"], ["packages/host"])
+
+    def test_sync_refreshes_declared_owners_without_absorbing_nested_files(self):
+        self.config({"modules": [
+            {"path": "packages/host", "role": "parent", "languages": ["Swift"], "dependencies": []},
+            {"path": "packages/host/nested", "role": "leaf", "dependencies": []},
+            {"path": "packages/domain", "dependencies": []},
+        ]})
+        self.write("packages/host/main.py", "value = 1\n")
+        self.write("packages/host/nested/main.ts", "import '../../domain/index.ts';")
+        self.write("packages/host/nested/README.md", "Leaf owner")
+        self.write("packages/domain/index.ts", "export const value = 1;")
+        modules = {m["path"]: m for m in sync_topology(self.root)["modules"]}
+        self.assertEqual(modules["packages/host"]["languages"], ["Python"])
+        self.assertEqual(modules["packages/host"]["dependencies"], [])
+        self.assertEqual(modules["packages/host/nested"]["dependencies"], ["packages/domain"])
+        self.assertEqual(modules["packages/host/nested"]["boundary_docs"], ["packages/host/nested/README.md"])
+
+    def test_audit_checks_all_text_and_skips_binary_files(self):
+        self.config({"forbidden_patterns": [{"scope_prefixes": ["frontend/"], "literal_or_regex": "private_state"}]})
+        for extension in ("vue", "yaml", "graphql"):
+            self.write(f"frontend/App.{extension}", "private_state\n")
+        (self.root / "frontend/image.bin").write_bytes(b"private_state\x00binary")
+        report = audit_topology(self.root)
+        self.assertEqual([f["path"] for f in report["findings"]], ["frontend/App.graphql", "frontend/App.vue", "frontend/App.yaml"])
+        self.assertFalse(report["passed"])
+
+    def test_stale_dependencies_require_supported_source_languages_only(self):
+        self.config({"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/ui", "dependencies": ["packages/domain"]},
+            {"path": "packages/domain", "dependencies": []},
+        ]})
+        self.write("packages/ui/View.swift", "import Domain\n")
+        self.write("packages/domain/Domain.swift", "struct Domain {}\n")
+        report = audit_topology(self.root)
+        self.assertEqual(report["stale_dependencies"], [])
+        self.assertTrue(report["passed"])
+        self.write("packages/ui/helper.py", "value = 1\n")
+        self.assertEqual(audit_topology(self.root)["stale_dependencies"], [])
+        (self.root / "packages/ui/View.swift").unlink()
+        self.assertEqual(audit_topology(self.root)["stale_dependencies"], [
+            {"module": "packages/ui", "unused_dependency": "packages/domain"},
+        ])
+
     def test_multiline_import_spans_and_boundary_ratchets(self):
         modules = [
             {"path": "packages/core", "dependencies": []},

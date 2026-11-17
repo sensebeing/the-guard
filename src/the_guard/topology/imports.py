@@ -4,18 +4,60 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import PurePosixPath
 
 from ..config import GuardConfig
 
 JS_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
-# Strings are tokens, so comment markers and import-like text inside them stay inert.
+DETERMINISTIC_IMPORT_EXTENSIONS = JS_EXTENSIONS | {".py"}
 _JS_TOKEN = re.compile(
     r"//[^\n]*|/\*[\s\S]*?\*/|"
     r"'(?:\\[\s\S]|[^'\\])*'|\"(?:\\[\s\S]|[^\"\\])*\"|"
-    r"`(?:\\[\s\S]|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]"
+    r"[A-Za-z_$][\w$]*|\s+|[^\s]"
 )
+
+
+def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
+    """Skip template text but tokenize executable interpolations at any nesting depth."""
+    # None marks template text; integers count braces in code/interpolations.
+    contexts: list[int | None] = [0]
+    index, line = 0, 1
+    while index < len(text):
+        if contexts[-1] is None:
+            char = text[index]
+            size = 1
+            if char == "\\":
+                size = 2
+            elif char == "`":
+                contexts.pop()
+                yield "`", line
+            elif text.startswith("${", index):
+                contexts.append(0)
+                yield "{", line
+                size = 2
+            line += text[index : index + size].count("\n")
+            index += size
+            continue
+        match = _JS_TOKEN.match(text, index)
+        if match is None:
+            break
+        value = match.group()
+        start_line = line
+        line += value.count("\n")
+        index = match.end()
+        if value.isspace() or value.startswith(("//", "/*")):
+            continue
+        if value == "`":
+            contexts.append(None)
+        elif value == "{":
+            contexts[-1] += 1
+        elif value == "}":
+            if contexts[-1] == 0 and len(contexts) > 1:
+                contexts.pop()
+            else:
+                contexts[-1] = max(0, contexts[-1] - 1)
+        yield value, start_line
 
 
 def extract_imports(
@@ -67,16 +109,7 @@ def extract_imports(
                 r"""(?:from\s+|import\s+|require\(\s*)["']([^"']+)["']""", line
             )
         ]
-    tokens = []
-    line = 1
-    end = 0
-    for match in _JS_TOKEN.finditer(text):
-        line += text[end : match.start()].count("\n")
-        value = match.group()
-        if not value.startswith(("//", "/*")):
-            tokens.append((value, line))
-        line += value.count("\n")
-        end = match.end()
+    tokens = list(_js_tokens(text))
     imports = []
     for i, (value, number) in enumerate(tokens):
         if value not in {"import", "export", "require"}:
@@ -163,21 +196,20 @@ def resolve_target_module(
             None,
         )
         if target is None:
-            matches = []
-            for module in paths:
-                name = PurePosixPath(module).name
-                bare = module.split("/")[0] in module_doc_roots and (
-                    spec == name or spec.startswith((name + "/", name + "."))
-                )
-                scoped = (
-                    spec.startswith("@")
-                    and "/" in spec
-                    and (
-                        spec.split("/", 1)[1] == name
-                        or spec.split("/", 1)[1].startswith(name + "/")
-                    )
-                )
-                if bare or scoped:
-                    matches.append(module)
-            target = matches[0] if len(matches) == 1 else None
+            alias = (
+                spec.split("/", 1)[1] if spec.startswith("@") and "/" in spec else spec
+            )
+            # Slash paths preserve file extensions; dotted Python paths become segments.
+            alias_path = alias if "/" in alias else alias.replace(".", "/")
+            name, _, suffix = alias_path.partition("/")
+            roots = {
+                "/".join(parts[:2])
+                for module in paths
+                if len(parts := module.split("/")) >= 2
+                and parts[0] in module_doc_roots
+                and parts[1] == name
+            }
+            if len(roots) == 1:
+                prefix = next(iter(roots))
+                target = owner_module(prefix + ("/" + suffix if suffix else ""), paths)
     return target if target != source else None
