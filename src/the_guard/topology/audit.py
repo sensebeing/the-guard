@@ -199,6 +199,9 @@ def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set
     ) or (current.get("layers") and not old.get("layers")):
         return set(modules)
     old_modules = {m["path"]: m for m in old.get("modules", [])}
+    if set(modules) != set(old_modules):
+        # Owner additions/removals change longest-prefix and alias resolution globally.
+        return set(modules)
     tightened = {
         path
         for path, module in modules.items()
@@ -242,7 +245,14 @@ def check_contract_drift(
         root, ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"]
     )
     submodules = submodule_paths(root, revision=revision)
-    reader = BaseFileReader(root, base, submodules)
+    reader = BaseFileReader(
+        root,
+        base,
+        submodule_paths(root, revision=base)
+        if revision is not None and available
+        else submodules,
+        exact=revision is not None,
+    )
     config_path = ".guard/config.json"
     baseline = None
     if available:
@@ -407,10 +417,21 @@ def check_contract_drift(
         if owner_module(path, list(modules)) in tightened:
             text = read_current(path)
             if text is not None:
+                previous_findings = (
+                    set(
+                        check_module_imports(
+                            path, text, None, baseline, check_unregistered=False
+                        )
+                    )
+                    if baseline is not None
+                    else set()
+                )
                 findings.extend(
-                    check_module_imports(
+                    finding
+                    for finding in check_module_imports(
                         path, text, None, config, check_unregistered=False
                     )
+                    if finding not in previous_findings
                 )
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []

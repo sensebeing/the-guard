@@ -382,6 +382,66 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual([f.message for f in snapshot], [f.message for f in working])
         self.assertTrue(any("Stale dependency" in f.message for f in snapshot))
 
+    def test_snapshot_baseline_ignores_dirty_rename_inference(self):
+        self.config(
+            {"forbidden_imports": [{"from": "packages/a", "imports": ["forbidden"]}]}
+        )
+        self.write("packages/a/original.ts", "import 'forbidden';\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "legacy import")
+        base = self.git("rev-parse", "HEAD")
+        self.write("packages/a/copied.ts", "import 'forbidden';\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "new violating copy")
+        (self.root / "packages/a/original.ts").unlink()
+        findings = run_topology_guard(
+            self.root, ["packages/a/copied.ts"], base=base, revision="HEAD"
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].path, "packages/a/copied.ts")
+
+    def test_new_nested_owner_rechecks_sources_and_callers_preserving_old_debt(self):
+        topology = {
+            "enforce_module_dependencies": True,
+            "layers": {"core": [], "plugin": []},
+            "modules": [
+                {
+                    "path": "packages/a",
+                    "layer": "core",
+                    "role": "Core",
+                    "dependencies": [],
+                },
+                {
+                    "path": "packages/b",
+                    "layer": "plugin",
+                    "role": "Other",
+                    "dependencies": [],
+                },
+            ],
+        }
+        self.config(topology)
+        self.write(
+            "packages/a/main.ts", "import './nested/item.js';\nimport '../b/main.js';\n"
+        )
+        self.write("packages/a/nested/item.ts", "import '../main.js';\n")
+        self.write("packages/b/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "internal imports with legacy external debt")
+        topology["modules"].append(
+            {
+                "path": "packages/a/nested",
+                "layer": "plugin",
+                "role": "Nested owner",
+                "dependencies": [],
+            }
+        )
+        self.config(topology)
+        findings = check_contract_drift(self.root, [".guard/config.json"], base="HEAD")
+        self.assertEqual(
+            {(f.path, f.line) for f in findings},
+            {("packages/a/main.ts", 1), ("packages/a/nested/item.ts", 1)},
+        )
+
     def test_missing_document_grandfathering_is_per_declaration(self):
         topology = {"architecture_docs": ["docs/legacy-root.md"], "modules": [
             {"path": "packages/a", "boundary_docs": ["docs/legacy-a.md"]},
