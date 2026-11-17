@@ -58,21 +58,28 @@ def _read_policy_file(
     *,
     revision: str | None,
     _seen: frozenset[str] = frozenset(),
+    loaded_paths: set[str] | None = None,
+    snapshot_modes: dict[str, str] | None = None,
 ) -> str:
     if Path(rel_path).is_absolute() or ".." in Path(rel_path).parts:
         raise PolicyError(f"Unsafe policy path: {rel_path}")
     if rel_path in _seen:
         raise PolicyError(f"Cyclic policy symlink: {rel_path}")
+    if loaded_paths is not None:
+        loaded_paths.add(rel_path)
     if revision is not None:
         try:
-            entry = subprocess.run(
-                ["git", "ls-tree", revision, "--", f":(literal){rel_path}"],
-                cwd=repo_root,
-                capture_output=True,
-                check=True,
-                timeout=15,
-            )
-            if entry.stdout.startswith(b"120000 "):
+            mode = (snapshot_modes or {}).get(rel_path)
+            if mode is None:
+                entry = subprocess.run(
+                    ["git", "ls-tree", revision, "--", f":(literal){rel_path}"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    check=True,
+                    timeout=15,
+                )
+                mode = entry.stdout.split(b" ", 1)[0].decode("ascii")
+            if mode == "120000":
                 link = subprocess.run(
                     ["git", "show", f"{revision}:{rel_path}"],
                     cwd=repo_root,
@@ -86,7 +93,12 @@ def _read_policy_file(
                     posixpath.join(posixpath.dirname(rel_path), link)
                 )
                 return _read_policy_file(
-                    repo_root, target, revision=revision, _seen=_seen | {rel_path}
+                    repo_root,
+                    target,
+                    revision=revision,
+                    _seen=_seen | {rel_path},
+                    loaded_paths=loaded_paths,
+                    snapshot_modes=snapshot_modes,
                 )
             proc = subprocess.run(
                 ["git", "show", f"{revision}:{rel_path}"],

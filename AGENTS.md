@@ -10,6 +10,16 @@ topic branch, push it to `origin`, open a GitHub PR with `gh pr create`, review 
 `the-guard-reviewer[bot]`), and merge with `gh pr merge` rather than pushing directly to `main`.
 The local `pre-push` hook rejects direct pushes to `main` in this mode.
 
+## Architecture
+
+The executable module map in `.guard/config.json` is authoritative. Foundation
+(`config`, `policy`, `finding`, `git_helpers`) owns validation and read-only primitives.
+Domain (`topology`, `review`) owns deterministic checks and snapshot review; topology
+never imports review. Workflow (`init`, `distill`, `hooks`, `auto_update`) composes those
+owners. Surface (`cli`, package exports) exposes workflows and is never imported below.
+Every module declares its exact dependencies, role, layer and boundary document.
+Update that map and `src/the_guard/README.md` together when responsibilities change.
+
 ## Engineering Quality Policy
 
 <!-- the-guard-policy:start -->

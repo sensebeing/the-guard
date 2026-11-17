@@ -15,7 +15,7 @@ from benchmarks import guardbench
 from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
 from the_guard.cli import main, changed_files
 from the_guard.config import GuardConfig, load_config
-from the_guard.hooks import install_hooks, main_push_gate
+from the_guard.hooks import edit_guard, install_hooks, main_push_gate
 from the_guard.init import initialize
 from the_guard.policy import load_policy, PolicyError
 from the_guard.review.engine import run_architecture_review
@@ -58,6 +58,92 @@ class ConfigurationTests(unittest.TestCase):
     def commit(self):
         self.git("add", ".")
         self.git("commit", "-m", "change")
+
+    def test_architecture_docs_validate_repository_relative_paths(self):
+        for docs in ("docs/a.md", ["../a.md"], ["/a.md"], ["C:\\a.md"], [12]):
+            with self.subTest(docs=docs):
+                self.write(".guard/config.json", json.dumps({"topology": {"architecture_docs": docs}}))
+                with self.assertRaises(ValueError):
+                    load_config(self.root)
+        self.write(".guard/config.json", json.dumps({"topology": {"architecture_docs": ["docs/a.md"]}}))
+        self.assertEqual(load_config(self.root).topology["architecture_docs"], ["docs/a.md"])
+
+    def test_check_and_edit_guard_reject_new_unregistered_source(self):
+        self.write(".guard/config.json", json.dumps({"topology": {"enforce_module_dependencies": True}}))
+        self.write("packages/new/main.py", "value = 1\n")
+        self.commit()
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["check", "--repo-root", str(self.root), "--base", "HEAD"]), 0)
+            self.write("packages/new/main.py", "value = 2\n")
+            self.assertEqual(main(["check", "--repo-root", str(self.root), "--base", "HEAD"]), 2)
+            self.assertEqual(edit_guard(self.root, json.dumps({"path": "packages/new/main.py"})), 2)
+
+    def test_deleted_contract_docs_block_check_topology_and_push_before_exemption(self):
+        self.write(".guard/config.json", json.dumps({"topology": {
+            "architecture_docs": ["docs/blueprint.md"],
+            "modules": [{"path": "packages/a", "boundary_docs": ["docs/boundary.md"]}]}}))
+        self.write("docs/blueprint.md", "Root owner\n")
+        self.write("docs/boundary.md", "Module owner\n")
+        self.commit()
+        base = self.git("rev-parse", "HEAD")
+        for doc in ("docs/blueprint.md", "docs/boundary.md"):
+            (self.root / doc).unlink()
+        self.commit()
+        head = self.git("rev-parse", "HEAD")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main(["check", "--repo-root", str(self.root), "--base", base]), 2)
+            self.assertEqual(main(["topology", "check", "--repo-root", str(self.root), "--base", base]), 2)
+            with patch("the_guard.hooks.collect_review_scope") as scope:
+                self.assertEqual(main_push_gate(self.root, f"refs/heads/topic {head} refs/heads/main {base}\n"), 2)
+                scope.assert_not_called()
+        self.assertIn("docs/blueprint.md", errors.getvalue())
+        self.assertIn("docs/boundary.md", errors.getvalue())
+
+    def test_push_checks_committed_snapshot_despite_dirty_contract_restoration(self):
+        self.write(".guard/config.json", json.dumps({"topology": {"architecture_docs": ["docs/blueprint.md"]}}))
+        self.write("docs/blueprint.md", "Owner boundary\n")
+        self.commit()
+        base = self.git("rev-parse", "HEAD")
+        (self.root / "docs/blueprint.md").unlink()
+        self.commit()
+        head = self.git("rev-parse", "HEAD")
+        self.write("docs/blueprint.md", "Uncommitted restoration\n")
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main_push_gate(self.root, f"refs/heads/topic {head} refs/heads/main {base}\n"), 2)
+        self.assertIn("docs/blueprint.md", errors.getvalue())
+        self.git("reset", "--hard", base)
+        self.write("notes.txt", "Harmless committed documentation\n")
+        self.commit()
+        head = self.git("rev-parse", "HEAD")
+        self.write(".guard/config.json", "invalid dirty JSON")
+        (self.root / "docs/blueprint.md").unlink()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main_push_gate(self.root, f"refs/heads/topic {head} refs/heads/main {base}\n"), 0)
+        worktrees = self.git("worktree", "list", "--porcelain")
+        self.assertNotIn("guard-push-", worktrees)
+
+    def test_check_blocks_new_stale_dependency_but_not_unchanged_legacy_debt(self):
+        config = {"topology": {"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/a", "dependencies": ["packages/b"]},
+            {"path": "packages/b", "dependencies": []}]}}
+        self.write(".guard/config.json", json.dumps(config))
+        self.write("packages/a/main.py", "from packages.b import value\n")
+        self.write("packages/b/main.py", "value = 1\n")
+        self.commit()
+        base = self.git("rev-parse", "HEAD")
+        self.write("packages/a/main.py", "value = 1\n")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(["check", "--repo-root", str(self.root), "--base", base]), 2)
+        self.assertIn("Stale dependency", output.getvalue())
+        self.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["check", "--repo-root", str(self.root), "--base", "HEAD"]), 0)
+        config["topology"]["architecture_docs"] = ["docs/new-missing.md"]
+        self.write(".guard/config.json", json.dumps(config))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(["check", "--repo-root", str(self.root), "--base", "HEAD"]), 2)
+        self.assertIn("docs/new-missing.md", output.getvalue())
 
     def test_reinitialization_preserves_governed_module_permissions(self):
         topology = {

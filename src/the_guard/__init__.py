@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from .config import GuardConfig, load_config
+from .config import VERSION, GuardConfig, load_config
 from .finding import Finding, exempt_pattern
 from .policy import Policy, PolicyError, Rule, load_policy
 from .review.engine import run_architecture_review
 from .topology import discover_topology, run_topology_guard
 
-__version__ = "0.1.0"
+__version__ = VERSION
 __all__ = [
     "__version__",
     "GuardConfig",

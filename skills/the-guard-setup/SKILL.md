@@ -53,6 +53,10 @@ agent instructions so future agents read them before coding.
 ## Declare and audit module boundaries
 
 After discovery, confirm module `role`, `boundary_docs`, allowed `dependencies`, and `layer`.
+Declare directory or single-file module paths; list root blueprints in `topology.architecture_docs`;
+all document paths must be safe repository-relative paths. Review automatically loads root agent
+instructions, declared/detected blueprints and touched boundaries from the committed snapshot,
+and binds review evidence to their contents.
 Use `topology.layers` to list allowed target layers (for example core: none, plugin: core),
 and `enforce_module_dependencies: true` to enforce the module allowlist. With both enabled,
 every module needs a layer; sync reports new unregistered modules instead of inventing one.
@@ -60,6 +64,9 @@ Layer-violating declared dependencies fail configuration loading. Discovery is e
 not permission to import. Run `guard topology audit --repo-root . --json` to inspect existing
 violations, missing documents, unregistered modules and unused declared dependencies; record
 legacy debt explicitly instead of treating changed-scope success as whole-repository compliance.
+Verify that branch checks reject newly missing documents and stale dependencies, and that edit
+checks reject unregistered production files under governance. Untouched legacy declarations remain
+grandfathered; update authoritative documents and configuration with responsibility changes.
 
 ## Wire the integration boundary
 

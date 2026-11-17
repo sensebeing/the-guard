@@ -168,6 +168,7 @@ def extract_imports(
                 )
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
+                modules = []
                 if node.level:
                     parts = path.removesuffix(".py").split("/")[: -node.level]
                     if parts and parts[0] in {
@@ -175,20 +176,25 @@ def extract_imports(
                         *module_doc_roots,
                         "app",
                     }:
+                        modules.append(
+                            ".".join([*parts, *([module] if module else [])])
+                        )
                         parts = parts[1:]
                     module = ".".join([*parts, *([module] if module else [])])
-                imports.extend(
-                    (
-                        node.lineno,
-                        node.end_lineno or node.lineno,
-                        module + "." + alias.name if module else alias.name,
+                modules.append(module)
+                for module in modules:
+                    imports.extend(
+                        (
+                            node.lineno,
+                            node.end_lineno or node.lineno,
+                            module + "." + alias.name if module else alias.name,
+                        )
+                        for alias in node.names
                     )
-                    for alias in node.names
-                )
-                if module:
-                    imports.append(
-                        (node.lineno, node.end_lineno or node.lineno, module)
-                    )
+                    if module:
+                        imports.append(
+                            (node.lineno, node.end_lineno or node.lineno, module)
+                        )
         return sorted(set(imports))
     if PurePosixPath(path).suffix not in JS_EXTENSIONS:
         # Preserve configured import-prefix checks for other language text.
@@ -211,7 +217,7 @@ def extract_imports(
             continue
         if tokens[tail][0] == "(" and value in {"import", "require"}:
             tail += 1
-            terminators = {",", ")"} if value == "import" else {")"}
+            terminators = {",", ")"}
             if tail + 1 >= len(tokens) or tokens[tail + 1][0] not in terminators:
                 continue
         elif tokens[tail][0] == ".":
@@ -255,6 +261,40 @@ def owner_module(file_path: str, module_paths: Sequence[str]) -> str | None:
     )
 
 
+def _module_stem(path: str) -> str:
+    suffix = PurePosixPath(path).suffix
+    return (
+        path.removesuffix(suffix) if suffix in DETERMINISTIC_IMPORT_EXTENSIONS else path
+    )
+
+
+def _module_identities(path: str) -> tuple[str, ...]:
+    stem = _module_stem(path)
+    if path.endswith("/__init__.py"):
+        return stem, stem.removesuffix("/__init__")
+    return (stem,)
+
+
+def _target_owner(path: str, module_paths: Sequence[str]) -> str | None:
+    stem = _module_stem(path)
+    identities = sorted(
+        (
+            (identity, module)
+            for module in module_paths
+            for identity in _module_identities(module)
+        ),
+        key=lambda item: (-len(item[0]), -len(_module_stem(item[1])), item[1]),
+    )
+    return next(
+        (
+            module
+            for identity, module in identities
+            if stem == identity or stem.startswith(identity + "/")
+        ),
+        None,
+    )
+
+
 def resolve_target_module(
     file_path: str,
     spec: str,
@@ -262,7 +302,7 @@ def resolve_target_module(
     module_doc_roots: Sequence[str] = GuardConfig.module_doc_roots,
 ) -> str | None:
     """Resolve literal repo paths or unambiguous package aliases; exclude self edges."""
-    paths = sorted(module_paths, key=lambda m: (-len(m), m))
+    paths = sorted(module_paths, key=lambda m: (-len(_module_stem(m)), m))
     source = owner_module(file_path, paths)
     if spec.startswith(("./", "../")):
         parts = list(PurePosixPath(file_path).parent.parts)
@@ -273,33 +313,29 @@ def resolve_target_module(
                 parts.pop()
             elif part not in {"", "."}:
                 parts.append(part)
-        target = owner_module("/".join(parts), paths)
+        target = _target_owner("/".join(parts), paths)
     else:
-        target = next(
-            (
-                m
-                for m in paths
-                if spec == m
-                or spec == m.replace("/", ".")
-                or spec.startswith((m + "/", m.replace("/", ".") + "."))
-            ),
-            None,
+        literal = _module_stem(spec)
+        target = _target_owner(
+            literal if "/" in literal else literal.replace(".", "/"), paths
         )
         if target is None:
             alias = (
                 spec.split("/", 1)[1] if spec.startswith("@") and "/" in spec else spec
             )
             # Slash paths preserve file extensions; dotted Python paths become segments.
+            alias = _module_stem(alias)
             alias_path = alias if "/" in alias else alias.replace(".", "/")
             name, _, suffix = alias_path.partition("/")
             roots = {
                 "/".join(parts[:2])
                 for module in paths
-                if len(parts := module.split("/")) >= 2
+                for identity in _module_identities(module)
+                if len(parts := identity.split("/")) >= 2
                 and parts[0] in module_doc_roots
                 and parts[1] == name
             }
             if len(roots) == 1:
                 prefix = next(iter(roots))
-                target = owner_module(prefix + ("/" + suffix if suffix else ""), paths)
+                target = _target_owner(prefix + ("/" + suffix if suffix else ""), paths)
     return target if target != source else None

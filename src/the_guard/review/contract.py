@@ -126,6 +126,8 @@ CODE_EXTENSIONS = frozenset(
         ".tsx",
         ".js",
         ".jsx",
+        ".mjs",
+        ".cjs",
         ".sql",
         ".sh",
         ".go",

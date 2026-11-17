@@ -40,7 +40,13 @@ repository configuration, or policy rules change.
 
 Read the full module/layer map and each touched module's `role`, `dependencies` and
 `boundary_docs`. Do not deepen host/plugin/adapter coupling in core modules merely because
-legacy coupling exists. Review loads declared documents from the committed snapshot.
+legacy coupling exists. Owners may be directories or single files. Keep their declarations and
+boundary docs synchronized with responsibility changes. Review reads root agent instructions,
+`topology.architecture_docs` and detected root blueprints from the committed snapshot, alongside
+touched boundaries; changes to these documents invalidate prior evidence.
+Branch-wide `guard check` / `guard topology check` block newly broken document declarations and
+stale dependencies while grandfathering untouched legacy declarations. Edit checks reject changed unregistered
+production source under governance; protected pushes run static checks before exemptions/receipts.
 Run `guard topology audit --json` to inspect whole-repository debt independently of changed-line
 ratchets: it reports violations, missing documents, unregistered modules and stale dependencies.
 A clean changed-scope check is not a clean whole-repository audit. `topology sync` preserves

@@ -29,6 +29,10 @@ runs:
         if guard probe --priority-order "${{ inputs.provider }}" >/dev/null 2>&1; then
           check_status=0
           guard check --base "origin/${GITHUB_BASE_REF:-main}" || check_status=$?
+          if [ "$check_status" -ne 0 ]; then
+            guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json || exit "$check_status"
+            exit "$check_status"
+          fi
           guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json
           exit "$check_status"
         else

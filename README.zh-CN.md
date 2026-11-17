@@ -324,7 +324,9 @@ guard check --file src/api.py --file app/Screen.swift --json
 
 用 `topology.layers` 声明各层允许依赖的目标层，例如
 `{"core": [], "plugin": ["core"]}`；未显式允许时，同层插件也不得互相导入。
-为模块填写 `layer`、单一职责 `role`、`dependencies` 与 `boundary_docs`。
+模块路径支持目录和 `src/core/config.py` 这样的单文件。
+为模块填写 `layer`、单一职责 `role`、`dependencies` 与 `boundary_docs`，
+并用 `topology.architecture_docs` 声明根蓝图；文档路径必须相对仓库且不能越界。
 开启 `enforce_module_dependencies: true` 后，未声明的仓内导入会被拦截。
 配置加载时也校验声明依赖的层级方向，不能通过修改依赖清单放行向上依赖。
 Python AST 与 JS/TS 字面量导入共用模块解析，覆盖相对路径、多行导入、再导出、
@@ -337,8 +339,13 @@ Python AST 与 JS/TS 字面量导入共用模块解析，覆盖相对路径、�
 且其余文件仅为已知文档或配置类型的模块；存在未支持的组件文件时也不推断没有导入。
 生产路径排除只作用于语言和模块依赖检查，显式配置规则仍按各自声明的范围检查。违规或缺失文档会导致失败；启用层级或依赖约束时，
 未登记模块与陈旧依赖也会导致失败。退出码为 0（通过）或 2（失败）。
-审查提示词包含完整模块与层级图，并从审查 Git 快照加载涉及模块声明的边界文档，
-每份文档最多保留 24,000 个字符。
+分支范围的 `guard check` 和 `guard topology check` 阻断新增的声明文档缺失与失效依赖，
+未触及的历史声明仍按基线保留。启用治理后，编辑的生产文件必须归属已登记模块，编辑 hook
+也执行此检查；受保护分支推送会在审查豁免与回执判断前运行确定性检查。
+职责变化时，在同一次改动中同步配置和权威文档。
+审查从被审查快照加载根 Agent 指令、`architecture_docs`、存在的 `ARCHITECTURE.md` /
+`docs/architecture.md`、完整模块与层级图及涉及模块的边界文档，每份最多保留 24,000 个字符。
+文档内容变化会使旧审查证据失效。
 
 | 检查层 | 守护内容 |
 | --- | --- |
