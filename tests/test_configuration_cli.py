@@ -100,6 +100,29 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("docs/blueprint.md", errors.getvalue())
         self.assertIn("docs/boundary.md", errors.getvalue())
 
+    def test_push_checks_committed_snapshot_despite_dirty_contract_restoration(self):
+        self.write(".guard/config.json", json.dumps({"topology": {"architecture_docs": ["docs/blueprint.md"]}}))
+        self.write("docs/blueprint.md", "Owner boundary\n")
+        self.commit()
+        base = self.git("rev-parse", "HEAD")
+        (self.root / "docs/blueprint.md").unlink()
+        self.commit()
+        head = self.git("rev-parse", "HEAD")
+        self.write("docs/blueprint.md", "Uncommitted restoration\n")
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main_push_gate(self.root, f"refs/heads/topic {head} refs/heads/main {base}\n"), 2)
+        self.assertIn("docs/blueprint.md", errors.getvalue())
+        self.git("reset", "--hard", base)
+        self.write("notes.txt", "Harmless committed documentation\n")
+        self.commit()
+        head = self.git("rev-parse", "HEAD")
+        self.write(".guard/config.json", "invalid dirty JSON")
+        (self.root / "docs/blueprint.md").unlink()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main_push_gate(self.root, f"refs/heads/topic {head} refs/heads/main {base}\n"), 0)
+        worktrees = self.git("worktree", "list", "--porcelain")
+        self.assertNotIn("guard-push-", worktrees)
+
     def test_check_blocks_new_stale_dependency_but_not_unchanged_legacy_debt(self):
         config = {"topology": {"enforce_module_dependencies": True, "modules": [
             {"path": "packages/a", "dependencies": ["packages/b"]},

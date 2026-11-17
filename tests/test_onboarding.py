@@ -132,6 +132,8 @@ class GithubPrIntegrationModeTests(unittest.TestCase):
     def test_github_pr_mode_blocks_direct_main_push_but_allows_topic_branches(self):
         self.init_repo()
         initialize(self.root, integration_mode="github-pr")
+        self.git("add", ".")
+        self.git("commit", "-m", "commit integration policy")
         self.assertTrue((self.root / ".git/hooks/pre-push").exists())
         head = self.git("rev-parse", "HEAD")
         direct = f"refs/heads/main {head} refs/heads/main {head}\n"

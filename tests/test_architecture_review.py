@@ -101,6 +101,36 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 self.assertFalse(any("config.py/" in arg for arg in tree_calls[0].args[0]))
             self.assertEqual(existing_document_paths(repo, ["packages", "AGENTS.md"], scope.head_sha), {"AGENTS.md"})
 
+    def test_implicit_readme_and_symlink_targets_are_reviewable_contract_changes(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "packages/a").mkdir(parents=True)
+            (repo / "notes").mkdir()
+            (repo / "packages/a/README.md").write_text("Implicit boundary\n")
+            (repo / "notes/owner.txt").write_text("Linked boundary\n")
+            (repo / "packages/a/OWNER.md").symlink_to("../../notes/owner.txt")
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": [
+                {"path": "packages/a", "boundary_docs": ["packages/a/OWNER.md"]}]}}))
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "baseline boundaries")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            for path in ("packages/a/README.md", "notes/owner.txt"):
+                (repo / path).write_text("Changed owner responsibility\n")
+                _git(repo, "add", path)
+                _git(repo, "commit", "-m", "contract only change")
+                scope = collect_review_scope(repo)
+                self.assertIn(path, scope.reviewable_files)
+                self.assertFalse(scope.is_exempt)
+                prompts = []
+                def reviewer(prompt):
+                    prompts.append(prompt)
+                    return {"verdict": "GO", "summary": "reviewed", "blocking_findings": []}
+                self.assertEqual(run_architecture_review(repo, reviewer_fn=reviewer).mode, "full")
+                self.assertTrue(prompts)
+                self.assertIn("Changed owner responsibility", prompts[0])
+                self.assertIn("## Boundary reference: packages/a/OWNER.md", prompts[0])
+
     def test_root_blueprint_is_snapshot_bound_in_full_and_incremental_prompts(self):
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))

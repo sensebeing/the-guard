@@ -25,7 +25,7 @@ from .contract import (
     ReviewScope,
     SubmoduleChange,
 )
-from .documents import is_architecture_contract
+from .documents import is_architecture_contract, resolved_contract_paths
 from .session import (
     RECEIPT_SCHEMA,
     UTC,
@@ -123,8 +123,15 @@ def resolve_base_ref(repo_root: Path, main_branch: str = "main") -> str:
     )
 
 
-def is_reviewable_path(rel_path: str, config: GuardConfig | None = None) -> bool:
+def is_reviewable_path(
+    rel_path: str,
+    config: GuardConfig | None = None,
+    *,
+    contract_paths: set[str] | None = None,
+) -> bool:
     cfg = config or GuardConfig()
+    if contract_paths and rel_path in contract_paths:
+        return True
     settings = cfg.review
     if rel_path == ".guard/config.json" or is_architecture_contract(rel_path, cfg):
         return True
@@ -160,7 +167,12 @@ def is_reviewable_path(rel_path: str, config: GuardConfig | None = None) -> bool
     )
 
 
-def _classify_file_tier(rel_path: str, config: GuardConfig | None = None) -> int:
+def _classify_file_tier(
+    rel_path: str,
+    config: GuardConfig | None = None,
+    *,
+    contract_paths: set[str] | None = None,
+) -> int:
     """Return 0 for core production, 1 for config/i18n/parity, 2 for tests/fixtures/lockfiles."""
     cfg = config or GuardConfig()
     policy_prefixes = (
@@ -169,7 +181,9 @@ def _classify_file_tier(rel_path: str, config: GuardConfig | None = None) -> int
         *cfg.review.get("reviewable_prefixes", []),
     )
     posix = PurePosixPath(rel_path)
-    if is_architecture_contract(rel_path, cfg):
+    if (contract_paths and rel_path in contract_paths) or is_architecture_contract(
+        rel_path, cfg
+    ):
         return 0
     name_low = posix.name.lower()
     if posix.name in LOCK_FILENAMES or name_low == "conftest.py":
@@ -205,7 +219,10 @@ def _compute_stable_patch_id(repo_root: Path, diff_bytes: bytes) -> str:
 
 
 def _parse_raw_diff_lines(
-    raw_diff: str, config: GuardConfig | None = None
+    raw_diff: str,
+    config: GuardConfig | None = None,
+    *,
+    contract_paths: set[str] | None = None,
 ) -> tuple[list[str], list[str], list[SubmoduleChange]]:
     changed_files: list[str] = []
     reviewable_files: list[str] = []
@@ -230,7 +247,7 @@ def _parse_raw_diff_lines(
             )
             continue
         changed_files.append(path)
-        if is_reviewable_path(path, config):
+        if is_reviewable_path(path, config, contract_paths=contract_paths):
             reviewable_files.append(path)
     return changed_files, reviewable_files, submodules
 
@@ -349,11 +366,17 @@ def collect_review_scope(repo_root: Path, main_branch: str = "main") -> ReviewSc
     head_sha = _git_text(repo_root, "rev-parse", "HEAD")
     merge_base = _git_text(repo_root, "merge-base", base_ref, head_sha)
 
+    contract_paths = resolved_contract_paths(repo_root, config, head_sha)
+    contract_paths.update(
+        resolved_contract_paths(
+            repo_root, load_config(repo_root, revision=merge_base), merge_base
+        )
+    )
     raw_diff = _git_text(
         repo_root, "diff", "--raw", "--no-renames", f"{merge_base}..{head_sha}"
     )
     changed_files, reviewable_files, submodules = _parse_raw_diff_lines(
-        raw_diff, config
+        raw_diff, config, contract_paths=contract_paths
     )
 
     diff_bytes = _git(
@@ -433,6 +456,15 @@ def _collect_branch_delta(
     ):
         return None
 
+    contract_paths = resolved_contract_paths(repo_root, config, scope.head_sha)
+    contract_paths.update(
+        resolved_contract_paths(
+            repo_root,
+            load_config(repo_root, revision=session.last_head_sha),
+            session.last_head_sha,
+        )
+    )
+
     changed_files: list[str] = []
     reviewable_files: list[str] = []
     inc_subs: dict[str, SubmoduleChange] = {}
@@ -454,7 +486,7 @@ def _collect_branch_delta(
             )
         raw_diff = raw_proc.stdout.decode("utf-8", errors="replace").strip()
         changed_files, reviewable_files, raw_subs = _parse_raw_diff_lines(
-            raw_diff, config
+            raw_diff, config, contract_paths=contract_paths
         )
         inc_subs = {sub.path: sub for sub in raw_subs}
     elif _is_ancestor(repo_root, session.merge_base, scope.merge_base):
@@ -501,7 +533,7 @@ def _collect_branch_delta(
             ):
                 continue
             changed_files.append(path)
-            if is_reviewable_path(path, config):
+            if is_reviewable_path(path, config, contract_paths=contract_paths):
                 reviewable_files.append(path)
         for path, (old_mode, old_sha) in old_blobs.items():
             if path in new_blobs:
@@ -510,7 +542,7 @@ def _collect_branch_delta(
                 repo_root, scope.head_sha, path, old_mode, old_sha
             ):
                 changed_files.append(path)
-                if is_reviewable_path(path, config):
+                if is_reviewable_path(path, config, contract_paths=contract_paths):
                     reviewable_files.append(path)
     else:
         return None

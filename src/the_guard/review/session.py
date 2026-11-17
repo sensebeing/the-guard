@@ -14,8 +14,7 @@ from ..config import GuardConfig
 from ..policy import Policy
 from .contract import BlockingFinding
 from .documents import (
-    architecture_document_paths,
-    boundary_document_paths,
+    contract_document_paths,
     existing_document_paths,
     read_document,
 )
@@ -51,9 +50,7 @@ def compute_review_contract_digest(
         digest.update(path.read_bytes())
     documents = {}
     if repo_root is not None:
-        paths = architecture_document_paths(config)
-        for module in config.topology.get("modules", []):
-            paths.update(boundary_document_paths(module))
+        paths = contract_document_paths(config)
         modes: dict[str, str] = {}
         for path in sorted(
             existing_document_paths(repo_root, paths, revision, snapshot_modes=modes)

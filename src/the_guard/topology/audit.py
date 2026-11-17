@@ -71,7 +71,11 @@ def audit_topology(
 
 
 def _dependency_evidence(
-    config: GuardConfig, files: Sequence[str], read: Callable[[str], str | None]
+    config: GuardConfig,
+    files: Sequence[str],
+    read: Callable[[str], str | None],
+    *,
+    coverage_files: Sequence[str] = (),
 ) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
     """Shared deterministic coverage and stale-edge evidence for audit and ratchets."""
     modules = {m["path"]: m for m in config.topology.get("modules", [])}
@@ -93,6 +97,12 @@ def _dependency_evidence(
             target = resolve_target_module(path, spec, paths, config.module_doc_roots)
             if target:
                 observed[source].add(target)
+    for path in coverage_files:
+        if is_excluded_topology_path(path):
+            continue
+        source = owner_module(path, paths)
+        if source is not None:
+            source_extensions[source].add(Path(path).suffix)
     stale = sorted(
         (
             {"module": m["path"], "unused_dependency": dep}
@@ -207,10 +217,8 @@ def check_contract_drift(
         for p in source_files(root)
         if b"\x00" not in p.read_bytes()
     ]
-    _, stale = _dependency_evidence(
-        config, files, lambda p: (root / p).read_text(errors="replace")
-    )
     old_observed: dict[str, set[str]] = {}
+    baseline_files: list[str] = []
     if baseline and candidates:
         output = git_stdout(
             root,
@@ -227,9 +235,14 @@ def check_contract_drift(
         )
         if output is None:
             raise ValueError("Cannot inspect baseline module imports")
-        old_observed, _ = _dependency_evidence(
-            baseline, [p for p in output.split("\0") if p], reader.read
-        )
+        baseline_files = [p for p in output.split("\0") if p]
+        old_observed, _ = _dependency_evidence(baseline, baseline_files, reader.read)
+    _, stale = _dependency_evidence(
+        config,
+        files,
+        lambda p: (root / p).read_text(errors="replace"),
+        coverage_files=baseline_files,
+    )
     for item in stale:
         module, dependency = item["module"], item["unused_dependency"]
         if module in candidates and (

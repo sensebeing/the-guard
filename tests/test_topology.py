@@ -104,6 +104,7 @@ class TopologyTests(unittest.TestCase):
         self.write("packages/a/keep.ts", "export const value = 2;\n")
         self.assertEqual(check_contract_drift(self.root, ["packages/a/keep.ts"], base="HEAD"), [])
         (self.root / "packages/a/main.ts").unlink()
+        (self.root / "packages/a/keep.ts").unlink()
         findings = check_contract_drift(self.root, [], base="HEAD")
         self.assertEqual(len(findings), 1)
         self.assertIn("packages/b", findings[0].message)

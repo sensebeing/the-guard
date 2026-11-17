@@ -29,8 +29,10 @@ from .repository import (
 from .documents import (
     architecture_document_paths,
     boundary_document_paths,
+    contract_document_paths,
     existing_document_paths,
     read_document,
+    resolved_contract_paths,
 )
 from .session import ReviewSessionState
 
@@ -121,6 +123,12 @@ def _parse_numstat_entries(
             "git diff --numstat failed: " + proc.stderr.decode(errors="replace")
         )
     config = load_config(repo_root, revision=head_sha)
+    contract_paths = resolved_contract_paths(repo_root, config, head_sha)
+    contract_paths.update(
+        resolved_contract_paths(
+            repo_root, load_config(repo_root, revision=base_sha), base_sha
+        )
+    )
     entries = []
     for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
         parts = line.split("\t", 2)
@@ -131,7 +139,7 @@ def _parse_numstat_entries(
                     int(added) if added.isdigit() else 0,
                     int(deleted) if deleted.isdigit() else 0,
                     path,
-                    _classify_file_tier(path, config),
+                    _classify_file_tier(path, config, contract_paths=contract_paths),
                 )
             )
     if paths and {e[2] for e in entries} != set(paths):
@@ -236,13 +244,23 @@ def _render_bounded_diff_section(
     if len(diff) <= max_chars:
         return f"\n## {title}\n```diff\n" + diff + "\n```"
     config = load_config(repo_root, revision=head_sha)
+    contract_paths = resolved_contract_paths(repo_root, config, head_sha)
+    contract_paths.update(
+        resolved_contract_paths(
+            repo_root, load_config(repo_root, revision=base_sha), base_sha
+        )
+    )
     chunks = [c for c in re.split(r"(?m)^(?=diff --git )", diff) if c.strip()]
 
     def target(chunk: str) -> str:
         match = re.match(r'^diff --git "?a/.*?"? "?b/(.*?)"?$', chunk.splitlines()[0])
         return match.group(1) if match else chunk.splitlines()[0]
 
-    chunks.sort(key=lambda c: _classify_file_tier(target(c), config))
+    chunks.sort(
+        key=lambda c: _classify_file_tier(
+            target(c), config, contract_paths=contract_paths
+        )
+    )
     kept, omitted = [], []
     used = 0
     for chunk in chunks:
@@ -251,7 +269,10 @@ def _render_bounded_diff_section(
             used += len(chunk)
         else:
             omitted.append(target(chunk))
-    prod_count = sum(_classify_file_tier(path, config) < 2 for path in omitted)
+    prod_count = sum(
+        _classify_file_tier(path, config, contract_paths=contract_paths) < 2
+        for path in omitted
+    )
     plan = _render_scope_manifest_section(
         repo_root, base_sha, head_sha, title=title, paths=paths
     )
@@ -328,13 +349,28 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
         "## Declared topology",
         json.dumps(rendered_topology, indent=2),
     ]
-    candidates = architecture_document_paths(config)
+    candidates = contract_document_paths(config)
     for module in touched:
         candidates.update(
             boundary_document_paths(declared_modules.get(module, {"path": module}))
         )
     modes: dict[str, str] = {}
     existing_document_paths(repo_root, candidates, scope.head_sha, snapshot_modes=modes)
+    changed_paths = set(scope.reviewable_files)
+    for module, declaration in declared_modules.items():
+        boundary_paths = boundary_document_paths(declaration)
+        aliases = set(boundary_paths)
+        for path in boundary_paths:
+            if modes.get(path) == "120000":
+                read_document(
+                    repo_root,
+                    path,
+                    scope.head_sha,
+                    loaded_paths=aliases,
+                    snapshot_modes=modes,
+                )
+        if aliases & changed_paths:
+            touched.add(module)
     loaded_boundary_modules: set[str] = set()
     loaded_docs: set[str] = set()
     manifest = read_document(

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from .config import load_config
@@ -51,7 +53,7 @@ def install_hooks(root: Path | str) -> Path:
 
 def main_push_gate(root: Path | str, input_text: str) -> int:
     root = Path(root).resolve()
-    config = load_config(root)
+    config = load_config(root, revision="HEAD")
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=root,
@@ -87,12 +89,18 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
                 "Protected branch creation needs an explicit reviewed baseline; initialize the remote before enabling this hook"
             )
         try:
-            load_policy(root, revision=local_sha, config=config)
-            changed = changed_files(root, remote_sha)
-            findings = run_topology_guard(root, changed, base=remote_sha, config=config)
-            findings.extend(
-                check_contract_drift(root, changed, base=remote_sha, config=config)
-            )
+            with _pushed_snapshot(root, local_sha) as snapshot:
+                snapshot_config = load_config(snapshot, revision=local_sha)
+                load_policy(snapshot, revision=local_sha, config=snapshot_config)
+                changed = changed_files(snapshot, remote_sha)
+                findings = run_topology_guard(
+                    snapshot, changed, base=remote_sha, config=snapshot_config
+                )
+                findings.extend(
+                    check_contract_drift(
+                        snapshot, changed, base=remote_sha, config=snapshot_config
+                    )
+                )
         except PolicyError as exc:
             print(f"NO-GO: {exc}", file=sys.stderr)
             return 2
@@ -114,6 +122,39 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
             )
             return 2
     return 0
+
+
+@contextmanager
+def _pushed_snapshot(root: Path, revision: str):
+    """Materialize only the pushed commit for filesystem-based deterministic owners."""
+    with tempfile.TemporaryDirectory(prefix="guard-push-") as directory:
+        snapshot = Path(directory) / "snapshot"
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "worktree",
+                "add",
+                "--detach",
+                str(snapshot),
+                revision,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        try:
+            yield snapshot
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(snapshot)],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
 
 
 def edit_guard(root: Path | str, input_text: str) -> int:

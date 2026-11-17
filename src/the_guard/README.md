@@ -49,3 +49,10 @@ file without a declared module also fails the edit guard. Untouched baseline deb
 grandfathered; `guard topology audit` reports the full repository debt. Changes to module
 responsibilities require synchronized configuration and authoritative boundary docs.
 `guard topology sync` refreshes inventory without granting observed imports permission.
+
+Protected-push checks materialize the exact pushed commit in a temporary detached worktree,
+run the existing deterministic owners there against the remote commit, then remove it. Dirty
+local files cannot alter the verdict. Contract classification includes implicit module README
+files and safe symlink targets; changing those documents selects their declaring modules for
+review context. Dependency drift retains baseline language coverage when the final source file
+is deleted, without treating unsupported-language modules as fully observable.

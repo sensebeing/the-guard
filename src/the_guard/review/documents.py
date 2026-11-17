@@ -31,19 +31,28 @@ def boundary_document_paths(module: dict) -> set[str]:
     }
 
 
+def contract_document_paths(config: GuardConfig) -> set[str]:
+    paths = architecture_document_paths(config)
+    for module in config.topology.get("modules", []):
+        paths.update(boundary_document_paths(module))
+    return paths
+
+
 def is_architecture_contract(path: str, config: GuardConfig) -> bool:
-    return path in architecture_document_paths(config) or any(
-        path
-        in {
-            *module.get("boundary_docs", []),
-            *(
-                module["path"] + "/" + name
-                for name in ("AGENTS.md", "CLAUDE.md")
-                if PurePosixPath(module["path"]).suffix.lower() not in CODE_EXTENSIONS
-            ),
-        }
-        for module in config.topology.get("modules", [])
-    )
+    return path in contract_document_paths(config)
+
+
+def resolved_contract_paths(root: Path, config: GuardConfig, revision: str) -> set[str]:
+    """Declared/implicit contracts plus safe snapshot symlink targets, including absent paths."""
+    paths = contract_document_paths(config)
+    modes: dict[str, str] = {}
+    existing_document_paths(root, paths, revision, snapshot_modes=modes)
+    for path, mode in modes.items():
+        if mode == "120000":
+            read_document(
+                root, path, revision, loaded_paths=paths, snapshot_modes=modes
+            )
+    return paths
 
 
 def existing_document_paths(
