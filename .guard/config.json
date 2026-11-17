@@ -36,6 +36,7 @@
           "src/the_guard/README.md"
         ],
         "dependencies": [
+          "src/the_guard/auto_update.py",
           "src/the_guard/config.py",
           "src/the_guard/finding.py",
           "src/the_guard/policy.py",
@@ -43,7 +44,7 @@
           "src/the_guard/topology"
         ],
         "layer": "surface",
-        "role": "Public package API exports"
+        "role": "Package bootstrap and public API exports"
       },
       {
         "path": "src/the_guard/auto_update.py",
@@ -53,11 +54,9 @@
         "boundary_docs": [
           "src/the_guard/README.md"
         ],
-        "dependencies": [
-          "src/the_guard/config.py"
-        ],
-        "layer": "workflow",
-        "role": "Installed tool and skill update lifecycle"
+        "dependencies": [],
+        "layer": "foundation",
+        "role": "Checkout selection, package activation, and installed tool and skill update lifecycle"
       },
       {
         "path": "src/the_guard/cli.py",
@@ -190,6 +189,7 @@
           "src/the_guard/README.md"
         ],
         "dependencies": [
+          "src/the_guard/auto_update.py",
           "src/the_guard/config.py",
           "src/the_guard/git_helpers.py",
           "src/the_guard/policy.py",

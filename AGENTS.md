@@ -13,10 +13,11 @@ The local `pre-push` hook rejects direct pushes to `main` in this mode.
 ## Architecture
 
 The executable module map in `.guard/config.json` is authoritative. Foundation
-(`config`, `policy`, `finding`, `git_helpers`) owns validation and read-only primitives.
+(`config`, `policy`, `finding`, `git_helpers`, `auto_update`) owns validation,
+read-only primitives, checkout selection and the installed tool update lifecycle.
 Domain (`topology`, `review`) owns deterministic checks and snapshot review; topology
-never imports review. Workflow (`init`, `distill`, `hooks`, `auto_update`) composes those
-owners. Surface (`cli`, package exports) exposes workflows and is never imported below.
+never imports review. Workflow (`init`, `distill`, `hooks`) composes those owners.
+Surface (`cli`, package bootstrap and exports) exposes workflows and is never imported below.
 Every module declares its exact dependencies, role, layer and boundary document.
 Update that map and `src/the_guard/README.md` together when responsibilities change.
 `git_helpers` owns safe file/symlink snapshot reads and changed-line diffs; policy adapts

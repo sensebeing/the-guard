@@ -12,9 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Iterator
-
-from .config import VERSION as __version__
+from typing import Any, Iterator, Mapping
 
 AUTO_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 SKILL_NAMES = ("the-guard", "the-guard-setup")
@@ -49,7 +47,7 @@ def _installed_guard_package_dir(home_dir: Path) -> Path | None:
 def state_dir_for(
     home_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> Path:
     eff_env = os.environ if env is None else env
     if state_dir is not None:
@@ -205,6 +203,7 @@ def load_auto_update_status(
 
 def guard_status(
     *,
+    version: str,
     home_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
     gemini_dir: str | Path | None = None,
@@ -230,7 +229,7 @@ def guard_status(
             if target.is_symlink():
                 skill_links[str(target)] = str(target.readlink())
     report: dict[str, Any] = {
-        "version": __version__,
+        "version": version,
         "state_dir": str(resolved_state),
         "checkout": str(checkout) if checkout is not None else None,
         "guard_bin": shutil.which("guard") or "",
@@ -393,6 +392,22 @@ def _resolve_guard_command(
     return [sys.executable, "-m", "the_guard.cli"]
 
 
+def _auto_update_disabled(env: Mapping[str, str]) -> bool:
+    return any(
+        env.get(key, "").strip() == value
+        for key, value in (
+            ("THE_GUARD_AUTO_UPDATE", "0"),
+            ("THE_GUARD_DISABLE_AUTO_UPDATE", "1"),
+            ("THE_GUARD_REVIEW_ACTIVE", "1"),
+            ("THE_GUARD_SESSION_MODE", "readonly"),
+        )
+    )
+
+
+def _in_test_harness(env: Mapping[str, str]) -> bool:
+    return "PYTEST_CURRENT_TEST" in env or "unittest" in sys.modules or "pytest" in sys.modules
+
+
 def maybe_trigger_background_auto_update(
     *,
     active_repo_root: str | Path | None = None,
@@ -403,20 +418,10 @@ def maybe_trigger_background_auto_update(
     force_local_sync: bool = False,
 ) -> bool:
     eff_env = os.environ if env is None else env
-    if (
-        eff_env.get("THE_GUARD_AUTO_UPDATE", "").strip() == "0"
-        or eff_env.get("THE_GUARD_DISABLE_AUTO_UPDATE", "").strip() == "1"
-        or eff_env.get("THE_GUARD_REVIEW_ACTIVE", "").strip() == "1"
-        or eff_env.get("THE_GUARD_SESSION_MODE", "").strip() == "readonly"
-    ):
+    if _auto_update_disabled(eff_env):
         return False
-    in_test_harness = (
-        "PYTEST_CURRENT_TEST" in eff_env
-        or "unittest" in sys.modules
-        or "pytest" in sys.modules
-    )
     if (
-        in_test_harness
+        _in_test_harness(eff_env)
         and state_dir is None
         and eff_env.get("THE_GUARD_AUTO_UPDATE", "").strip() != "1"
     ):
@@ -519,55 +524,110 @@ def maybe_trigger_background_auto_update(
         return True
 
 
+def _newer_checkout_package(
+    *,
+    package_path: list[str],
+    home_dir: Path | None = None,
+    active_repo_root: str | Path | None = None,
+    state_dir: str | Path | None = None,
+    env: Mapping[str, str],
+) -> Path | None:
+    if (
+        _auto_update_disabled(env)
+        or env.get("THE_GUARD_DELEGATED", "").strip() == "1"
+        or (_in_test_harness(env) and env.get("THE_GUARD_AUTO_UPDATE", "").strip() != "1")
+    ):
+        return None
+    try:
+        home_dir = Path.home() if home_dir is None else home_dir
+        checkout = home_dir / "the-guard"
+        package = (checkout / "src/the_guard").resolve()
+        if not package.is_dir() or package == PACKAGE_DIR.resolve():
+            return None
+        if str(package) in package_path or not (checkout / ".git").exists():
+            return None
+        if active_repo_root is not None and _is_same_git_repo(Path(active_repo_root), checkout):
+            return None
+        git = ["git", "-C", str(checkout)]
+        if _subprocess_run([*git, "branch", "--show-current"], 20).strip() != "main":
+            return None
+        if _subprocess_run([*git, "status", "--porcelain"], 20).strip():
+            return None
+        checkout_sha = _subprocess_run([*git, "rev-parse", "HEAD"], 20).strip()
+        current_repo = PACKAGE_DIR.parents[1]
+        if (current_repo / ".git").exists():
+            if _is_same_git_repo(current_repo, checkout):
+                return None
+            baseline = _subprocess_run(
+                ["git", "-C", str(current_repo), "rev-parse", "HEAD"], 20
+            ).strip()
+            allow_same_commit = False
+        else:
+            metadata_path = state_dir_for(home_dir=home_dir, state_dir=state_dir, env=env) / "auto_update.json"
+            metadata = _load_json_dict(metadata_path)
+            installed_sha = metadata.get("installed_sha")
+            baseline = installed_sha or metadata.get("source_sha")
+            # The installed SHA describes the global tool. A project venv can still be stale.
+            allow_same_commit = bool(installed_sha) and PACKAGE_DIR.parent.name == "site-packages"
+        if not isinstance(baseline, str) or not baseline:
+            return None
+        baseline_sha = _subprocess_run(
+            [*git, "rev-parse", "--verify", "--end-of-options", f"{baseline}^{{commit}}"], 20
+        ).strip()
+        if baseline_sha == checkout_sha:
+            if not allow_same_commit:
+                return None
+        else:
+            _subprocess_run([*git, "merge-base", "--is-ancestor", baseline_sha, checkout_sha], 20)
+        if compute_package_tree_digest(package) == compute_package_tree_digest(PACKAGE_DIR):
+            return None
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        return None
+    return package
+
+
+def maybe_activate_newer_checkout_package(package_path: list[str]) -> bool:
+    """Use the selected checkout for submodules imported after package bootstrap."""
+    package = _newer_checkout_package(
+        package_path=package_path, active_repo_root=Path("."), env=os.environ
+    )
+    if package is None:
+        return False
+    package_path[0:0] = [str(package)]
+    try:
+        maybe_trigger_background_auto_update()
+    except OSError:
+        # The update state directory can be unavailable while the checkout is readable.
+        pass
+    return True
+
+
 def maybe_delegate_to_checkout(
     argv: list[str], *, active_repo_root: str | Path | None = None,
     home_dir: str | Path | None = None, state_dir: str | Path | None = None,
     gemini_dir: str | Path | None = None, env: dict[str, str] | None = None,
 ) -> int | None:
-    eff_env = dict(os.environ if env is None else env)
     if not argv or argv[0] == "self-update" or any(
-        eff_env.get(key) == value for key, value in (
-            ("THE_GUARD_DELEGATED", "1"), ("THE_GUARD_DISABLE_AUTO_UPDATE", "1"),
-            ("THE_GUARD_AUTO_UPDATE", "0"), ("THE_GUARD_REVIEW_ACTIVE", "1"),
-            ("THE_GUARD_SESSION_MODE", "readonly"),
-        )
-    ) or "--checkout-dir" in argv or any("--checkout-dir=" in x for x in argv):
+        value == "--checkout-dir" or value.startswith("--checkout-dir=") for value in argv
+    ):
         return None
-    if ("PYTEST_CURRENT_TEST" in eff_env or "unittest" in sys.modules or "pytest" in sys.modules) and eff_env.get("THE_GUARD_AUTO_UPDATE") != "1":
-        return None
+    eff_env = dict(os.environ if env is None else env)
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    checkout = resolved_home / "the-guard"
-    if not (checkout / "src/the_guard").is_dir():
+    # Bootstrap stays imported from the installed tree after redirecting the package path.
+    package = _newer_checkout_package(
+        package_path=sys.modules[__package__].__path__,
+        home_dir=resolved_home,
+        active_repo_root=active_repo_root,
+        state_dir=state_dir,
+        env=eff_env,
+    )
+    if package is None:
         return None
-    if active_repo_root is not None and _is_same_git_repo(Path(active_repo_root), checkout):
-        return None
-    try:
-        if _subprocess_run(["git", "-C", str(checkout), "branch", "--show-current"], 20).strip() != "main":
-            return None
-        if _subprocess_run(["git", "-C", str(checkout), "status", "--porcelain"], 20).strip():
-            return None
-        checkout_sha = _subprocess_run(["git", "-C", str(checkout), "rev-parse", "HEAD"], 20).strip()
-        metadata = _load_json_dict(state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=eff_env) / "auto_update.json")
-        baseline_sha = metadata.get("installed_sha") or metadata.get("source_sha")
-        if not baseline_sha:
-            current_repo = PACKAGE_DIR.parents[1]
-            if (current_repo / ".git").exists():
-                baseline_sha = _subprocess_run(["git", "-C", str(current_repo), "rev-parse", "HEAD"], 20).strip()
-        if not baseline_sha:
-            return None
-        if baseline_sha:
-            ancestry = subprocess.run(
-                ["git", "-C", str(checkout), "merge-base", "--is-ancestor", str(baseline_sha), checkout_sha],
-                check=False,
-                capture_output=True,
-            )
-            if ancestry.returncode != 0 or checkout_sha == baseline_sha:
-                return None
-        if _is_same_git_repo(PACKAGE_DIR.parents[1], checkout) or compute_package_tree_digest(checkout / "src/the_guard") == compute_package_tree_digest(PACKAGE_DIR):
-            return None
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    child_env = {**eff_env, "PYTHONPATH": os.pathsep.join(filter(None, [str(checkout / "src"), eff_env.get("PYTHONPATH", "")])), "THE_GUARD_DELEGATED": "1"}
+    child_env = {
+        **eff_env,
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(package.parent), eff_env.get("PYTHONPATH", "")])),
+        "THE_GUARD_DELEGATED": "1",
+    }
     proc = subprocess.run([sys.executable, "-m", "the_guard.cli", *argv], env=child_env, check=False)
     maybe_trigger_background_auto_update(active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir, gemini_dir=gemini_dir, env=eff_env, force_local_sync=True)
     return proc.returncode

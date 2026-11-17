@@ -5,9 +5,9 @@ The 12 owners in `.guard/config.json` include both single-file modules and subpa
 
 | Layer | Owners | Permitted layers |
 | --- | --- | --- |
-| foundation | `finding.py`, `git_helpers.py`, `config.py`, `policy.py` | foundation |
+| foundation | `finding.py`, `git_helpers.py`, `config.py`, `policy.py`, `auto_update.py` | foundation |
 | domain | `topology/`, `review/` | foundation, domain |
-| workflow | `distill.py`, `hooks.py`, `init.py`, `auto_update.py` | foundation, domain, workflow |
+| workflow | `distill.py`, `hooks.py`, `init.py` | foundation, domain, workflow |
 | surface | `__init__.py`, `cli.py` | foundation, domain, workflow |
 
 Layer ceilings do not grant dependencies: each module has a minimal explicit allowlist.
@@ -30,8 +30,8 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   `documents` owns review document inventory and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
   `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;
   `engine` composes review and continuation. These modules do not implement product policy semantics.
-- `init`, `distill`, `hooks`, `auto_update` and CLI modules compose those APIs for user workflows.
-- `auto_update` is the sole owner of `guard self-update`, package-tree digest verification, installed uv-tool repair, checkout delegation, global skill symlink repair, and background update cooldown metadata in `~/.guard`. Invocations detect a clean newer `~/the-guard` checkout and delegate immediately while a non-blocking update refreshes the installed CLI; hooks also schedule updates, and snapshot-bound inspection of the guard checkout remains local.
+- `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows.
+- `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update cooldown metadata in `~/.guard`. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD. An installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Package bootstrap redirects submodule imports before loading public exports. Hooks also schedule updates, and snapshot-bound inspection of the guard checkout from its worktree remains local.
 - Review sessions persist a contract digest covering reviewer code, repository configuration, policy rules, root instructions and architecture/boundary document snapshots; a digest change discards incremental continuation and starts a fresh full review.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
