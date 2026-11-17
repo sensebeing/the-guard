@@ -351,6 +351,13 @@ Branch-wide `guard check` and `guard topology check` reject newly missing declar
 and newly stale dependencies while grandfathering untouched legacy declarations. With governance
 enabled, edited production files must have a registered owner, including in the edit hook;
 protected pushes run deterministic checks before review exemptions or receipts.
+Audit also fails on missing module paths. Sync prunes deleted governed modules and their incoming
+dependency edges. Branch checks reject newly nonexistent module declarations and require nonempty
+roles on new modules in established layer/dependency governance. Tightening dependencies or layers
+rechecks affected existing production imports even when those source files are unchanged.
+`guard review` and `guard check-push` run deterministic checks against the committed snapshot before
+invoking a provider or accepting a receipt. Protected pushes use the same snapshot checks without
+temporary worktrees. The edit hook ignores external paths and validates policy/configuration edits.
 Update configuration and authoritative documents together when responsibilities change.
 Review loads root agent instructions, `architecture_docs`, existing `ARCHITECTURE.md` /
 `docs/architecture.md`, the complete module/layer map and touched modules' boundary documents

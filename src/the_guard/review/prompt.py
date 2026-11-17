@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..config import load_config
+from ..config import GuardConfig, iter_forbidden_import_rules, load_config
 from ..policy import Policy, load_policy
 from ..topology.imports import owner_module
 from .contract import (
@@ -107,7 +107,12 @@ def _render_policy_sections(policy: Policy) -> list[str]:
 
 
 def _parse_numstat_entries(
-    repo_root: Path, base_sha: str, head_sha: str, paths: Sequence[str] = ()
+    repo_root: Path,
+    base_sha: str,
+    head_sha: str,
+    paths: Sequence[str] = (),
+    *,
+    config: GuardConfig | None = None,
 ) -> list[tuple[int, int, str, int]]:
     proc = _git(
         repo_root,
@@ -122,7 +127,7 @@ def _parse_numstat_entries(
         raise RuntimeError(
             "git diff --numstat failed: " + proc.stderr.decode(errors="replace")
         )
-    config = load_config(repo_root, revision=head_sha)
+    config = config or load_config(repo_root, revision=head_sha)
     contract_paths = resolved_contract_paths(repo_root, config, head_sha)
     contract_paths.update(
         resolved_contract_paths(
@@ -185,8 +190,11 @@ def _render_scope_manifest_section(
     *,
     title: str,
     paths: Sequence[str] = (),
+    config: GuardConfig | None = None,
 ) -> str:
-    entries = _parse_numstat_entries(repo_root, base_sha, head_sha, paths)
+    entries = _parse_numstat_entries(
+        repo_root, base_sha, head_sha, paths, config=config
+    )
     production = [e for e in entries if e[3] < 2]
     tests = [e for e in entries if e[3] == 2]
     lines = [
@@ -232,6 +240,7 @@ def _render_bounded_diff_section(
     title: str,
     max_chars: int = DEFAULT_INCREMENTAL_DIFF_MAX_CHARS,
     paths: Sequence[str] = (),
+    config: GuardConfig | None = None,
 ) -> str:
     diff = _git(
         repo_root,
@@ -243,7 +252,7 @@ def _render_bounded_diff_section(
     ).stdout.decode("utf-8", errors="replace")
     if len(diff) <= max_chars:
         return f"\n## {title}\n```diff\n" + diff + "\n```"
-    config = load_config(repo_root, revision=head_sha)
+    config = config or load_config(repo_root, revision=head_sha)
     contract_paths = resolved_contract_paths(repo_root, config, head_sha)
     contract_paths.update(
         resolved_contract_paths(
@@ -331,8 +340,10 @@ def _bounded_document(body: str) -> str:
     return body[:24_000] + ("\n... [truncated]" if len(body) > 24_000 else "")
 
 
-def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
-    config = load_config(repo_root, revision=scope.head_sha)
+def _snapshot_context(
+    repo_root: Path, scope: ReviewScope, *, config: GuardConfig | None = None
+) -> list[str]:
+    config = config or load_config(repo_root, revision=scope.head_sha)
     declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
     touched = set()
     for path in scope.reviewable_files:
@@ -514,9 +525,12 @@ def _has_explicit_topology_contract(
                 return False
         return True
 
+    if any(
+        applies(rule, "forbidden_imports")
+        for rule in iter_forbidden_import_rules(topology)
+    ):
+        return True
     for key in (
-        "forbidden_imports",
-        "module_boundaries",
         "exclusive_sql_owners",
         "retired_tables",
         "forbidden_patterns",
@@ -560,11 +574,13 @@ def build_review_prompt(
     incremental_scope: IncrementalReviewScope | None = None,
     reviewer_note: str = "",
     policy: Policy | None = None,
+    config: GuardConfig | None = None,
 ) -> str:
-    policy = policy or load_policy(repo_root, revision=scope.head_sha)
+    config = config or load_config(repo_root, revision=scope.head_sha)
+    policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
     sections = [
         METHODOLOGY,
-        *_snapshot_context(repo_root, scope),
+        *_snapshot_context(repo_root, scope, config=config),
         *_render_policy_sections(policy),
     ]
     if prior_session:
@@ -585,6 +601,7 @@ def build_review_prompt(
                 scope.head_sha,
                 title="Full branch scope",
                 paths=scope.reviewable_files,
+                config=config,
             )
         )
     for sub in scope.submodule_changes:
@@ -608,6 +625,7 @@ def build_incremental_review_prompt(
     *,
     reviewer_note: str = "",
     policy: Policy | None = None,
+    config: GuardConfig | None = None,
 ) -> str:
     if inc_scope is None and not _is_unchanged_rebuttal_round(
         scope, session, reviewer_note
@@ -615,7 +633,8 @@ def build_incremental_review_prompt(
         raise ValueError(
             "Incremental review requires a verified delta or unchanged-HEAD rebuttal"
         )
-    policy = policy or load_policy(repo_root, revision=scope.head_sha)
+    config = config or load_config(repo_root, revision=scope.head_sha)
+    policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
     sections = [
         (
             "Read-only static review: no writes, tests, builds or delegation. Use git show/grep at"
@@ -639,7 +658,7 @@ def build_incremental_review_prompt(
         *_render_prior_findings_section(
             session, scope, inc_scope, reviewer_note=reviewer_note
         ),
-        *_snapshot_context(repo_root, scope),
+        *_snapshot_context(repo_root, scope, config=config),
         *_render_policy_sections(policy),
     ]
     if inc_scope and inc_scope.reviewable_files:
@@ -650,6 +669,7 @@ def build_incremental_review_prompt(
                 inc_scope.target_head_sha,
                 title="Verified incremental scope",
                 paths=inc_scope.reviewable_files,
+                config=config,
             )
         )
     if inc_scope:

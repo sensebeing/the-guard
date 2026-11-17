@@ -51,7 +51,14 @@ Run `guard topology audit --json` to inspect whole-repository debt independently
 ratchets: it reports violations, missing documents, unregistered modules and stale dependencies.
 A clean changed-scope check is not a clean whole-repository audit. `topology sync` preserves
 curated dependencies when layers or enforcement are enabled; never use discovery to bless a
-forbidden import. With both enabled, assign layers to reported new modules before registering them.
+forbidden import. With both enabled, assign layers and nonempty roles to reported new modules before registering them.
+
+Missing module paths fail audit; sync prunes deleted governed owners and incoming edges.
+Branch checks ratchet newly nonexistent module declarations and missing roles in established
+layer/dependency governance. Tightened constraints recheck unchanged sources in affected modules.
+Review CLI and check-push run deterministic checks against the committed snapshot before providers
+or receipts; protected pushes read that snapshot directly without temporary worktrees. Edit guard
+ignores paths outside the repository and validates edited policy/configuration contracts.
 
 ## GitHub PR mode
 

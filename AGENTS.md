@@ -19,6 +19,10 @@ never imports review. Workflow (`init`, `distill`, `hooks`, `auto_update`) compo
 owners. Surface (`cli`, package exports) exposes workflows and is never imported below.
 Every module declares its exact dependencies, role, layer and boundary document.
 Update that map and `src/the_guard/README.md` together when responsibilities change.
+`git_helpers` owns safe file/symlink snapshot reads and changed-line diffs; policy adapts
+reader failures to policy diagnostics. Review CLI and push hooks run deterministic checks
+on the target commit before provider execution or receipt acceptance. Contract drift owns
+missing-module ratchets and rechecks existing sources when module constraints tighten.
 
 ## Engineering Quality Policy
 

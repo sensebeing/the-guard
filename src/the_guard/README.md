@@ -16,11 +16,15 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
 
 
 - `config` validates repository-owned settings; `policy` validates manifest and rule documents.
-- `finding` defines the static diagnostic contract; `git_helpers` reads historical file content.
+- `finding` defines the static diagnostic contract; `git_helpers` owns safe repository/snapshot file and symlink reads and changed-line diffs.
+  `policy` adapts reader failures into policy diagnostics; `review/documents` consumes the same reader.
 - `topology/imports` owns Python/JS/TS import extraction and longest-prefix module resolution;
   `paths` owns production exclusions; `discovery` reports inventory; `configured` enforces declared
-  dependencies and layer ceilings at touched import lines. `runner` composes language checks;
-  `audit` owns shared dependency evidence for full scans and baseline-aware contract drift; `sync` owns the pure inventory merge shared by sync and init without
+  dependencies and layer ceilings at touched import lines, with an import-only API that compares owner-edge permission outcomes for constraint rechecks;
+  diagnostic text never decides baseline grandfathering. `runner` composes language checks;
+  `audit` owns shared dependency evidence for full scans and baseline-aware contract drift,
+  scanning only affected modules and rechecking complete production imports (including changed files
+  and callers affected by target-layer or owner-resolution changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
   granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
 - `review/contract` owns reviewer types and wire schema; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope and patch identity;
   `documents` owns review document inventory and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
@@ -50,9 +54,16 @@ grandfathered; `guard topology audit` reports the full repository debt. Changes 
 responsibilities require synchronized configuration and authoritative boundary docs.
 `guard topology sync` refreshes inventory without granting observed imports permission.
 
-Protected-push checks materialize the exact pushed commit in a temporary detached worktree,
-run the existing deterministic owners there against the remote commit, then remove it. Dirty
-local files cannot alter the verdict. Contract classification includes implicit module README
+Review CLI, check-push and protected-push checks read the exact target Git snapshot directly,
+without creating temporary worktrees. Exact snapshot reads use committed submodule metadata,
+reject unavailable blobs and disable working-tree rename inference for both baseline and target reads; binary assets do not count as import coverage. Dirty local files cannot alter the verdict. Deterministic
+findings block provider execution and receipt acceptance; the Python review engine remains the
+pure independent-review entry point. Loaded configuration, policy and contract digests pass
+directly to review consumers instead of being reloaded by each helper.
+Audit reports all missing module paths. Drift blocks modules deleted since the baseline or newly
+registered at nonexistent paths, while grandfathering baseline debt. Newly registered modules
+require roles once layer/dependency governance is established; sync prunes deleted owners and
+incoming dependency edges. Edit guard ignores external paths and validates edited policy/configuration. Contract classification includes implicit module README
 files and safe symlink targets; changing those documents selects their declaring modules for
 review context. Dependency drift retains baseline language coverage when the final source file
 is deleted, without treating unsupported-language modules as fully observable.

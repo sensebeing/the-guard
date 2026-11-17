@@ -21,7 +21,11 @@ def merge_topology(
     requires_layer = bool(
         topology.get("enforce_module_dependencies") and topology.get("layers")
     )
-    merged = dict(existing) if governed else {}
+    discovered_paths = {m["path"] for m in discovered}
+    pruned = set(existing) - discovered_paths
+    merged = (
+        {p: m for p, m in existing.items() if p in discovered_paths} if governed else {}
+    )
     unregistered = []
     for module in discovered:
         previous = existing.get(module["path"])
@@ -39,7 +43,9 @@ def merge_topology(
                 )
             )
         if governed:
-            entry["dependencies"] = (previous or {}).get("dependencies", [])
+            entry["dependencies"] = [
+                p for p in (previous or {}).get("dependencies", []) if p not in pruned
+            ]
         merged[module["path"]] = entry
     return {**topology, "modules": [merged[key] for key in sorted(merged)]}, sorted(
         unregistered

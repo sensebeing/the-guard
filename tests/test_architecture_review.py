@@ -17,6 +17,7 @@ import tomllib
 import tempfile
 from unittest.mock import patch
 
+from the_guard.review.cli import main as review_main
 from the_guard.review.engine import (
     build_review_prompt,
     collect_review_scope,
@@ -65,6 +66,81 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
+    def test_cli_deterministic_snapshot_gate_precedes_provider_and_receipt(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / ".guard").mkdir(exist_ok=True)
+            (repo / ".guard/config.json").write_text(
+                json.dumps(
+                    {
+                        "topology": {
+                            "forbidden_imports": [
+                                {"from": "src/", "imports": ["forbidden"]}
+                            ]
+                        }
+                    }
+                )
+            )
+            (repo / "src").mkdir(exist_ok=True)
+            (repo / "src/main.py").write_text("import forbidden\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "deterministic violation")
+            (repo / "src/main.py").write_text("value = 1\n")
+            with (
+                patch("the_guard.review.cli.run_architecture_review") as reviewer,
+                patch(
+                    "the_guard.review.cli.resolve_or_carry_forward_receipt"
+                ) as receipt,
+                patch(
+                    "the_guard.review.cli.publish_github_pr_review",
+                    return_value={"status": "published"},
+                ) as publish,
+            ):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(
+                        review_main(
+                            [
+                                "--repo-root",
+                                str(repo),
+                                "--json",
+                                "--github-pr",
+                                "org/repo#1",
+                            ]
+                        ),
+                        2,
+                    )
+                data = json.loads(output.getvalue())
+                self.assertEqual(data["provider"], "static")
+                self.assertEqual(data["mode"], "static")
+                self.assertEqual(data["verdict"], "NO-GO")
+                self.assertIn("forbidden", data["blocking_findings"][0]["issue"])
+                publish.assert_called_once()
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(
+                        review_main(["check-push", "--repo-root", str(repo)]), 2
+                    )
+                self.assertIn("deterministic check failed", errors.getvalue())
+                reviewer.assert_not_called()
+                receipt.assert_not_called()
+
+    def test_engine_reuses_preloaded_review_inputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "main.py").write_text("value = 1\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "reviewable change")
+            scope = collect_review_scope(repo)
+            config = load_config(repo, revision=scope.head_sha)
+            policy = load_policy(repo, revision=scope.head_sha, config=config)
+            with patch("the_guard.review.engine.collect_review_scope", side_effect=AssertionError("scope reloaded")), patch(
+                "the_guard.review.engine.load_config", side_effect=AssertionError("config reloaded")
+            ), patch("the_guard.review.engine.load_policy", side_effect=AssertionError("policy reloaded")):
+                result = run_architecture_review(
+                    repo, scope=scope, config=config, policy=policy, force=True,
+                    reviewer_fn=lambda _: {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []},
+                )
+            self.assertEqual(result.verdict, "GO")
+
     def test_document_inventory_batches_tree_reads_and_skips_file_module_children(self):
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))
@@ -439,9 +515,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             other_source = tmp / "other-codex"
             other_source.mkdir()
             (other_source / "auth.json").write_text("other", encoding="utf-8")
-            other_target = None
             with isolated_codex_home(common_dir, worktree_path=tmp / "other-worktree", branch="main", env={"CODEX_HOME": str(other_source)}) as scoped:
-                other_target = scoped
                 self.assertNotEqual(scoped, target)
                 self.assertEqual((scoped / "auth.json").read_text(encoding="utf-8"), "other")
                 probe_fd = os.open(scoped / ".review.lock", os.O_RDWR)

@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from ..finding import _line_exempts_rule
+
 import ast
 import fnmatch
 import re
 from collections.abc import Sequence
+from typing import Any, Literal
 
-from ..config import GuardConfig
+from ..config import GuardConfig, iter_forbidden_import_rules
 from ..finding import Finding
 from .discovery import candidate_module_for_path
 from .imports import extract_imports, owner_module, resolve_target_module
 from .paths import is_excluded_topology_path
-from .rules import _line_exempts_rule
 
 
 def in_scope(path: str, prefixes: Sequence[str]) -> bool:
@@ -157,10 +159,7 @@ def check_configured(
                 check_unregistered=check_unregistered,
             )
         )
-    for rule in [
-        *topology.get("forbidden_imports", []),
-        *topology.get("module_boundaries", []),
-    ]:
+    for rule in iter_forbidden_import_rules(topology):
         if not in_scope(path, rule.get("scope_prefixes", [rule.get("from", "")])):
             continue
         forbidden = rule.get(
@@ -199,6 +198,29 @@ def _is_range_touched(changed: set[int] | None, start: int, end: int) -> bool:
     return changed is None or bool(changed.intersection(range(start, end + 1)))
 
 
+def check_module_imports(
+    path: str,
+    text: str,
+    changed_lines: set[int] | None,
+    config: GuardConfig,
+    *,
+    check_unregistered: bool = True,
+    baseline_config: GuardConfig | None = None,
+) -> list[Finding]:
+    """Check module permissions without rechecking unrelated configured rules."""
+    if is_excluded_topology_path(path):
+        return []
+    return _check_module_imports(
+        path,
+        extract_imports(path, text, config.module_doc_roots),
+        text.splitlines(),
+        changed_lines,
+        config,
+        check_unregistered=check_unregistered,
+        baseline_config=baseline_config,
+    )
+
+
 def _check_module_imports(
     path: str,
     imports: list[tuple[int, int, str]],
@@ -207,6 +229,7 @@ def _check_module_imports(
     config: GuardConfig,
     *,
     check_unregistered: bool = True,
+    baseline_config: GuardConfig | None = None,
 ) -> list[Finding]:
     topology = config.topology
     modules = {m["path"]: m for m in topology.get("modules", [])}
@@ -237,7 +260,29 @@ def _check_module_imports(
             ]
         return []
     source = modules[source_path]
-    layers = topology.get("layers", {})
+    old_modules = (
+        {m["path"]: m for m in baseline_config.topology.get("modules", [])}
+        if baseline_config is not None
+        else {}
+    )
+    old_paths = list(old_modules)
+    old_source = owner_module(path, old_paths)
+    old_targets = (
+        {
+            (
+                start,
+                end,
+                resolve_target_module(
+                    path, spec, old_paths, baseline_config.module_doc_roots
+                ),
+            )
+            for start, end, spec in extract_imports(
+                path, "\n".join(lines), baseline_config.module_doc_roots
+            )
+        }
+        if baseline_config is not None
+        else set()
+    )
     findings = []
     for start, end, spec in imports:
         target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)
@@ -245,28 +290,48 @@ def _check_module_imports(
         if target_path is None or number is None:
             continue
         target = modules[target_path]
-        source_layer, target_layer = source.get("layer"), target.get("layer")
-        if (
-            layers
-            and source_layer
-            and target_layer
-            and target_layer not in layers[source_layer]
-        ):
+        violation = _module_import_violation(source, target, topology)
+        if violation is None:
+            continue
+        if baseline_config is not None and old_source == source_path:
+            if (start, end, target_path) in old_targets and _module_import_violation(
+                old_modules[old_source],
+                old_modules[target_path],
+                baseline_config.topology,
+            ) is not None:
+                continue
+        if violation == "layer":
             message = (
-                f"Layer '{source_layer}' module '{source_path}' must not import "
-                f"layer '{target_layer}' module '{target_path}'."
+                f"Layer '{source.get('layer')}' module '{source_path}' must not import "
+                f"layer '{target.get('layer')}' module '{target_path}'."
             )
-        elif topology.get(
-            "enforce_module_dependencies"
-        ) and target_path not in source.get("dependencies", []):
+        else:
             message = (
                 f"Module '{source_path}' imports undeclared dependency '{target_path}' "
                 f"(allowed: {source.get('dependencies', [])})."
             )
-        else:
-            continue
         findings.append(Finding(rule_id, path, number, message))
     return findings
+
+
+def _module_import_violation(
+    source: dict[str, Any], target: dict[str, Any], topology: dict[str, Any]
+) -> Literal["layer", "dependency"] | None:
+    """Permission outcome for an owner edge, independent of diagnostic rendering."""
+    layers = topology.get("layers", {})
+    source_layer, target_layer = source.get("layer"), target.get("layer")
+    if (
+        layers
+        and source_layer
+        and target_layer
+        and target_layer not in layers[source_layer]
+    ):
+        return "layer"
+    if topology.get("enforce_module_dependencies") and target["path"] not in source.get(
+        "dependencies", []
+    ):
+        return "dependency"
+    return None
 
 
 def _import_finding_line(

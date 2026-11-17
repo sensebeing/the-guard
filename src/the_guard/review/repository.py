@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
-from ..policy import load_policy
+from ..policy import Policy, load_policy
 from .contract import (
     CODE_EXTENSIONS,
     CONFIG_I18N_EXTENSIONS,
@@ -429,14 +429,18 @@ def collect_review_scope(repo_root: Path, main_branch: str = "main") -> ReviewSc
 
 
 def _collect_branch_delta(
-    repo_root: Path, scope: ReviewScope, session: ReviewSessionState | None
+    repo_root: Path,
+    scope: ReviewScope,
+    session: ReviewSessionState | None,
+    *,
+    config: GuardConfig | None = None,
 ) -> IncrementalReviewScope | None:
     """Compute verified branch delta since `session`, or return None when session continuation is inapplicable.
 
     Raises RuntimeError if git diff commands fail after commit existence is verified (fail-closed).
     Returns an IncrementalReviewScope (which may have `has_changes == False` when zero files/submodules changed).
     """
-    config = load_config(repo_root, revision=scope.head_sha)
+    config = config or load_config(repo_root, revision=scope.head_sha)
     if session is None or not session.last_head_sha:
         return None
     if (
@@ -564,17 +568,27 @@ def _collect_branch_delta(
 
 
 def collect_incremental_scope(
-    repo_root: Path, scope: ReviewScope, session: ReviewSessionState | None
+    repo_root: Path,
+    scope: ReviewScope,
+    session: ReviewSessionState | None,
+    *,
+    config: GuardConfig | None = None,
 ) -> IncrementalReviewScope | None:
     try:
-        delta = _collect_branch_delta(repo_root, scope, session)
+        delta = _collect_branch_delta(repo_root, scope, session, config=config)
     except RuntimeError:
         return None
     return delta if (delta is not None and delta.has_changes) else None
 
 
 def resolve_or_carry_forward_receipt(
-    repo_root: Path, scope: ReviewScope, *, persist: bool = True
+    repo_root: Path,
+    scope: ReviewScope,
+    *,
+    persist: bool = True,
+    config: GuardConfig | None = None,
+    policy: Policy | None = None,
+    contract_digest: str | None = None,
 ) -> dict[str, Any] | None:
     existing = load_valid_receipt(repo_root, scope.patch_digest)
     if (
@@ -591,9 +605,11 @@ def resolve_or_carry_forward_receipt(
         or not session.last_head_sha
     ):
         return None
-    current_policy = load_policy(repo_root, revision=scope.head_sha)
-    current_config = load_config(repo_root, revision=scope.head_sha)
-    current_contract_digest = compute_review_contract_digest(
+    current_config = config or load_config(repo_root, revision=scope.head_sha)
+    current_policy = policy or load_policy(
+        repo_root, revision=scope.head_sha, config=current_config
+    )
+    current_contract_digest = contract_digest or compute_review_contract_digest(
         current_policy, current_config, repo_root=repo_root, revision=scope.head_sha
     )
     if not (
@@ -611,7 +627,7 @@ def resolve_or_carry_forward_receipt(
     ):
         return None
     try:
-        delta = _collect_branch_delta(repo_root, scope, session)
+        delta = _collect_branch_delta(repo_root, scope, session, config=current_config)
     except RuntimeError:
         return None
     if delta is None or delta.reviewable_files or delta.submodule_changes:

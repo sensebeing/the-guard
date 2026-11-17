@@ -9,8 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..config import load_config
-from ..policy import load_policy
+from ..config import GuardConfig, load_config
+from ..policy import Policy, load_policy
+from .contract import ReviewScope
 from .prompt import (
     _sanitize_reviewer_note,
     build_incremental_review_prompt,
@@ -49,6 +50,9 @@ from .session import (
 def run_architecture_review(
     repo_root: Path,
     *,
+    scope: ReviewScope | None = None,
+    config: GuardConfig | None = None,
+    policy: Policy | None = None,
     main_branch: str = "main",
     explicit_provider: str | None = None,
     reprobe: bool = False,
@@ -60,7 +64,11 @@ def run_architecture_review(
     """Run independent architecture review; `reviewer_fn` is a Python-only unit-test seam."""
     eff_env = dict(os.environ if env is None else env)
     eff_note = _sanitize_reviewer_note(reviewer_note)
-    scope = collect_review_scope(repo_root, main_branch=main_branch)
+    scope = (
+        scope
+        if scope is not None
+        else collect_review_scope(repo_root, main_branch=main_branch)
+    )
 
     if scope.is_exempt:
         return ReviewResult(
@@ -74,8 +82,16 @@ def run_architecture_review(
             mode="exempt",
         )
 
-    policy = load_policy(repo_root, revision=scope.head_sha)
-    contract_config = load_config(repo_root, revision=scope.head_sha)
+    contract_config = (
+        config
+        if config is not None
+        else load_config(repo_root, revision=scope.head_sha)
+    )
+    policy = (
+        policy
+        if policy is not None
+        else load_policy(repo_root, revision=scope.head_sha, config=contract_config)
+    )
     current_contract_digest = compute_review_contract_digest(
         policy, contract_config, repo_root=repo_root, revision=scope.head_sha
     )
@@ -89,7 +105,13 @@ def run_architecture_review(
         prior_session = None
 
     if not force and not contract_changed:
-        existing = resolve_or_carry_forward_receipt(repo_root, scope)
+        existing = resolve_or_carry_forward_receipt(
+            repo_root,
+            scope,
+            config=contract_config,
+            policy=policy,
+            contract_digest=current_contract_digest,
+        )
         if existing is not None:
             return ReviewResult(
                 verdict="GO",
@@ -107,7 +129,9 @@ def run_architecture_review(
                 log_path=str(existing.get("log_path") or ""),
             )
 
-    inc_scope = collect_incremental_scope(repo_root, scope, prior_session)
+    inc_scope = collect_incremental_scope(
+        repo_root, scope, prior_session, config=contract_config
+    )
     prev_head_sha = prior_session.last_head_sha if prior_session is not None else None
     full_prompt_cache: str | None = None
 
@@ -121,6 +145,7 @@ def run_architecture_review(
                 incremental_scope=inc_scope,
                 reviewer_note=eff_note,
                 policy=policy,
+                config=contract_config,
             )
         return full_prompt_cache
 
@@ -136,6 +161,7 @@ def run_architecture_review(
             inc_scope,
             reviewer_note=eff_note,
             policy=policy,
+            config=contract_config,
         )
         if can_incremental and prior_session is not None
         else None

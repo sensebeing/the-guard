@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-from ..finding import _line_exempts_rule as _line_exempts_rule
 
 FOR_UPDATE_SQL_RE = re.compile(
     r"\b(?:FOR\s+(?:UPDATE|NO\s+KEY\s+UPDATE)|pg_(?:try_)?advisory_xact_lock|LOCK\s+TABLE)\b",
