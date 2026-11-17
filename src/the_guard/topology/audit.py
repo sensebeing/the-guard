@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import GuardConfig, load_config, repository_path
-from .discovery import LANGUAGES, discover_topology, source_files
+from .discovery import discover_topology, source_files
 from .imports import (
     DETERMINISTIC_IMPORT_EXTENSIONS,
     extract_imports,
@@ -17,6 +17,19 @@ from .imports import (
 from .paths import is_excluded_topology_path
 from .runner import run_topology_guard
 
+INERT_MODULE_FILE_EXTENSIONS = {
+    ".md",
+    ".txt",
+    ".rst",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".lock",
+}
+
 
 def audit_topology(
     root: Path | str, config: GuardConfig | None = None
@@ -25,15 +38,16 @@ def audit_topology(
     config = config or load_config(root)
     modules = {m["path"]: m for m in config.topology.get("modules", [])}
     paths = list(modules)
-    files = sorted(
+    all_text_files = sorted(
         p.relative_to(root).as_posix()
         for p in source_files(root)
-        if not is_excluded_topology_path(p.relative_to(root).as_posix())
-        and b"\x00" not in p.read_bytes()
+        if b"\x00" not in p.read_bytes()
     )
     observed: dict[str, set[str]] = {m: set() for m in modules}
     source_extensions: dict[str, set[str]] = {m: set() for m in modules}
-    for path in files:
+    for path in all_text_files:
+        if is_excluded_topology_path(path):
+            continue
         source = owner_module(path, paths)
         if source is None:
             continue
@@ -67,14 +81,17 @@ def audit_topology(
             for dep in set(m.get("dependencies", []))
             if dep not in observed[m["path"]]
             and source_extensions[m["path"]] & DETERMINISTIC_IMPORT_EXTENSIONS
-            and not source_extensions[m["path"]]
-            & (LANGUAGES.keys() - DETERMINISTIC_IMPORT_EXTENSIONS)
+            and not (
+                source_extensions[m["path"]]
+                - DETERMINISTIC_IMPORT_EXTENSIONS
+                - INERT_MODULE_FILE_EXTENSIONS
+            )
         ),
         key=lambda item: (item["module"], item["unused_dependency"]),
     )
     findings = [
         asdict(f)
-        for f in run_topology_guard(root, files, config=config, full_scan=True)
+        for f in run_topology_guard(root, all_text_files, config=config, full_scan=True)
     ]
     governed = config.topology.get(
         "enforce_module_dependencies"

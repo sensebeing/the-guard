@@ -13,9 +13,50 @@ JS_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 DETERMINISTIC_IMPORT_EXTENSIONS = JS_EXTENSIONS | {".py"}
 _JS_TOKEN = re.compile(
     r"//[^\n]*|/\*[\s\S]*?\*/|"
-    r"'(?:\\[\s\S]|[^'\\])*'|\"(?:\\[\s\S]|[^\"\\])*\"|"
+    r"'(?:\\[\s\S]|[^'\\\r\n])*'|\"(?:\\[\s\S]|[^\"\\\r\n])*\"|"
     r"[A-Za-z_$][\w$]*|\s+|[^\s]"
 )
+
+
+_JS_EXPRESSION_KEYWORDS = {
+    "return",
+    "throw",
+    "case",
+    "typeof",
+    "void",
+    "delete",
+    "in",
+    "instanceof",
+    "new",
+    "yield",
+    "await",
+    "of",
+    "else",
+    "do",
+}
+
+
+def _regex_literal_end(text: str, start: int) -> int | None:
+    """Find a single-line regex delimiter, respecting escapes and character classes."""
+    index, in_class = start + 1, False
+    while index < len(text) and text[index] not in "\r\n":
+        char = text[index]
+        if char == "\\":
+            if index + 1 >= len(text) or text[index + 1] in "\r\n":
+                return None
+            index += 2
+            continue
+        if char == "[":
+            in_class = True
+        elif char == "]":
+            in_class = False
+        elif char == "/" and not in_class:
+            index += 1
+            while index < len(text) and (text[index].isalnum() or text[index] in "_$"):
+                index += 1
+            return index
+        index += 1
+    return None
 
 
 def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
@@ -23,6 +64,7 @@ def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
     # None marks template text; integers count braces in code/interpolations.
     contexts: list[int | None] = [0]
     index, line = 0, 1
+    previous = ""
     while index < len(text):
         if contexts[-1] is None:
             char = text[index]
@@ -31,10 +73,12 @@ def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
                 size = 2
             elif char == "`":
                 contexts.pop()
-                yield "`", line
+                previous = "`"
+                yield previous, line
             elif text.startswith("${", index):
                 contexts.append(0)
-                yield "{", line
+                previous = "{"
+                yield previous, line
                 size = 2
             line += text[index : index + size].count("\n")
             index += size
@@ -43,6 +87,19 @@ def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
         if match is None:
             break
         value = match.group()
+        expression_start = (
+            not previous
+            or previous in {"(", "[", "{", ",", ";", ":", "?", "!", "~"}
+            or previous[-1:] in "=&|+-*<>^%"
+            or previous in _JS_EXPRESSION_KEYWORDS
+        )
+        if value == "/" and expression_start:
+            regex_end = _regex_literal_end(text, index)
+            if regex_end is not None:
+                previous = text[index:regex_end]
+                yield previous, line
+                index = regex_end
+                continue
         start_line = line
         line += value.count("\n")
         index = match.end()
@@ -57,6 +114,7 @@ def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
                 contexts.pop()
             else:
                 contexts[-1] = max(0, contexts[-1] - 1)
+        previous = value
         yield value, start_line
 
 

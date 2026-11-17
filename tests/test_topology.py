@@ -55,6 +55,58 @@ class TopologyTests(unittest.TestCase):
             _compute_changed_lines(base, text) if base is not None else None,
         )
 
+    def test_regex_literals_do_not_hide_imports_or_confuse_division(self):
+        cases = [
+            ('const quote = /"/;', "../host/index.js"),
+            ("const slash = /['\"/]/g;", "../host/index.ts"),
+            ("const ratio = a / b;", "../host/index.ts"),
+            (r"const escaped = /\/[/*]import['\"]/gi;", "../host/index.ts"),
+            ('const broken = /unterminated', "../host/index.ts"),
+            ('const broken = /"unterminated', "../host/index.ts"),
+        ]
+        cfg = GuardConfig(topology={"forbidden_imports": [{"imports": ["../host/"]}]})
+        for declaration, spec in cases:
+            with self.subTest(declaration=declaration):
+                code = declaration + f'\nimport "{spec}";\n'
+                self.assertEqual(extract_imports("packages/core/main.ts", code), [(2, 2, spec)])
+                self.assertEqual(len(check_configured("packages/core/main.ts", code, None, None, cfg)), 1)
+        self.assertEqual(extract_imports("main.ts", 'const value = `${/"/.test(x) ? import("../host/index.ts") : ""}`'), [(1, 1, "../host/index.ts")])
+        for prefix in ("", "return ", "throw ", "case ", "typeof ", "await ", "(", "[", "!", "x =", "x &&"):
+            with self.subTest(prefix=prefix):
+                code = prefix + '/"/;\nimport "../host/index.ts";'
+                self.assertEqual(extract_imports("main.ts", code), [(2, 2, "../host/index.ts")])
+        self.assertEqual(extract_imports("main.ts", "const broken = /unterminated"), [])
+
+    def test_explicit_script_rules_apply_in_both_changed_scope_and_audit(self):
+        self.config({"forbidden_patterns": [{"scope_prefixes": ["scripts/"], "literal_or_regex": "private_state"}]})
+        self.write("scripts/deploy.sh", "echo private_state\n")
+        changed = run_topology_guard(self.root, ["scripts/deploy.sh"])
+        self.assertEqual(len(changed), 1)
+        report = audit_topology(self.root)
+        self.assertEqual([(f["path"], f["line"]) for f in report["findings"]], [("scripts/deploy.sh", 1)])
+        self.assertFalse(report["passed"])
+
+    def test_component_files_prevent_unproven_stale_dependency_findings(self):
+        self.config({"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/ui", "dependencies": ["packages/domain"]},
+            {"path": "packages/domain", "dependencies": []},
+        ]})
+        self.write("packages/ui/helper.ts", "export const helper = 1;")
+        self.write("packages/domain/index.ts", "export const domain = 1;")
+        for extension in ("vue", "svelte", "astro", "graphql", "css"):
+            with self.subTest(extension=extension):
+                component = f"packages/ui/Widget.{extension}"
+                self.write(component, '<script>import "../domain/index.ts";</script>')
+                report = audit_topology(self.root)
+                self.assertEqual(report["stale_dependencies"], [])
+                self.assertTrue(report["passed"])
+                (self.root / component).unlink()
+        self.write("packages/ui/README.md", "UI documentation")
+        self.write("packages/ui/package.json", '{}')
+        report = audit_topology(self.root)
+        self.assertEqual(report["stale_dependencies"], [{"module": "packages/ui", "unused_dependency": "packages/domain"}])
+        self.assertFalse(report["passed"])
+
     def test_aliases_resolve_nested_owners_before_self_edge_filtering(self):
         for root, extension, spec in (
             ("src", "py", "pkg.host"),

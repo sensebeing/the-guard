@@ -338,11 +338,12 @@ package aliases and computed imports are not resolved; use explicit paths for en
 `topology sync` preserves roles and boundary documents, and preserves curated dependencies
 whenever layers or dependency enforcement are configured. With both enabled, newly discovered
 modules are reported as `unregistered_modules` until you assign their layers explicitly.
-`topology audit` scans all production source files, including unchanged legacy code, and reports
+`topology audit` scans repository text files, including unchanged legacy code, and reports
 violations, missing declared boundary documents, unregistered modules and unused declared
 dependencies. Stale-dependency checks apply only to modules with Python/JS/TS production
-source and no other inventoried source languages; unsupported or mixed-language modules are
-not assumed to have zero imports. Violations or missing documents fail the audit; unregistered modules and stale
+source whose remaining files have inert documentation/configuration extensions; unsupported
+component files also prevent assuming zero imports. Production exclusions apply to language
+and module-dependency checks; explicit configured rules still apply to their declared scopes. Violations or missing documents fail the audit; unregistered modules and stale
 dependencies additionally fail governed repositories. Exit codes are 0 (pass) and 2 (fail).
 Review prompts include the complete module/layer map and touched modules' declared boundary
 documents from the reviewed Git snapshot, capped at 24,000 characters per document.
