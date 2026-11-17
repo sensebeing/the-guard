@@ -417,21 +417,15 @@ def check_contract_drift(
         if owner_module(path, list(modules)) in tightened:
             text = read_current(path)
             if text is not None:
-                previous_findings = (
-                    set(
-                        check_module_imports(
-                            path, text, None, baseline, check_unregistered=False
-                        )
-                    )
-                    if baseline is not None
-                    else set()
-                )
                 findings.extend(
-                    finding
-                    for finding in check_module_imports(
-                        path, text, None, config, check_unregistered=False
+                    check_module_imports(
+                        path,
+                        text,
+                        None,
+                        config,
+                        check_unregistered=False,
+                        baseline_config=baseline,
                     )
-                    if finding not in previous_findings
                 )
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []

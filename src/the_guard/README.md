@@ -20,7 +20,8 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   `policy` adapts reader failures into policy diagnostics; `review/documents` consumes the same reader.
 - `topology/imports` owns Python/JS/TS import extraction and longest-prefix module resolution;
   `paths` owns production exclusions; `discovery` reports inventory; `configured` enforces declared
-  dependencies and layer ceilings at touched import lines, with an import-only API for constraint rechecks. `runner` composes language checks;
+  dependencies and layer ceilings at touched import lines, with an import-only API that compares owner-edge permission outcomes for constraint rechecks;
+  diagnostic text never decides baseline grandfathering. `runner` composes language checks;
   `audit` owns shared dependency evidence for full scans and baseline-aware contract drift,
   scanning only affected modules and rechecking complete production imports (including changed files
   and callers affected by target-layer or owner-resolution changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without

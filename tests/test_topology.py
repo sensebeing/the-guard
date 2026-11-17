@@ -442,6 +442,27 @@ class TopologyTests(unittest.TestCase):
             {("packages/a/main.ts", 1), ("packages/a/nested/item.ts", 1)},
         )
 
+    def test_dependency_cleanup_preserves_existing_denied_imports(self):
+        topology = {
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/a", "dependencies": ["packages/c"]},
+                {"path": "packages/b", "dependencies": []},
+                {"path": "packages/c", "dependencies": []},
+            ],
+        }
+        self.config(topology)
+        self.write("packages/a/main.ts", "import '../b/main.js';\n")
+        self.write("packages/b/main.ts", "export const value = 1;\n")
+        self.write("packages/c/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "legacy denied import and unused permission")
+        topology["modules"][0]["dependencies"] = []
+        self.config(topology)
+        self.assertEqual(
+            check_contract_drift(self.root, [".guard/config.json"], base="HEAD"), []
+        )
+
     def test_missing_document_grandfathering_is_per_declaration(self):
         topology = {"architecture_docs": ["docs/legacy-root.md"], "modules": [
             {"path": "packages/a", "boundary_docs": ["docs/legacy-a.md"]},

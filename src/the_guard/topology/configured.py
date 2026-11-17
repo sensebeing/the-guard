@@ -8,6 +8,7 @@ import ast
 import fnmatch
 import re
 from collections.abc import Sequence
+from typing import Any, Literal
 
 from ..config import GuardConfig, iter_forbidden_import_rules
 from ..finding import Finding
@@ -204,6 +205,7 @@ def check_module_imports(
     config: GuardConfig,
     *,
     check_unregistered: bool = True,
+    baseline_config: GuardConfig | None = None,
 ) -> list[Finding]:
     """Check module permissions without rechecking unrelated configured rules."""
     if is_excluded_topology_path(path):
@@ -215,6 +217,7 @@ def check_module_imports(
         changed_lines,
         config,
         check_unregistered=check_unregistered,
+        baseline_config=baseline_config,
     )
 
 
@@ -226,6 +229,7 @@ def _check_module_imports(
     config: GuardConfig,
     *,
     check_unregistered: bool = True,
+    baseline_config: GuardConfig | None = None,
 ) -> list[Finding]:
     topology = config.topology
     modules = {m["path"]: m for m in topology.get("modules", [])}
@@ -256,7 +260,13 @@ def _check_module_imports(
             ]
         return []
     source = modules[source_path]
-    layers = topology.get("layers", {})
+    old_modules = (
+        {m["path"]: m for m in baseline_config.topology.get("modules", [])}
+        if baseline_config is not None
+        else {}
+    )
+    old_paths = list(old_modules)
+    old_source = owner_module(path, old_paths)
     findings = []
     for start, end, spec in imports:
         target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)
@@ -264,28 +274,55 @@ def _check_module_imports(
         if target_path is None or number is None:
             continue
         target = modules[target_path]
-        source_layer, target_layer = source.get("layer"), target.get("layer")
-        if (
-            layers
-            and source_layer
-            and target_layer
-            and target_layer not in layers[source_layer]
-        ):
-            message = (
-                f"Layer '{source_layer}' module '{source_path}' must not import "
-                f"layer '{target_layer}' module '{target_path}'."
+        violation = _module_import_violation(source, target, topology)
+        if violation is None:
+            continue
+        if baseline_config is not None and old_source == source_path:
+            old_target = resolve_target_module(
+                path, spec, old_paths, baseline_config.module_doc_roots
             )
-        elif topology.get(
-            "enforce_module_dependencies"
-        ) and target_path not in source.get("dependencies", []):
+            if (
+                old_target == target_path
+                and _module_import_violation(
+                    old_modules[old_source],
+                    old_modules[old_target],
+                    baseline_config.topology,
+                )
+                is not None
+            ):
+                continue
+        if violation == "layer":
+            message = (
+                f"Layer '{source.get('layer')}' module '{source_path}' must not import "
+                f"layer '{target.get('layer')}' module '{target_path}'."
+            )
+        else:
             message = (
                 f"Module '{source_path}' imports undeclared dependency '{target_path}' "
                 f"(allowed: {source.get('dependencies', [])})."
             )
-        else:
-            continue
         findings.append(Finding(rule_id, path, number, message))
     return findings
+
+
+def _module_import_violation(
+    source: dict[str, Any], target: dict[str, Any], topology: dict[str, Any]
+) -> Literal["layer", "dependency"] | None:
+    """Permission outcome for an owner edge, independent of diagnostic rendering."""
+    layers = topology.get("layers", {})
+    source_layer, target_layer = source.get("layer"), target.get("layer")
+    if (
+        layers
+        and source_layer
+        and target_layer
+        and target_layer not in layers[source_layer]
+    ):
+        return "layer"
+    if topology.get("enforce_module_dependencies") and target["path"] not in source.get(
+        "dependencies", []
+    ):
+        return "dependency"
+    return None
 
 
 def _import_finding_line(
