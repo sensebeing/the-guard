@@ -1,17 +1,28 @@
 """Read paths remain pure and efficient; owner/retirement rules ratchet changed code only."""
 
 import json
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+
 from the_guard.config import GuardConfig, load_config
+from the_guard.topology import (
+    audit_topology,
+    discover_topology,
+    run_topology_guard,
+    sync_topology,
+)
 from the_guard.topology.configured import check_configured
-from the_guard.topology import run_topology_guard, discover_topology
+from the_guard.topology.git import _compute_changed_lines
+from the_guard.topology.imports import (
+    extract_imports,
+    owner_module,
+    resolve_target_module,
+)
 from the_guard.topology.python import _check_python_file
 from the_guard.topology.swift import _check_swift_file
-from the_guard.topology.git import _compute_changed_lines
 
 
 class TopologyTests(unittest.TestCase):
@@ -43,6 +54,152 @@ class TopologyTests(unittest.TestCase):
             base,
             _compute_changed_lines(base, text) if base is not None else None,
         )
+
+    def test_shared_js_extraction_and_discovery(self):
+        code = '''// import "ignored";
+/* export * from "ignored";
+   require("ignored"); */
+const text = "import 'ignored' // not a comment";
+import type {
+  Host,
+} from '../orca-workspace/index.ts';
+export * from "../orca-workspace/index.ts";
+export type { Host } from '../orca-workspace/index.ts';
+const load = import(
+  '../orca-workspace/index.ts'
+);
+const host = require( '../orca-workspace/index.ts' );
+import '../orca-workspace/index.ts';
+'''
+        for extension in ("ts", "tsx", "js", "jsx", "mjs", "cjs"):
+            with self.subTest(extension=extension):
+                path = f"packages/mailbox/main.{extension}"
+                imports = extract_imports(path, code)
+                self.assertEqual([line for line, _ in imports], [5, 8, 9, 10, 13, 14])
+                self.assertEqual({spec for _, spec in imports}, {"../orca-workspace/index.ts"})
+                self.write(path, code)
+        self.write("packages/orca-workspace/index.ts", "export const host = 1;")
+        modules = {m["path"]: m for m in discover_topology(self.root)["modules"]}
+        self.assertEqual(modules["packages/mailbox"]["dependencies"], ["packages/orca-workspace"])
+        self.assertEqual(extract_imports("x.ts", "const p = import('host/' + name); const r = require('host/' + name);"), [])
+        self.write("frontend/main.js", "import '@org/mailbox';")
+        self.write("packages/mailbox/README.md", "import 'frontend';")
+        self.write("packages/mailbox/tests/main.js", "import 'frontend';")
+        discovered = {m["path"]: m for m in discover_topology(self.root)["modules"]}
+        self.assertIn("frontend", discovered)
+        self.assertEqual(discovered["packages/mailbox"]["dependencies"], ["packages/orca-workspace"])
+        cfg = GuardConfig(topology={"forbidden_imports": [{"from": "packages/mailbox/", "to": "../orca-workspace"}]})
+        self.assertEqual([f.line for f in check_configured(path, code, None, None, cfg)], [5, 8, 9, 10, 13, 14])
+
+    def test_module_resolution_ownership_aliases_and_escape(self):
+        paths = ["packages/core", "packages/host", "packages/host/nested", "apps/host"]
+        self.assertEqual(owner_module("packages/host/nested/a.ts", paths), "packages/host/nested")
+        cases = {
+            "../host/nested/a.ts": "packages/host/nested",
+            "./local.ts": None,
+            "../../../packages/host/a.ts": None,
+            "packages/host/a.ts": "packages/host",
+            "packages.host.nested.entry": "packages/host/nested",
+            "host/entry": None,
+            "@org/host/entry": None,
+            "external": None,
+        }
+        for spec, expected in cases.items():
+            with self.subTest(spec=spec):
+                self.assertEqual(resolve_target_module("packages/core/a.ts", spec, paths), expected)
+        self.assertEqual(resolve_target_module("packages/core/a.ts", "@org/host/entry", paths[:3]), "packages/host")
+        self.assertEqual(resolve_target_module("packages/core/a.ts", "host.sub", paths[:3]), "packages/host")
+
+    def test_python_from_and_relative_imports_share_resolution(self):
+        code = "from ..storage import rows\nfrom internal import storage\n"
+        imports = extract_imports("src/api/sub/main.py", code)
+        self.assertIn((1, "api.storage.rows"), imports)
+        self.assertIn((2, "internal.storage"), imports)
+        self.assertIn((2, "internal"), imports)
+        self.assertIn((1, "api.storage.rows"), extract_imports("src/api/sub/main.py", code, ("custom",)))
+        self.write("src/api/main.py", "from ..storage import rows\n")
+        self.write("src/storage/__init__.py", "")
+        modules = {m["path"]: m for m in discover_topology(self.root)["modules"]}
+        self.assertEqual(modules["src/api"]["dependencies"], ["src/storage"])
+
+    def test_layer_and_dependency_enforcement_touched_exemptions_and_tests(self):
+        cfg = GuardConfig(topology={
+            "layers": {"core": [], "plugin": ["core"]},
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/core", "layer": "core", "dependencies": []},
+                {"path": "packages/one", "layer": "plugin", "dependencies": []},
+                {"path": "packages/two", "layer": "plugin", "dependencies": []},
+            ],
+        })
+        for source, target, message in (
+            ("core", "one", "Layer 'core'"),
+            ("one", "two", "Layer 'plugin'"),
+            ("one", "core", "undeclared dependency"),
+        ):
+            code = f"import '../{target}/index.ts';\n"
+            path = f"packages/{source}/index.ts"
+            findings = check_configured(path, code, None, None, cfg)
+            self.assertEqual(len(findings), 1)
+            self.assertIn(message, findings[0].message)
+            self.assertEqual(check_configured(path, code, code, set(), cfg), [])
+            exempt = code.rstrip() + " // guard-exempt guard.service-boundaries: approved boundary fixture\n"
+            self.assertEqual(check_configured(path, exempt, None, None, cfg), [])
+        code = "import '../../two/index.ts';\n"
+        self.assertEqual(check_configured("packages/one/tests/main.ts", code, None, None, cfg), [])
+        cfg.topology["modules"][1]["dependencies"] = ["packages/core"]
+        self.assertEqual(check_configured("packages/one/index.ts", "import '../core/index.ts'", None, None, cfg), [])
+
+    def test_sync_preserves_curated_contract_and_defers_unlayered_modules(self):
+        self.config({
+            "enforce_module_dependencies": True,
+            "layers": {"core": [], "plugin": ["core"]},
+            "modules": [{"path": "packages/core", "layer": "core", "role": "shared state",
+                         "dependencies": [], "boundary_docs": ["docs/architecture.md"]}],
+        })
+        self.write("packages/core/index.ts", "import '../host/index.ts';")
+        self.write("packages/core/README.md", "boundary")
+        self.write("packages/host/index.ts", "export const x = 1;")
+        result = sync_topology(self.root)
+        self.assertEqual(result["unregistered_modules"], ["packages/host"])
+        module = load_config(self.root).topology["modules"][0]
+        self.assertEqual(module, {"path": "packages/core", "layer": "core", "role": "shared state",
+                                 "dependencies": [], "boundary_docs": ["docs/architecture.md", "packages/core/README.md"],
+                                 "languages": ["TypeScript"]})
+        self.assertEqual(sync_topology(self.root), result)
+        self.config({"modules": [module]})
+        result = sync_topology(self.root)
+        self.assertEqual(result["modules"][0]["dependencies"], ["packages/host"])
+        self.assertEqual(result["modules"][0]["role"], "shared state")
+        self.assertIn("docs/architecture.md", result["modules"][0]["boundary_docs"])
+
+    def test_audit_legacy_scope_missing_stale_and_unregistered(self):
+        self.config({
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/core", "dependencies": ["packages/unused"], "boundary_docs": ["docs/missing.md"]},
+                {"path": "packages/host", "dependencies": []},
+                {"path": "packages/unused", "dependencies": []},
+            ],
+        })
+        self.write("packages/core/index.ts", "import '../host/index.ts';\n")
+        self.write("packages/core/tests/test.ts", "import '../../unused/index.ts';\n")
+        for name in ("host", "unused", "new"):
+            self.write(f"packages/{name}/index.ts", "export const x = 1;")
+        self.git("add", ".")
+        self.git("commit", "-m", "legacy violation")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertEqual(run_topology_guard(self.root, ["packages/core/index.ts"]), [])
+        report = audit_topology(self.root)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["unregistered_modules"], ["packages/new"])
+        self.assertEqual(report["missing_boundary_docs"], [{"module": "packages/core", "doc": "docs/missing.md"}])
+        self.assertEqual(report["stale_dependencies"], [{"module": "packages/core", "unused_dependency": "packages/unused"}])
+        self.assertEqual(len(report["findings"]), 1)
+        self.assertIn("undeclared dependency", report["findings"][0]["message"])
+        self.assertEqual(len(run_topology_guard(self.root, ["packages/core/index.ts"], base="HEAD", full_scan=True)), 1)
+        self.config({"modules": [{"path": "packages/core", "dependencies": ["packages/unused"]}]})
+        self.assertTrue(audit_topology(self.root)["passed"])
 
     def test_read_locks_and_mutation_helpers(self):
         for sql in (

@@ -17,8 +17,9 @@ file sizes or implementation-symbol inventories.
 
 Run `guard topology sync` to install the factual module inventory. Confirm resource ownership before
 adding `exclusive_sql_owners`; identify the replacing owner and current migration boundary before
-adding `retired_tables`. Declare `forbidden_imports` or `module_boundaries` only for demonstrated
-layer boundaries. Use narrow `forbidden_patterns` for concrete disallowed dependencies; prefer a
+adding `retired_tables`. Declare module `role`, `layer`, `boundary_docs`, and allowed `dependencies`. Use
+`topology.layers` for directional layer ceilings and `enforce_module_dependencies: true` for
+module allowlists; use `forbidden_imports` or `module_boundaries` for additional explicit constraints. Use narrow `forbidden_patterns` for concrete disallowed dependencies; prefer a
 single owner contract over growing generic blacklists. Preserve existing declared constraints when
 refreshing discovered modules.
 
@@ -26,3 +27,11 @@ Validate `guard check --policy-only`, then run topology against a real base revi
 on untouched lines are grandfathered; new or changed violations are not. For a proposed new rule,
 inspect both a violating and a legitimate example before marking it blocking. Report unresolved
 owner ambiguity and ask for that decision rather than fabricating a topology.
+
+Sync preserves curated dependencies when layers or dependency enforcement are configured. With
+both enabled, it reports new modules without layers instead of adding invalid declarations.
+Run `guard topology audit --json` for whole-repository findings, missing boundary documents,
+unregistered modules and stale dependencies. Audit intentionally includes untouched legacy code;
+violations and missing documents fail, and governed repositories also fail for unregistered modules
+or stale dependencies. Validate Python and JS/TS imports, including relative cross-package paths,
+and keep core/domain roles independent of concrete hosts, plugins and adapters in review.

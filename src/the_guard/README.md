@@ -2,7 +2,11 @@
 
 - `config` validates repository-owned settings; `policy` validates manifest and rule documents.
 - `finding` defines the static diagnostic contract; `git_helpers` reads historical file content.
-- `topology` owns language analysis, declared dependency constraints and module discovery.
+- `topology/imports` owns Python/JS/TS import extraction and longest-prefix module resolution;
+  `paths` owns production exclusions; `discovery` reports inventory; `configured` enforces declared
+  dependencies and layer ceilings at touched import lines. `runner` composes language checks;
+  `audit` requests full-scan checks and reports contract drift; `sync` refreshes inventory without
+  granting observed imports permission. `config` rejects invalid layer edges before these run.
 - `review/contract` owns reviewer types and wire schema; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope and patch identity;
   `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
   `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;
@@ -14,3 +18,7 @@
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
 Discovery reports observed structure; it never grants ownership or changes declared constraints.
 Review reads committed snapshots. Only the local workflow writes receipts, logs and configuration.
+
+Review prompts retain the complete module/layer map and load declared boundary documents for
+touched modules from the reviewed snapshot (24,000 characters per document). Legacy adapter
+coupling never authorizes introducing or deepening a declared core boundary violation.

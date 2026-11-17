@@ -909,6 +909,46 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 {"reviewed_head_sha": previous, "summary": expected}, expected
             )
 
+    def test_prompt_keeps_full_topology_and_snapshot_declared_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/b").mkdir(parents=True)
+            (repo / "docs/architecture.md").write_text("SNAPSHOT ARCHITECTURE\n" + "x" * 25_000)
+            (repo / "services/a/README.md").write_text("A OWNER")
+            (repo / "services/b/README.md").write_text("B OWNER")
+            config = {"topology": {"layers": {"core": [], "plugin": ["core"]}, "modules": [
+                {"path": "services/a", "layer": "plugin", "role": "adapter", "dependencies": ["services/b"],
+                 "boundary_docs": ["docs/architecture.md", "services/a/README.md", "docs/architecture.md", "AGENTS.md"]},
+                {"path": "services/b", "layer": "core", "role": "domain owner", "dependencies": [],
+                 "boundary_docs": ["docs/architecture.md"]},
+            ]}}
+            (repo / ".guard").mkdir(exist_ok=True)
+            (repo / ".guard/config.json").write_text(json.dumps(config))
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "topology contract")
+            baseline = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", baseline)
+            (repo / "services/a/main.py").write_text("value = 1\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "touch adapter only")
+            scope = collect_review_scope(repo)
+            (repo / "docs/architecture.md").write_text("DIRTY ARCHITECTURE")
+            (repo / ".guard/config.json").write_text("invalid JSON")
+            prompt = build_review_prompt(repo, scope)
+            self.assertIn('"role": "domain owner"', prompt)
+            self.assertIn('"layers":', prompt)
+            self.assertIn("SNAPSHOT ARCHITECTURE", prompt)
+            self.assertNotIn("DIRTY ARCHITECTURE", prompt)
+            self.assertEqual(prompt.count("## Boundary reference: docs/architecture.md"), 1)
+            self.assertEqual(prompt.count("## Boundary reference: AGENTS.md"), 1)
+            self.assertEqual(prompt.count("## Boundary reference: services/a/README.md"), 1)
+            self.assertNotIn("## Boundary reference: services/b/README.md", prompt)
+            self.assertIn("... [truncated]", prompt)
+            self.assertNotIn("x" * 24_001, prompt)
+            self.assertIn("## Architectural & Layer Boundary Integrity", prompt)
+            self.assertNotIn("## Unbound Module Topology Guidance", prompt)
+
     def test_build_review_prompt_guides_unbound_topology_only_without_contract(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))

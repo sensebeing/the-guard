@@ -50,6 +50,17 @@ Have the user review genuinely new domain constraints before making them blockin
 covers routine setup choices. Record the chosen rules and module boundaries in the target repository's
 agent instructions so future agents read them before coding.
 
+## Declare and audit module boundaries
+
+After discovery, confirm module `role`, `boundary_docs`, allowed `dependencies`, and `layer`.
+Use `topology.layers` to list allowed target layers (for example core: none, plugin: core),
+and `enforce_module_dependencies: true` to enforce the module allowlist. With both enabled,
+every module needs a layer; sync reports new unregistered modules instead of inventing one.
+Layer-violating declared dependencies fail configuration loading. Discovery is evidence,
+not permission to import. Run `guard topology audit --repo-root . --json` to inspect existing
+violations, missing documents, unregistered modules and unused declared dependencies; record
+legacy debt explicitly instead of treating changed-scope success as whole-repository compliance.
+
 ## Wire the integration boundary
 
 `review.integration_mode` in `.guard/config.json` selects how reviewed changes reach `main`:

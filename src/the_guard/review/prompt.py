@@ -57,6 +57,15 @@ into old fields, moving two state machines into one file, or copying predicates 
 not remove complexity. Compare implementation with the authorized design; disclaimers
 must not silently narrow accepted migration, schema, or traffic-switch obligations.
 
+## Architectural & Layer Boundary Integrity
+Verify changes against declared topology.layers, module role/dependencies, and loaded
+boundary_docs. Core, foundation, and domain modules must stay independent of concrete
+plugins, host CLIs, UI surfaces, and project-specific adapters. Block under
+guard.service-boundaries when a diff introduces or deepens upward or adapter-specific
+coupling inside a core module, such as host/plugin enums, CLI flags, concrete plugin
+names, or adapter state fields in a core store or scheduler, even when legacy coupling
+already exists nearby. Ground the boundary in the repository's declared owner contracts.
+
 ## High-Signal Blocking Only
 Block concrete violations of configured rules or owner contracts with precise code evidence.
 Do not block style preferences, hypothetical defenses, or already-correct implementations.
@@ -295,26 +304,33 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
         if any(p.startswith(module["path"] + "/") for p in scope.reviewable_files):
             touched.add(module["path"])
     rendered_topology = dict(config.topology)
-    if "modules" in rendered_topology:
-        rendered_topology["modules"] = [
-            m for m in rendered_topology["modules"] if m.get("path") in touched
-        ]
     sections = [
         f"Project: {config.review.get('project_title', repo_root.name)}",
         "## Declared topology",
         json.dumps(rendered_topology, indent=2),
     ]
     loaded_boundary_modules: set[str] = set()
+    loaded_docs: set[str] = set()
+    declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
     for module in sorted(touched):
-        for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
-            path = module + "/" + name
+        paths = list(
+            dict.fromkeys([
+                *declared_modules.get(module, {}).get("boundary_docs", []),
+                *(module + "/" + name for name in ("AGENTS.md", "CLAUDE.md", "README.md")),
+            ])
+        )
+        for path in paths:
+            if path in loaded_docs:
+                loaded_boundary_modules.add(module)
+                continue
             proc = _git(repo_root, "show", f"{scope.head_sha}:{path}", check=False)
             if proc.returncode == 0:
                 loaded_boundary_modules.add(module)
-                sections.append(
-                    f"## Boundary reference: {path}\n"
-                    + proc.stdout.decode("utf-8", errors="replace")
-                )
+                loaded_docs.add(path)
+                body = proc.stdout.decode("utf-8", errors="replace")
+                if len(body) > 24_000:
+                    body = body[:24_000] + "\n... [truncated]"
+                sections.append(f"## Boundary reference: {path}\n" + body)
     unbound_guidance_needed = (
         (
             not touched

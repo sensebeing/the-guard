@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 DEFAULT_MANIFEST_TAG = "the-guard-policy"
@@ -130,6 +130,19 @@ def _validate_sections(data: dict[str, Any]) -> None:
     if "project_title" in review and not isinstance(review["project_title"], str):
         raise ValueError("review.project_title must be a string")
     topology = data.get("topology", {})
+    if "enforce_module_dependencies" in topology and not isinstance(
+        topology["enforce_module_dependencies"], bool
+    ):
+        raise ValueError("topology.enforce_module_dependencies must be a bool")
+    layers = topology.get("layers", {})
+    if not isinstance(layers, dict) or any(
+        not isinstance(k, str) or not k.strip() for k in layers
+    ):
+        raise ValueError("topology.layers must be an object with nonempty layer names")
+    for layer, targets in layers.items():
+        _string_list(targets, f"topology.layers.{layer}")
+        if any(target not in layers for target in targets):
+            raise ValueError(f"topology.layers.{layer} references an unknown layer")
     for key in ("python_prod_prefixes", "swift_prod_prefixes"):
         if key in topology:
             _string_list(topology[key], "topology." + key)
@@ -181,5 +194,57 @@ def _validate_sections(data: dict[str, Any]) -> None:
                 if "from" in rule and not isinstance(rule["from"], str):
                     raise ValueError(f"{key}.from must be a string")
             elif key == "modules":
-                if not isinstance(rule.get("path"), str) or not rule["path"]:
-                    raise ValueError("Each module requires a nonempty path")
+                _validate_module(rule, topology)
+    modules = topology.get("modules", [])
+    by_path = {module["path"]: module for module in modules}
+    if len(by_path) != len(modules):
+        raise ValueError("topology.modules paths must be unique")
+    if topology.get("enforce_module_dependencies") or layers:
+        for module in modules:
+            for dependency in module.get("dependencies", []):
+                if dependency not in by_path or dependency == module["path"]:
+                    raise ValueError(
+                        f"Module '{module['path']}' has unknown or self dependency '{dependency}'"
+                    )
+                source_layer = module.get("layer")
+                target_layer = by_path[dependency].get("layer")
+                if (
+                    layers
+                    and source_layer
+                    and target_layer
+                    and target_layer not in layers[source_layer]
+                ):
+                    raise ValueError(
+                        f"Layer '{source_layer}' must not depend on layer '{target_layer}' ({module['path']} -> {dependency})"
+                    )
+
+
+def _safe_relative_path(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and not PurePosixPath(value).is_absolute()
+        and not PureWindowsPath(value).drive
+        and "\\" not in value
+        and not any(part in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
+def _validate_module(module: dict[str, Any], topology: dict[str, Any]) -> None:
+    if not _safe_relative_path(module.get("path")):
+        raise ValueError("Each module requires a normalized repository-relative path")
+    for key in ("languages", "boundary_docs", "dependencies"):
+        if key in module:
+            _string_list(module[key], "modules." + key)
+    if any(not _safe_relative_path(doc) for doc in module.get("boundary_docs", [])):
+        raise ValueError("Module boundary_docs must be safe repository-relative paths")
+    for key in ("layer", "role"):
+        if key in module and (
+            not isinstance(module[key], str) or not module[key].strip()
+        ):
+            raise ValueError(f"modules.{key} must be a nonempty string")
+    layers = topology.get("layers", {})
+    if layers and "layer" in module and module["layer"] not in layers:
+        raise ValueError(f"Unknown module layer: {module['layer']}")
+    if layers and topology.get("enforce_module_dependencies") and "layer" not in module:
+        raise ValueError(f"Module '{module['path']}' requires a layer")

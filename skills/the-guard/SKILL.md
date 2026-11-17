@@ -36,6 +36,17 @@ repository configuration, or policy rules change.
    receipt establishes review readiness, not permission to merge, push, or publish; follow the
    user's authorization and repository integration process.
 
+## Continuous boundary governance
+
+Read the full module/layer map and each touched module's `role`, `dependencies` and
+`boundary_docs`. Do not deepen host/plugin/adapter coupling in core modules merely because
+legacy coupling exists. Review loads declared documents from the committed snapshot.
+Run `guard topology audit --json` to inspect whole-repository debt independently of changed-line
+ratchets: it reports violations, missing documents, unregistered modules and stale dependencies.
+A clean changed-scope check is not a clean whole-repository audit. `topology sync` preserves
+curated dependencies when layers or enforcement are enabled; never use discovery to bless a
+forbidden import. With both enabled, assign layers to reported new modules before registering them.
+
 ## GitHub PR mode
 
 When `.guard/config.json` sets `review.integration_mode` to `github-pr`, the main branch is
