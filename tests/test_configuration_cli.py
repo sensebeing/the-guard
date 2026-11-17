@@ -15,6 +15,7 @@ from benchmarks import guardbench
 from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
 from the_guard.cli import main, changed_files
 from the_guard.config import GuardConfig, load_config
+from the_guard.git_helpers import read_repository_file
 from the_guard.hooks import edit_guard, install_hooks, main_push_gate
 from the_guard.init import initialize
 from the_guard.policy import load_policy, PolicyError
@@ -58,6 +59,48 @@ class ConfigurationTests(unittest.TestCase):
     def commit(self):
         self.git("add", ".")
         self.git("commit", "-m", "change")
+
+    def test_shared_repository_reader_preserves_policy_errors(self):
+        (self.root / "escape.md").symlink_to("/tmp/outside-guard-file")
+        (self.root / "cycle.md").symlink_to("cycle.md")
+        (self.root / "invalid.md").write_bytes(b"\xff")
+        self.commit()
+        for revision in (None, "HEAD"):
+            for path in ("escape.md", "cycle.md", "invalid.md", "missing.md", "../unsafe.md"):
+                with self.subTest(revision=revision, path=path):
+                    with self.assertRaises(ValueError) as reader_error:
+                        read_repository_file(self.root, path, revision=revision)
+                    with self.assertRaises(PolicyError) as policy_error:
+                        load_policy(self.root, revision=revision, config=GuardConfig(manifest_file=path))
+                    self.assertEqual(str(reader_error.exception), str(policy_error.exception))
+
+    def test_edit_guard_external_paths_and_invalid_contract_edits(self):
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(
+                edit_guard(self.root, json.dumps({"path": "/tmp/outside-guard-file"})),
+                0,
+            )
+        self.assertEqual(errors.getvalue(), "")
+        self.write(".guard/config.json", "{invalid")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                edit_guard(self.root, json.dumps({"path": ".guard/config.json"})), 2
+            )
+        self.git("restore", ".guard/config.json")
+        self.write("AGENTS.md", "broken policy manifest\n")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                edit_guard(self.root, json.dumps({"path": "AGENTS.md"})), 2
+            )
+        self.git("restore", "AGENTS.md")
+        config = json.loads((self.root / ".guard/config.json").read_text())
+        config.setdefault("topology", {})["architecture_docs"] = ["docs/missing.md"]
+        self.write(".guard/config.json", json.dumps(config))
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(
+                edit_guard(self.root, json.dumps({"path": ".guard/config.json"})), 2
+            )
+        self.assertIn("missing.md", errors.getvalue())
 
     def test_architecture_docs_validate_repository_relative_paths(self):
         for docs in ("docs/a.md", ["../a.md"], ["/a.md"], ["C:\\a.md"], [12]):
@@ -109,8 +152,14 @@ class ConfigurationTests(unittest.TestCase):
         self.commit()
         head = self.git("rev-parse", "HEAD")
         self.write("docs/blueprint.md", "Uncommitted restoration\n")
-        with contextlib.redirect_stderr(io.StringIO()) as errors:
+        with (
+            patch("the_guard.hooks.subprocess.run", wraps=subprocess.run) as calls,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
             self.assertEqual(main_push_gate(self.root, f"refs/heads/topic {head} refs/heads/main {base}\n"), 2)
+        self.assertFalse(
+            any("worktree" in call.args[0] for call in calls.call_args_list)
+        )
         self.assertIn("docs/blueprint.md", errors.getvalue())
         self.git("reset", "--hard", base)
         self.write("notes.txt", "Harmless committed documentation\n")
@@ -454,6 +503,7 @@ class ConfigurationTests(unittest.TestCase):
         self.git("rm", "AGENTS.md")
         self.write("new.py", "value = 1\n")
         self.assertEqual(changed_files(self.root, "HEAD"), ["new.py"])
+        self.assertEqual(changed_files(self.root, "HEAD", head="HEAD"), [])
 
     def test_guardbench_deterministic_suite_matches_expected_rules(self):
         bench_root = self.root / "guardbench"

@@ -12,8 +12,10 @@ from dataclasses import asdict
 from .github import publish_github_pr_review
 
 from ..config import load_config
-from ..policy import PolicyError
-from .contract import PROVIDERS, validate_review_output
+from ..policy import PolicyError, load_policy
+from ..topology import run_topology_guard, check_contract_drift
+from .contract import PROVIDERS, BlockingFinding, validate_review_output
+from .session import ReviewResult
 from .engine import run_architecture_review
 from .provider import probe_environment, resolve_provider_order
 from .repository import collect_review_scope, resolve_or_carry_forward_receipt
@@ -104,14 +106,54 @@ def main(argv: list[str] | None = None) -> int:
                 _, result = resolve_provider_order(root)
             print(json.dumps(result, indent=2))
             return 0 if result.get("preferred_provider") else 3
+        if (
+            args.command == "check-push"
+            and os.environ.get("THE_GUARD_REVIEW_ACTIVE") == "1"
+        ):
+            return 0
+        scope = collect_review_scope(root, main_branch=main_branch)
+        snapshot_config = load_config(root, revision=scope.head_sha)
+        snapshot_policy = load_policy(
+            root, revision=scope.head_sha, config=snapshot_config
+        )
+        static_findings = [
+            *run_topology_guard(
+                root,
+                list(scope.changed_files),
+                base=scope.merge_base,
+                config=snapshot_config,
+                revision=scope.head_sha,
+            ),
+            *check_contract_drift(
+                root,
+                list(scope.changed_files),
+                base=scope.merge_base,
+                config=snapshot_config,
+                revision=scope.head_sha,
+            ),
+        ]
         if args.command == "check-push":
-            if os.environ.get("THE_GUARD_REVIEW_ACTIVE") == "1":
-                return 0
-            scope = collect_review_scope(root, main_branch=main_branch)
+            if static_findings:
+                for finding in static_findings:
+                    print(
+                        f"{finding.path}:{finding.line}: {finding.rule_id}: {finding.message}",
+                        file=sys.stderr,
+                    )
+                print(
+                    "## Architecture Review Gate: NO-GO (deterministic check failed)",
+                    file=sys.stderr,
+                )
+                return 2
             if scope.is_exempt:
                 print(f"EXEMPT (digest={scope.patch_digest[:12]})")
                 return 0
-            receipt = resolve_or_carry_forward_receipt(root, scope, persist=False)
+            receipt = resolve_or_carry_forward_receipt(
+                root,
+                scope,
+                persist=False,
+                config=snapshot_config,
+                policy=snapshot_policy,
+            )
             if receipt is not None:
                 print(
                     f"VERIFIED (provider={receipt.get('provider', 'unknown')}, digest={scope.patch_digest[:12]})"
@@ -123,14 +165,36 @@ def main(argv: list[str] | None = None) -> int:
                 "with --note, then retry the push.\n"
             )
             return 2
-        result = run_architecture_review(
-            root,
-            main_branch=main_branch,
-            explicit_provider=args.provider,
-            reprobe=args.reprobe,
-            force=args.force,
-            reviewer_note=args.note,
-        )
+        if static_findings:
+            result = ReviewResult(
+                verdict="NO-GO",
+                summary="Deterministic check failed.",
+                blocking_findings=tuple(
+                    BlockingFinding(
+                        rule_id=f.rule_id,
+                        file=f.path,
+                        line=f.line,
+                        issue=f.message,
+                        required_fix="Resolve deterministic policy/topology/contract-drift violation before independent review.",
+                        finding_origin="initial_full_scope",
+                    )
+                    for f in static_findings
+                ),
+                provider="static",
+                mode="static",
+                patch_digest=scope.patch_digest,
+                head_sha=scope.head_sha,
+                merge_base=scope.merge_base,
+            )
+        else:
+            result = run_architecture_review(
+                root,
+                main_branch=main_branch,
+                explicit_provider=args.provider,
+                reprobe=args.reprobe,
+                force=args.force,
+                reviewer_note=args.note,
+            )
         gh_receipt = None
         if args.github_pr:
             gh_receipt = publish_github_pr_review(args.github_pr, verdict=result.verdict, summary=result.summary, findings=result.blocking_findings, commit_id=getattr(result, "reviewed_head_sha", None) or getattr(result, "head_sha", None), dry_run=args.github_dry_run)

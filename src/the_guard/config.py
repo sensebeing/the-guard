@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -259,3 +260,9 @@ def _validate_module(module: dict[str, Any], topology: dict[str, Any]) -> None:
         raise ValueError(f"Unknown module layer: {module['layer']}")
     if layers and topology.get("enforce_module_dependencies") and "layer" not in module:
         raise ValueError(f"Module '{module['path']}' requires a layer")
+
+
+def iter_forbidden_import_rules(topology: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Iterate both supported declarations without mutating repository configuration."""
+    yield from topology.get("forbidden_imports", [])
+    yield from topology.get("module_boundaries", [])

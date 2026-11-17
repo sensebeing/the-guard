@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..finding import _line_exempts_rule
+
 import ast
 from typing import Iterable, Sequence
 
@@ -18,7 +20,6 @@ from .rules import (
     READ_FUNCTION_PREFIXES,
     RETRY_LOOP_VAR_NAMES,
     WRITE_CALL_MARKERS,
-    _line_exempts_rule,
 )
 
 

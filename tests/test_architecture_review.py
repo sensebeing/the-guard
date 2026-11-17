@@ -17,6 +17,7 @@ import tomllib
 import tempfile
 from unittest.mock import patch
 
+from the_guard.review.cli import main as review_main
 from the_guard.review.engine import (
     build_review_prompt,
     collect_review_scope,
@@ -65,6 +66,63 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
+    def test_cli_deterministic_snapshot_gate_precedes_provider_and_receipt(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / ".guard").mkdir(exist_ok=True)
+            (repo / ".guard/config.json").write_text(
+                json.dumps(
+                    {
+                        "topology": {
+                            "forbidden_imports": [
+                                {"from": "src/", "imports": ["forbidden"]}
+                            ]
+                        }
+                    }
+                )
+            )
+            (repo / "src").mkdir(exist_ok=True)
+            (repo / "src/main.py").write_text("import forbidden\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "deterministic violation")
+            (repo / "src/main.py").write_text("value = 1\n")
+            with (
+                patch("the_guard.review.cli.run_architecture_review") as reviewer,
+                patch(
+                    "the_guard.review.cli.resolve_or_carry_forward_receipt"
+                ) as receipt,
+                patch(
+                    "the_guard.review.cli.publish_github_pr_review",
+                    return_value={"status": "published"},
+                ) as publish,
+            ):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(
+                        review_main(
+                            [
+                                "--repo-root",
+                                str(repo),
+                                "--json",
+                                "--github-pr",
+                                "org/repo#1",
+                            ]
+                        ),
+                        2,
+                    )
+                data = json.loads(output.getvalue())
+                self.assertEqual(data["provider"], "static")
+                self.assertEqual(data["mode"], "static")
+                self.assertEqual(data["verdict"], "NO-GO")
+                self.assertIn("forbidden", data["blocking_findings"][0]["issue"])
+                publish.assert_called_once()
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(
+                        review_main(["check-push", "--repo-root", str(repo)]), 2
+                    )
+                self.assertIn("deterministic check failed", errors.getvalue())
+                reviewer.assert_not_called()
+                receipt.assert_not_called()
+
     def test_document_inventory_batches_tree_reads_and_skips_file_module_children(self):
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))

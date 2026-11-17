@@ -10,6 +10,7 @@ from typing import Any
 from ..finding import Finding
 from ..git_helpers import BaseFileReader, git_ok, git_stdout, submodule_paths
 from ..config import GuardConfig, load_config, repository_path
+from .configured import check_configured
 from .discovery import discover_topology, source_files
 from .imports import (
     DETERMINISTIC_IMPORT_EXTENSIONS,
@@ -54,6 +55,9 @@ def audit_topology(
         if m["path"] not in modules
     )
     missing = _missing_docs(root, config)
+    missing_modules = sorted(
+        p for p in modules if not repository_path(root, p).exists()
+    )
     findings = [
         asdict(f)
         for f in run_topology_guard(root, all_text_files, config=config, full_scan=True)
@@ -64,9 +68,15 @@ def audit_topology(
     return {
         "unregistered_modules": unregistered,
         "missing_boundary_docs": missing,
+        "missing_modules": missing_modules,
         "stale_dependencies": stale,
         "findings": findings,
-        "passed": not (findings or missing or (governed and (unregistered or stale))),
+        "passed": not (
+            findings
+            or missing
+            or missing_modules
+            or (governed and (unregistered or stale))
+        ),
     }
 
 
@@ -121,18 +131,86 @@ def _dependency_evidence(
     return observed, stale
 
 
-def _missing_docs(root: Path, config: GuardConfig) -> list[dict[str, str]]:
+def _missing_docs(
+    root: Path, config: GuardConfig, *, revision: str | None = None
+) -> list[dict[str, str]]:
     declarations = [("<root>", config.topology.get("architecture_docs", []))]
     declarations.extend(
         (m["path"], m.get("boundary_docs", []))
         for m in config.topology.get("modules", [])
     )
+    existing = None
+    if revision is not None:
+        paths = {doc for _, docs in declarations for doc in docs}
+        existing = _snapshot_paths(root, revision, paths, files_only=True)
     return [
         {"module": module, "doc": doc}
         for module, docs in sorted(declarations)
         for doc in sorted(set(docs))
-        if not repository_path(root, doc).is_file()
+        if (
+            doc not in existing
+            if existing is not None
+            else not repository_path(root, doc).is_file()
+        )
     ]
+
+
+def _snapshot_paths(
+    root: Path,
+    revision: str,
+    paths: set[str],
+    *,
+    recursive: bool = False,
+    files_only: bool = False,
+) -> set[str]:
+    """Read only requested snapshot trees, once; never consult the working tree."""
+    if not paths:
+        return set()
+    output = git_stdout(
+        root,
+        [
+            "git",
+            "ls-tree",
+            *(["-r"] if recursive else []),
+            "-z",
+            revision,
+            "--",
+            *[f":(literal){p}" for p in sorted(paths)],
+        ],
+    )
+    if output is None:
+        raise ValueError(f"Cannot inspect module paths at {revision}")
+    result = set()
+    for entry in output.split("\0"):
+        metadata, separator, path = entry.partition("\t")
+        if separator and (not files_only or not metadata.startswith("040000 ")):
+            result.add(path)
+    return result
+
+
+def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set[str]:
+    if baseline is None:
+        return set()
+    current, old = config.topology, baseline.topology
+    modules = {m["path"]: m for m in current.get("modules", [])}
+    if (
+        current.get("enforce_module_dependencies")
+        and not old.get("enforce_module_dependencies")
+    ) or (current.get("layers") and not old.get("layers")):
+        return set(modules)
+    old_modules = {m["path"]: m for m in old.get("modules", [])}
+    return {
+        path
+        for path, module in modules.items()
+        if path in old_modules
+        and (
+            module.get("layer") != old_modules[path].get("layer")
+            or set(old_modules[path].get("dependencies", []))
+            - set(module.get("dependencies", []))
+            or set(old.get("layers", {}).get(module.get("layer"), []))
+            - set(current.get("layers", {}).get(module.get("layer"), []))
+        )
+    }
 
 
 def check_contract_drift(
@@ -141,10 +219,11 @@ def check_contract_drift(
     *,
     base: str | None = None,
     config: GuardConfig | None = None,
+    revision: str | None = None,
 ) -> list[Finding]:
     """Block newly broken contracts while grandfathering untouched baseline debt."""
     root = Path(root).resolve()
-    config = config or load_config(root)
+    config = config or load_config(root, revision=revision)
     base = base or "origin/" + config.main_branch
     available = git_ok(
         root, ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"]
@@ -176,21 +255,79 @@ def check_contract_drift(
             1,
             f"Declared boundary document '{item['doc']}' for '{item['module']}' is missing; update its contract.",
         )
-        for item in _missing_docs(root, config)
+        for item in _missing_docs(root, config, revision=revision)
         if not available
         or baseline is None
         or (item["module"], item["doc"]) not in old_declared_docs
         or reader.read(item["doc"]) is not None
     ]
+    modules = {m["path"]: m for m in config.topology.get("modules", [])}
+    old_modules = (
+        {m["path"]: m for m in baseline.topology.get("modules", [])} if baseline else {}
+    )
+    existing = (
+        _snapshot_paths(root, revision, set(modules))
+        if revision is not None
+        else {p for p in modules if repository_path(root, p).exists()}
+    )
+    missing_modules = set(modules) - existing
+    base_existing = _snapshot_paths(root, base, missing_modules) if available else set()
+    for path in sorted(missing_modules):
+        if available and (
+            path in base_existing or (baseline is not None and path not in old_modules)
+        ):
+            findings.append(
+                Finding(
+                    rule_id,
+                    config_path,
+                    1,
+                    f"Declared module '{path}' does not exist in repository; remove or update its declaration in .guard/config.json.",
+                )
+            )
+    governed = bool(
+        config.topology.get("enforce_module_dependencies")
+        and config.topology.get("layers")
+    )
+    if (
+        governed
+        and available
+        and baseline is not None
+        and (
+            (
+                baseline.topology.get("enforce_module_dependencies")
+                and baseline.topology.get("layers")
+            )
+            or any(m.get("role") for m in modules.values())
+        )
+    ):
+        for path in sorted(set(modules) - set(old_modules)):
+            if not str(modules[path].get("role") or "").strip():
+                findings.append(
+                    Finding(
+                        config.rule_id_prefix + "service-boundaries",
+                        config_path,
+                        1,
+                        f"Governed module '{path}' requires a nonempty 'role' declaration in .guard/config.json.",
+                    )
+                )
     if not (
         config.topology.get("enforce_module_dependencies")
         or config.topology.get("layers")
     ):
         return findings
-    modules = {m["path"]: m for m in config.topology.get("modules", [])}
-    old_modules = (
-        {m["path"]: m for m in baseline.topology.get("modules", [])} if baseline else {}
+    tightened = _tightened_modules(config, baseline)
+    snapshot_reader = (
+        BaseFileReader(root, revision, submodule_paths(root))
+        if revision is not None
+        else None
     )
+
+    def read_current(path: str) -> str | None:
+        if snapshot_reader is not None:
+            return snapshot_reader.read(path)
+        current = repository_path(root, path)
+        return current.read_text(errors="replace") if current.is_file() else None
+
     candidates = {
         m
         for m in modules
@@ -200,7 +337,17 @@ def check_contract_drift(
     deleted = ""
     if available:
         deleted = git_stdout(
-            root, ["git", "diff", "--name-only", "--diff-filter=D", "-z", base, "--"]
+            root,
+            [
+                "git",
+                "diff",
+                "--name-only",
+                "--diff-filter=D",
+                "-z",
+                base,
+                *([revision] if revision is not None else []),
+                "--",
+            ],
         )
         if deleted is None:
             raise ValueError("Cannot inspect deleted module files against baseline")
@@ -208,15 +355,48 @@ def check_contract_drift(
         owner = owner_module(path, list(modules))
         if owner is None:
             continue
-        current = repository_path(root, path)
-        text = current.read_text(errors="replace") if current.is_file() else None
+        text = read_current(path)
         if not available or reader.read(path) != text:
             candidates.add(owner)
+    scan_modules = candidates | tightened
+    if not scan_modules:
+        return findings
+    if revision is not None:
+        files = sorted(
+            _snapshot_paths(
+                root, revision, scan_modules, recursive=True, files_only=True
+            )
+        )
+    else:
+        files = sorted(
+            {
+                p.relative_to(root).as_posix()
+                for module in scan_modules
+                for directory in [repository_path(root, module)]
+                for p in (
+                    [directory] if directory.is_file() else source_files(directory)
+                )
+                if not p.is_symlink()
+                and owner_module(p.relative_to(root).as_posix(), list(modules))
+                in scan_modules
+                and b"\x00" not in p.read_bytes()
+            }
+        )
     files = [
-        p.relative_to(root).as_posix()
-        for p in source_files(root)
-        if b"\x00" not in p.read_bytes()
+        p
+        for p in files
+        if not is_excluded_topology_path(p)
+        and owner_module(p, list(modules)) in scan_modules
     ]
+    for path in files:
+        if owner_module(path, list(modules)) in tightened and path not in changed_files:
+            text = read_current(path)
+            if text is not None:
+                findings.extend(
+                    check_configured(
+                        path, text, None, None, config, check_unregistered=False
+                    )
+                )
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []
     if baseline and candidates:
@@ -240,7 +420,7 @@ def check_contract_drift(
     _, stale = _dependency_evidence(
         config,
         files,
-        lambda p: (root / p).read_text(errors="replace"),
+        read_current,
         coverage_files=baseline_files,
     )
     for item in stale:

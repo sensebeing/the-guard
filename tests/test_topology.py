@@ -5,6 +5,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import shutil
 from pathlib import Path
 
 from the_guard.config import GuardConfig, load_config
@@ -16,7 +18,7 @@ from the_guard.topology import (
     sync_topology,
 )
 from the_guard.topology.configured import check_configured
-from the_guard.topology.git import _compute_changed_lines
+from the_guard.git_helpers import _compute_changed_lines
 from the_guard.topology.imports import (
     extract_imports,
     owner_module,
@@ -133,6 +135,157 @@ class TopologyTests(unittest.TestCase):
         self.assertNotIn("packages/c", findings[0].message)
         self.assertEqual(findings[0].rule_id, "guard.single-source-of-truth")
         self.assertTrue(check_contract_drift(self.root, [], base="absent-base"))
+
+    def test_missing_modules_ratchet_snapshot_and_sync_prunes_incoming_edges(self):
+        topology = {
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/a", "dependencies": ["packages/b"]},
+                {"path": "packages/b", "dependencies": []},
+            ],
+        }
+        self.config(topology)
+        self.write("packages/a/main.ts", "import '../b/main.js';\n")
+        self.write("packages/b/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "baseline")
+        base = self.git("rev-parse", "HEAD")
+        shutil.rmtree(self.root / "packages/b")
+        report = audit_topology(self.root)
+        self.assertEqual(report["missing_modules"], ["packages/b"])
+        self.assertFalse(report["passed"])
+        findings = check_contract_drift(self.root, [], base=base)
+        self.assertTrue(
+            any("Declared module 'packages/b'" in f.message for f in findings)
+        )
+        self.git("add", ".")
+        self.git("commit", "-m", "delete module")
+        self.write("packages/b/main.ts", "restored only in dirty tree\n")
+        self.assertTrue(
+            any(
+                "Declared module 'packages/b'" in f.message
+                for f in check_contract_drift(self.root, [], base=base, revision="HEAD")
+            )
+        )
+        shutil.rmtree(self.root / "packages/b")
+        result = sync_topology(self.root)
+        self.assertEqual([m["path"] for m in result["modules"]], ["packages/a"])
+        self.assertEqual(result["modules"][0]["dependencies"], [])
+        topology["modules"].append({"path": "packages/phantom", "dependencies": []})
+        self.config(topology)
+        self.assertTrue(
+            any(
+                "Declared module 'packages/phantom'" in f.message
+                for f in check_contract_drift(
+                    self.root, [".guard/config.json"], base=base
+                )
+            )
+        )
+
+    def test_new_governed_modules_require_roles_and_empty_candidates_do_not_scan(self):
+        topology = {
+            "enforce_module_dependencies": True,
+            "layers": {"core": []},
+            "modules": [{"path": "packages/a", "layer": "core", "dependencies": []}],
+        }
+        self.config(topology)
+        self.write("packages/a/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "governed baseline")
+        with (
+            patch(
+                "the_guard.topology.audit.source_files",
+                side_effect=AssertionError("unexpected scan"),
+            ),
+            patch(
+                "the_guard.topology.audit._dependency_evidence",
+                side_effect=AssertionError("unexpected evidence"),
+            ),
+        ):
+            self.assertEqual(check_contract_drift(self.root, [], base="HEAD"), [])
+            self.assertEqual(check_contract_drift(self.root, [], base="HEAD", revision="HEAD"), [])
+        topology["modules"].append(
+            {"path": "packages/new", "layer": "core", "dependencies": []}
+        )
+        self.write("packages/new/main.ts", "export const value = 1;\n")
+        self.config(topology)
+        findings = check_contract_drift(self.root, [".guard/config.json"], base="HEAD")
+        self.assertTrue(
+            any("requires a nonempty 'role'" in f.message for f in findings)
+        )
+        topology["modules"][-1]["role"] = "Own new values"
+        self.config(topology)
+        self.assertEqual(
+            check_contract_drift(self.root, [".guard/config.json"], base="HEAD"), []
+        )
+
+    def test_tightened_contract_rechecks_unchanged_owned_production_sources(self):
+        for tightening in (
+            "dependencies",
+            "layer",
+            "layers",
+            "enforcement",
+            "enable_layers",
+        ):
+            with self.subTest(tightening=tightening):
+                topology = {
+                    "enforce_module_dependencies": tightening == "dependencies",
+                    "layers": {"core": ["core", "host"], "host": ["core", "host"]},
+                    "modules": [
+                        {
+                            "path": "packages/a",
+                            "layer": "core",
+                            "dependencies": ["packages/b"],
+                        },
+                        {"path": "packages/b", "layer": "host", "dependencies": []},
+                    ],
+                }
+                if tightening != "dependencies":
+                    topology["modules"][0]["dependencies"] = []
+                if tightening == "enable_layers":
+                    topology.pop("layers")
+                self.config(topology)
+                self.write("packages/a/main.ts", "import '../b/main.js';\n")
+                self.write("packages/b/main.ts", "export const value = 1;\n")
+                self.git("add", ".")
+                self.git("commit", "--allow-empty", "-m", "baseline " + tightening)
+                if tightening == "dependencies":
+                    topology["modules"][0]["dependencies"] = []
+                elif tightening == "layer":
+                    topology["layers"]["isolated"] = []
+                    topology["modules"][0]["layer"] = "isolated"
+                    topology["modules"][0]["dependencies"] = []
+                elif tightening in {"layers", "enable_layers"}:
+                    topology["layers"] = {"core": [], "host": ["core", "host"]}
+                    topology["modules"][0]["dependencies"] = []
+                else:
+                    topology["enforce_module_dependencies"] = True
+                self.config(topology)
+                findings = check_contract_drift(
+                    self.root, [".guard/config.json"], base="HEAD"
+                )
+                self.assertTrue(
+                    any(f.path == "packages/a/main.ts" for f in findings), findings
+                )
+
+    def test_topology_snapshot_ignores_dirty_source_and_dirty_symlink(self):
+        self.config(
+            {"forbidden_imports": [{"from": "packages/a", "imports": ["forbidden"]}]}
+        )
+        self.write("packages/a/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "baseline")
+        base = self.git("rev-parse", "HEAD")
+        self.write("packages/a/main.ts", "import 'forbidden';\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "violation")
+        (self.root / "packages/a/main.ts").unlink()
+        (self.root / "packages/a/main.ts").symlink_to("/tmp/outside-guard-source")
+        findings = run_topology_guard(
+            self.root, ["packages/a/main.ts"], base=base, revision="HEAD"
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn("forbidden", findings[0].message)
 
     def test_missing_document_grandfathering_is_per_declaration(self):
         topology = {"architecture_docs": ["docs/legacy-root.md"], "modules": [

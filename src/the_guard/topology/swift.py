@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..finding import _line_exempts_rule
+
 import re
 
 from ..finding import Finding
@@ -10,7 +12,6 @@ from .rules import (
     SWIFT_FUNC_DECL_RE,
     SWIFT_READ_METHOD_PREFIXES,
     SWIFT_WRITE_METHOD_PREFIXES,
-    _line_exempts_rule,
 )
 
 

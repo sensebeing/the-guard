@@ -246,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 for module in report["unregistered_modules"]:
                     print(f"Unregistered module: {module}")
+                for path in report["missing_modules"]:
+                    print(f"Missing module: {path}")
                 for item in report["missing_boundary_docs"]:
                     print(f"Missing boundary doc: {item['module']}: {item['doc']}")
                 for item in report["stale_dependencies"]:

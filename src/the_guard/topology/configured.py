@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+from ..finding import _line_exempts_rule
+
 import ast
 import fnmatch
 import re
 from collections.abc import Sequence
 
-from ..config import GuardConfig
+from ..config import GuardConfig, iter_forbidden_import_rules
 from ..finding import Finding
 from .discovery import candidate_module_for_path
 from .imports import extract_imports, owner_module, resolve_target_module
 from .paths import is_excluded_topology_path
-from .rules import _line_exempts_rule
 
 
 def in_scope(path: str, prefixes: Sequence[str]) -> bool:
@@ -157,10 +158,7 @@ def check_configured(
                 check_unregistered=check_unregistered,
             )
         )
-    for rule in [
-        *topology.get("forbidden_imports", []),
-        *topology.get("module_boundaries", []),
-    ]:
+    for rule in iter_forbidden_import_rules(topology):
         if not in_scope(path, rule.get("scope_prefixes", [rule.get("from", "")])):
             continue
         forbidden = rule.get(

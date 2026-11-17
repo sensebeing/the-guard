@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from ..config import GuardConfig, repository_path
 from ..git_helpers import git_stdout
-from ..policy import _read_policy_file
+from ..git_helpers import read_repository_file
 from .contract import CODE_EXTENSIONS
 
 
@@ -111,7 +111,7 @@ def read_document(
             return None
     elif path not in snapshot_modes:
         return None
-    return _read_policy_file(
+    return read_repository_file(
         root,
         path,
         revision=revision,

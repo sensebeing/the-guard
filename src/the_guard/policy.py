@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import posixpath
 import re
-import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -10,7 +8,9 @@ from .config import DEFAULT_DETAIL_MANIFEST as DEFAULT_DETAIL_MANIFEST
 from .config import DEFAULT_MANIFEST_TAG as DEFAULT_MANIFEST_TAG
 from .config import DEFAULT_RULE_PREFIX as DEFAULT_RULE_PREFIX
 from .config import DEFAULT_SCHEMA as DEFAULT_SCHEMA
-from .config import GuardConfig, load_config, repository_path
+from .config import GuardConfig, load_config
+
+from .git_helpers import read_repository_file
 
 RULE_FIELDS = frozenset({"id", "severity", "scope", "summary", "details", "checker"})
 ALLOWED_SEVERITIES = frozenset({"block"})
@@ -57,82 +57,19 @@ def _read_policy_file(
     rel_path: str,
     *,
     revision: str | None,
-    _seen: frozenset[str] = frozenset(),
     loaded_paths: set[str] | None = None,
     snapshot_modes: dict[str, str] | None = None,
 ) -> str:
-    if Path(rel_path).is_absolute() or ".." in Path(rel_path).parts:
-        raise PolicyError(f"Unsafe policy path: {rel_path}")
-    if rel_path in _seen:
-        raise PolicyError(f"Cyclic policy symlink: {rel_path}")
-    if loaded_paths is not None:
-        loaded_paths.add(rel_path)
-    if revision is not None:
-        try:
-            mode = (snapshot_modes or {}).get(rel_path)
-            if mode is None:
-                entry = subprocess.run(
-                    ["git", "ls-tree", revision, "--", f":(literal){rel_path}"],
-                    cwd=repo_root,
-                    capture_output=True,
-                    check=True,
-                    timeout=15,
-                )
-                mode = entry.stdout.split(b" ", 1)[0].decode("ascii")
-            if mode == "120000":
-                link = subprocess.run(
-                    ["git", "show", f"{revision}:{rel_path}"],
-                    cwd=repo_root,
-                    capture_output=True,
-                    check=True,
-                    timeout=15,
-                ).stdout.decode("utf-8")
-                if posixpath.isabs(link):
-                    raise PolicyError(f"Policy symlink escapes repository: {rel_path}")
-                target = posixpath.normpath(
-                    posixpath.join(posixpath.dirname(rel_path), link)
-                )
-                return _read_policy_file(
-                    repo_root,
-                    target,
-                    revision=revision,
-                    _seen=_seen | {rel_path},
-                    loaded_paths=loaded_paths,
-                    snapshot_modes=snapshot_modes,
-                )
-            proc = subprocess.run(
-                ["git", "show", f"{revision}:{rel_path}"],
-                cwd=repo_root,
-                check=False,
-                capture_output=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise PolicyError(
-                f"Cannot read {rel_path} at revision {revision}: {exc}"
-            ) from exc
-        if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", errors="replace").strip()
-            raise PolicyError(
-                f"Rule or policy file does not exist at revision {revision}: {rel_path} ({err})"
-            )
-        try:
-            return proc.stdout.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise PolicyError(
-                f"Invalid UTF-8 in {rel_path} at revision {revision}: {exc}"
-            ) from exc
-
     try:
-        target = repository_path(repo_root, rel_path)
+        return read_repository_file(
+            repo_root,
+            rel_path,
+            revision=revision,
+            loaded_paths=loaded_paths,
+            snapshot_modes=snapshot_modes,
+        )
     except ValueError as exc:
         raise PolicyError(str(exc)) from exc
-    if not target.is_file():
-        raise PolicyError(f"Policy or rule details file does not exist: {rel_path}")
-    try:
-        return target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise PolicyError(f"Cannot read policy file {target}: {exc}") from exc
 
 
 def _extract_policy_yaml(

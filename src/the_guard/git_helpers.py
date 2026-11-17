@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import difflib
+import posixpath
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,7 +148,7 @@ class BaseFileReader:
     callers that do not distinguish absence from unavailable history.
     """
 
-    def __init__(self, root: Path, base: str, submodules: tuple[str, ...]):
+    def __init__(self, root: Path, base: str, submodules: tuple[str, ...] = ()):
         self.root = root
         self.base = base
         self.submodules = submodules
@@ -314,14 +316,28 @@ def resolve_changed_base(
 
 
 def changed_files(
-    root: Path, base: str | None = None, *, main_branch: str = "main"
+    root: Path,
+    base: str | None = None,
+    *,
+    main_branch: str = "main",
+    head: str | None = None,
 ) -> list[str]:
     reference = resolve_changed_base(root, base, main_branch=main_branch)
     outputs = []
-    for args in (
-        ["diff", "--name-only", "--diff-filter=ACMRT", "-z", reference, "--"],
-        ["ls-files", "--others", "--exclude-standard", "-z"],
-    ):
+    commands = [
+        [
+            "diff",
+            "--name-only",
+            "--diff-filter=ACMRT",
+            "-z",
+            reference,
+            *([head] if head is not None else []),
+            "--",
+        ]
+    ]
+    if head is None:
+        commands.append(["ls-files", "--others", "--exclude-standard", "-z"])
+    for args in commands:
         result = subprocess.run(
             ["git", *args],
             cwd=root,
@@ -338,3 +354,102 @@ def changed_files(
             if path
         }
     )
+
+
+def read_repository_file(
+    repo_root: Path,
+    rel_path: str,
+    *,
+    revision: str | None,
+    _seen: frozenset[str] = frozenset(),
+    loaded_paths: set[str] | None = None,
+    snapshot_modes: dict[str, str] | None = None,
+) -> str:
+    if Path(rel_path).is_absolute() or ".." in Path(rel_path).parts:
+        raise ValueError(f"Unsafe policy path: {rel_path}")
+    if rel_path in _seen:
+        raise ValueError(f"Cyclic policy symlink: {rel_path}")
+    if loaded_paths is not None:
+        loaded_paths.add(rel_path)
+    if revision is not None:
+        try:
+            mode = (snapshot_modes or {}).get(rel_path)
+            if mode is None:
+                entry = subprocess.run(
+                    ["git", "ls-tree", revision, "--", f":(literal){rel_path}"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    check=True,
+                    timeout=15,
+                )
+                mode = entry.stdout.split(b" ", 1)[0].decode("ascii")
+            if mode == "120000":
+                link = subprocess.run(
+                    ["git", "show", f"{revision}:{rel_path}"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    check=True,
+                    timeout=15,
+                ).stdout.decode("utf-8")
+                if posixpath.isabs(link):
+                    raise ValueError(f"Policy symlink escapes repository: {rel_path}")
+                target = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(rel_path), link)
+                )
+                return read_repository_file(
+                    repo_root,
+                    target,
+                    revision=revision,
+                    _seen=_seen | {rel_path},
+                    loaded_paths=loaded_paths,
+                    snapshot_modes=snapshot_modes,
+                )
+            proc = subprocess.run(
+                ["git", "show", f"{revision}:{rel_path}"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError(
+                f"Cannot read {rel_path} at revision {revision}: {exc}"
+            ) from exc
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise ValueError(
+                f"Rule or policy file does not exist at revision {revision}: {rel_path} ({err})"
+            )
+        try:
+            return proc.stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"Invalid UTF-8 in {rel_path} at revision {revision}: {exc}"
+            ) from exc
+
+    try:
+        target = repo_root / rel_path
+        if not target.resolve().is_relative_to(repo_root.resolve()):
+            raise ValueError(f"Path escapes repository: {rel_path}")
+    except (ValueError, RuntimeError) as exc:
+        raise ValueError(str(exc)) from exc
+    if not target.is_file():
+        raise ValueError(f"Policy or rule details file does not exist: {rel_path}")
+    try:
+        return target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Cannot read policy file {target}: {exc}") from exc
+
+
+def compute_changed_lines(base_text: str, current_text: str) -> set[int]:
+    base_lines = base_text.splitlines()
+    current_lines = current_text.splitlines()
+    matcher = difflib.SequenceMatcher(None, base_lines, current_lines)
+    changed: set[int] = set()
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in {"replace", "insert"}:
+            changed.update(range(j1 + 1, j2 + 1))
+    return changed
+
+
+_compute_changed_lines = compute_changed_lines

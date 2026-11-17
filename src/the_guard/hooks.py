@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from .config import load_config
-from .git_helpers import changed_files
+from .git_helpers import changed_files, resolve_changed_file
 from .policy import PolicyError, load_policy
 from .review.repository import collect_review_scope, resolve_or_carry_forward_receipt
 from .topology import check_contract_drift, run_topology_guard
@@ -89,18 +87,27 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
                 "Protected branch creation needs an explicit reviewed baseline; initialize the remote before enabling this hook"
             )
         try:
-            with _pushed_snapshot(root, local_sha) as snapshot:
-                snapshot_config = load_config(snapshot, revision=local_sha)
-                load_policy(snapshot, revision=local_sha, config=snapshot_config)
-                changed = changed_files(snapshot, remote_sha)
-                findings = run_topology_guard(
-                    snapshot, changed, base=remote_sha, config=snapshot_config
+            snapshot_config = load_config(root, revision=local_sha)
+            snapshot_policy = load_policy(
+                root, revision=local_sha, config=snapshot_config
+            )
+            changed = changed_files(root, remote_sha, head=local_sha)
+            findings = run_topology_guard(
+                root,
+                changed,
+                base=remote_sha,
+                config=snapshot_config,
+                revision=local_sha,
+            )
+            findings.extend(
+                check_contract_drift(
+                    root,
+                    changed,
+                    base=remote_sha,
+                    config=snapshot_config,
+                    revision=local_sha,
                 )
-                findings.extend(
-                    check_contract_drift(
-                        snapshot, changed, base=remote_sha, config=snapshot_config
-                    )
-                )
+            )
         except PolicyError as exc:
             print(f"NO-GO: {exc}", file=sys.stderr)
             return 2
@@ -114,7 +121,14 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
         scope = collect_review_scope(root, main_branch=remote_sha)
         if (
             not scope.is_exempt
-            and resolve_or_carry_forward_receipt(root, scope, persist=False) is None
+            and resolve_or_carry_forward_receipt(
+                root,
+                scope,
+                persist=False,
+                config=snapshot_config,
+                policy=snapshot_policy,
+            )
+            is None
         ):
             print(
                 "NO-GO: missing review receipt for pushed range. Run guard review, address findings or submit --note evidence, then retry.",
@@ -124,46 +138,31 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
     return 0
 
 
-@contextmanager
-def _pushed_snapshot(root: Path, revision: str):
-    """Materialize only the pushed commit for filesystem-based deterministic owners."""
-    with tempfile.TemporaryDirectory(prefix="guard-push-") as directory:
-        snapshot = Path(directory) / "snapshot"
-        subprocess.run(
-            [
-                "git",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "worktree",
-                "add",
-                "--detach",
-                str(snapshot),
-                revision,
-            ],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        try:
-            yield snapshot
-        finally:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(snapshot)],
-                cwd=root,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-
-
 def edit_guard(root: Path | str, input_text: str) -> int:
+    root = Path(root).resolve()
     payload = json.loads(input_text or "{}")
     tool_input = payload.get("tool_input", payload)
     path = tool_input.get("file_path") or tool_input.get("path")
     if not path:
         return 0
-    findings = run_topology_guard(root, [path])
+    resolved = resolve_changed_file(root, path)
+    if resolved is None:
+        return 0
+    rel_path, _ = resolved
+    try:
+        cfg = load_config(root)
+        if (
+            rel_path == ".guard/config.json"
+            or rel_path in {"AGENTS.md", "CLAUDE.md"}
+            or rel_path.endswith(".md")
+        ):
+            load_policy(root, config=cfg)
+        findings = run_topology_guard(root, [rel_path], config=cfg)
+        if rel_path == ".guard/config.json":
+            findings.extend(check_contract_drift(root, [rel_path], config=cfg))
+    except (PolicyError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     for finding in findings:
         print(
             f"{finding.path}:{finding.line}: {finding.rule_id}: {finding.message}",

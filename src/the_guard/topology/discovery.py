@@ -126,7 +126,7 @@ def discover_topology(
     candidates = rooted_candidates | (
         fallback_candidates - {p.split("/")[0] for p in rooted_candidates}
     )
-    candidates.update(declared)
+    candidates.update(path for path in declared if (root / path).exists())
     modules = []
     module_imports = {}
     for directory in sorted(candidates):

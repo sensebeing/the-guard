@@ -14,7 +14,7 @@ from ..git_helpers import (
     submodule_paths,
 )
 from .configured import check_configured, in_scope
-from .git import _compute_changed_lines
+from ..git_helpers import compute_changed_lines
 from .paths import is_excluded_topology_path
 from .python import _check_python_file
 from .swift import _check_swift_file
@@ -27,26 +27,43 @@ def run_topology_guard(
     config: GuardConfig | None = None,
     *,
     full_scan: bool = False,
+    revision: str | None = None,
 ) -> list[Finding]:
     root = Path(root).resolve()
-    config = config or load_config(root)
+    config = config or load_config(root, revision=revision)
     base = base or "origin/" + config.main_branch
     reader = BaseFileReader(root, base, submodule_paths(root))
     base_available = not full_scan and git_ok(
         root, ["git", "rev-parse", "--verify", "--quiet", base]
     )
+    snapshot_reader = (
+        BaseFileReader(root, revision, submodule_paths(root))
+        if revision is not None
+        else None
+    )
     findings = []
     for raw in dict.fromkeys(changed_files):
-        resolved = resolve_changed_file(root, raw)
+        resolved = (
+            (raw, root / raw)
+            if snapshot_reader
+            and not Path(raw).is_absolute()
+            and ".." not in Path(raw).parts
+            else resolve_changed_file(root, raw)
+        )
         if resolved is None:
             raise ValueError(f"Changed path escapes repository: {raw}")
         path, absolute = resolved
-        if not absolute.is_file():
-            continue
-        text = absolute.read_text(encoding="utf-8", errors="replace")
+        if snapshot_reader is not None:
+            text = snapshot_reader.read(path)
+            if text is None:
+                continue
+        else:
+            if not absolute.is_file():
+                continue
+            text = absolute.read_text(encoding="utf-8", errors="replace")
         baseline = reader.read(path) if base_available else None
         changed = (
-            _compute_changed_lines(baseline, text) if baseline is not None else None
+            compute_changed_lines(baseline, text) if baseline is not None else None
         )
         excluded = is_excluded_topology_path(path)
         current = []
