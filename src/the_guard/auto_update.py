@@ -319,7 +319,6 @@ def self_update(
                     guard_bin = resolved_home / ".local/bin/guard"
                     is_real_home = resolved_home == Path.home().resolve()
                     has_installed_guard = guard_bin.exists() or (is_real_home and bool(shutil.which("guard")))
-                    manages_uv_tool = not explicit and bool(shutil.which("uv")) and has_installed_guard
                     reinstalled = False
                     if (
                         needs_reinstall and not explicit and shutil.which("uv")

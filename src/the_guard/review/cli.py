@@ -189,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = run_architecture_review(
                 root,
+                scope=scope,
+                config=snapshot_config,
+                policy=snapshot_policy,
                 main_branch=main_branch,
                 explicit_provider=args.provider,
                 reprobe=args.reprobe,

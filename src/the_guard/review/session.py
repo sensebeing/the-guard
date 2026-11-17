@@ -45,6 +45,7 @@ def compute_review_contract_digest(
     for path in (
         Path(__file__).parents[1] / "config.py",
         Path(__file__).parents[1] / "policy.py",
+        Path(__file__).parents[1] / "git_helpers.py",
     ):
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())

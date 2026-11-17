@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
