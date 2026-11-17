@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 from ..config import GuardConfig
 from ..finding import Finding
+from .discovery import candidate_module_for_path
 from .imports import extract_imports, owner_module, resolve_target_module
 from .paths import is_excluded_topology_path
 from .rules import _line_exempts_rule
@@ -54,6 +55,8 @@ def check_configured(
     base_text: str | None,
     changed_lines: set[int] | None,
     config: GuardConfig,
+    *,
+    check_unregistered: bool = True,
 ) -> list[Finding]:
     findings = []
     topology = config.topology
@@ -145,7 +148,14 @@ def check_configured(
     imports = extract_imports(path, text, config.module_doc_roots)
     if not is_excluded_topology_path(path):
         findings.extend(
-            _check_module_imports(path, imports, lines, changed_lines, config)
+            _check_module_imports(
+                path,
+                imports,
+                lines,
+                changed_lines,
+                config,
+                check_unregistered=check_unregistered,
+            )
         )
     for rule in [
         *topology.get("forbidden_imports", []),
@@ -195,16 +205,39 @@ def _check_module_imports(
     lines: list[str],
     changed_lines: set[int] | None,
     config: GuardConfig,
+    *,
+    check_unregistered: bool = True,
 ) -> list[Finding]:
     topology = config.topology
     modules = {m["path"]: m for m in topology.get("modules", [])}
     paths = list(modules)
     source_path = owner_module(path, paths)
+    rule_id = config.rule_id_prefix + "service-boundaries"
     if source_path is None:
+        candidate = candidate_module_for_path(path, config.module_doc_roots)
+        if (
+            check_unregistered
+            and bool(
+                topology.get("enforce_module_dependencies") or topology.get("layers")
+            )
+            and candidate is not None
+            and _is_range_touched(changed_lines, 1, max(1, len(lines)))
+            and not _line_exempts_rule(
+                lines[0] if lines else "", rule_id, exempt_tag=config.exempt_tag
+            )
+        ):
+            return [
+                Finding(
+                    rule_id,
+                    path,
+                    1,
+                    f"Production source belongs to unregistered module '{candidate}'; "
+                    "declare its module entry in .guard/config.json.",
+                )
+            ]
         return []
     source = modules[source_path]
     layers = topology.get("layers", {})
-    rule_id = config.rule_id_prefix + "service-boundaries"
     findings = []
     for start, end, spec in imports:
         target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)

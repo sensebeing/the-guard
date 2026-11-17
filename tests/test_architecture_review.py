@@ -23,7 +23,7 @@ from the_guard.review.engine import (
     resolve_provider_order,
     run_architecture_review,
 )
-from the_guard.review.prompt import _render_bounded_diff_section
+from the_guard.review.prompt import _render_bounded_diff_section, build_incremental_review_prompt
 from the_guard.review.provider import (
     _has_provider_credentials,
     isolated_codex_home,
@@ -35,6 +35,9 @@ from the_guard.review.provider import (
     resolve_provider_model_config,
 )
 from the_guard.review.repository import (
+    _classify_file_tier,
+    resolve_or_carry_forward_receipt,
+    load_review_session,
     git_common_dir,
     is_reviewable_path,
     load_valid_receipt,
@@ -47,6 +50,8 @@ from the_guard.review.runner import (
     _summarize_stream_line,
     _verify_reviewed_head_sha,
 )
+from the_guard.config import load_config, GuardConfig
+from the_guard.review.session import compute_review_contract_digest
 from the_guard.policy import PolicyError, load_policy
 from architecture_review_support import (
     ArchitectureReviewTestCase,
@@ -59,6 +64,108 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
+    def test_root_blueprint_is_snapshot_bound_in_full_and_incremental_prompts(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            manifest = repo / "AGENTS.md"
+            manifest.write_text(manifest.read_text() + "\nROOT SINGLE OWNER BLUEPRINT\n")
+            manifest.rename(repo / "CLAUDE.md")
+            manifest.symlink_to("CLAUDE.md")
+            (repo / "docs/blueprint.md").write_text("DECLARED ARCHITECTURE CONTENT\n")
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/main.py").write_text("value = 1\n")
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(json.dumps({"topology": {
+                "architecture_docs": ["docs/blueprint.md"], "modules": [
+                    {"path": "services/a", "boundary_docs": ["AGENTS.md", "CLAUDE.md"]}]}}))
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "root and module contracts")
+            run_architecture_review(repo, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "reviewed", "blocking_findings": []})
+            scope = collect_review_scope(repo)
+            session = load_review_session(repo)
+            (repo / "CLAUDE.md").write_text("DIRTY ROOT PROSE")
+            (repo / "docs/blueprint.md").write_text("DIRTY BLUEPRINT")
+            prompts = [build_review_prompt(repo, scope), build_incremental_review_prompt(
+                repo, scope, session, None, reviewer_note="Verify the same committed owner evidence")]
+            for prompt in prompts:
+                self.assertIn("## Root architecture & agent instructions: AGENTS.md", prompt)
+                # It also occurs in the branch diff, so inspect the context section specifically.
+                context = prompt.split("## Root architecture & agent instructions: AGENTS.md", 1)[1].split("## Architecture blueprint:", 1)[0]
+                self.assertIn("ROOT SINGLE OWNER BLUEPRINT", context)
+                self.assertNotIn("schema: the-guard-policy/v1", context)
+                self.assertNotIn("<!-- the-guard-policy:start -->", context)
+                self.assertIn("DECLARED ARCHITECTURE CONTENT", prompt)
+                self.assertNotIn("DIRTY ROOT PROSE", prompt)
+                self.assertNotIn("DIRTY BLUEPRINT", prompt)
+                self.assertNotIn("## Boundary reference: AGENTS.md", prompt)
+                self.assertNotIn("## Boundary reference: CLAUDE.md", prompt)
+            self.assertIn("Holistic Root-Cause & Layer Boundary Integrity", prompts[1])
+            self.assertIn("introduced_by_delta", prompts[1])
+
+    def test_declared_contracts_override_extension_and_test_tiers(self):
+        config = GuardConfig(topology={"architecture_docs": ["docs/root.json"], "modules": [
+            {"path": "packages/a", "boundary_docs": ["tests/owner.txt"]}]})
+        for path in ("docs/root.json", "tests/owner.txt", "packages/a/AGENTS.md", "packages/a/CLAUDE.md"):
+            self.assertTrue(is_reviewable_path(path, config), path)
+            self.assertEqual(_classify_file_tier(path, config), 0, path)
+        for path in ("src/a.mjs", "src/a.cjs"):
+            self.assertTrue(is_reviewable_path(path, config))
+
+    def test_rebase_invalidates_receipt_for_changed_root_or_boundary_prose(self):
+        for document in ("AGENTS.md", "docs/owner.md"):
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                (repo / ".guard").mkdir()
+                (repo / ".guard/config.json").write_text(json.dumps({"topology": {
+                    "modules": [{"path": "services/a", "boundary_docs": ["docs/owner.md"]}]}}))
+                (repo / "docs/owner.md").write_text("Original owner contract\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "baseline contracts")
+                _git(repo, "branch", "-f", "main", "HEAD")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                (repo / "services/a").mkdir(parents=True)
+                (repo / "services/a/main.py").write_text("value = 1\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "reviewed code")
+                reviewer = lambda _: {"verdict": "GO", "summary": "reviewed", "blocking_findings": []}
+                run_architecture_review(repo, reviewer_fn=reviewer)
+                old_scope = collect_review_scope(repo)
+                digest = compute_review_contract_digest(load_policy(repo), load_config(repo),
+                                                       repo_root=repo, revision=old_scope.head_sha)
+                _git(repo, "checkout", "main")
+                path = repo / document
+                path.write_text(path.read_text() + "\nChanged architectural responsibility\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "change owner blueprint upstream")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "checkout", "topic")
+                _git(repo, "rebase", "main")
+                scope = collect_review_scope(repo)
+                new_digest = compute_review_contract_digest(load_policy(repo), load_config(repo),
+                                                           repo_root=repo, revision=scope.head_sha)
+                self.assertNotEqual(digest, new_digest)
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+                self.assertEqual(run_architecture_review(repo, reviewer_fn=reviewer).mode, "full")
+
+    def test_missing_boundary_reference_does_not_bind_an_unbound_module(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/b").mkdir(parents=True)
+            (repo / "services/a/main.py").write_text("value = 1\n")
+            (repo / "services/b/main.py").write_text("value = 1\n")
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": [
+                {"path": "services/a", "role": "governed owner"},
+                {"path": "services/b", "boundary_docs": ["docs/missing.md"]}]}}))
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "mixed contracts")
+            prompt = build_review_prompt(repo, collect_review_scope(repo))
+            guidance = prompt.split("## Unbound Module Topology Guidance", 1)[1].split("\n", 2)[1]
+            self.assertIn("services/b", guidance)
+            self.assertNotIn("services/a", guidance)
+
     def test_deleted_gitlink_is_reviewed_as_root_change_without_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo, _ = self._init_repo(Path(tmp))
@@ -970,8 +1077,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn('"layers":', prompt)
             self.assertIn("SNAPSHOT ARCHITECTURE", prompt)
             self.assertNotIn("DIRTY ARCHITECTURE", prompt)
-            self.assertEqual(prompt.count("## Boundary reference: docs/architecture.md"), 1)
-            self.assertEqual(prompt.count("## Boundary reference: AGENTS.md"), 1)
+            self.assertEqual(prompt.count("## Architecture blueprint: docs/architecture.md"), 1)
+            self.assertEqual(prompt.count("## Root architecture & agent instructions: AGENTS.md"), 1)
             self.assertEqual(prompt.count("## Boundary reference: services/a/README.md"), 1)
             self.assertNotIn("## Boundary reference: services/b/README.md", prompt)
             self.assertIn("... [truncated]", prompt)

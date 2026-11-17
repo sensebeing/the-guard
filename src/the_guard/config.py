@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+VERSION = "0.1.0"
+
 DEFAULT_MANIFEST_TAG = "the-guard-policy"
 DEFAULT_SCHEMA = "the-guard-policy/v1"
 DEFAULT_DETAIL_MANIFEST = "AGENTS.md#engineering-quality-policy"
@@ -139,6 +141,10 @@ def _validate_sections(data: dict[str, Any]) -> None:
         topology["enforce_module_dependencies"], bool
     ):
         raise ValueError("topology.enforce_module_dependencies must be a bool")
+    if "architecture_docs" in topology:
+        _string_list(topology["architecture_docs"], "topology.architecture_docs")
+        if any(not _safe_relative_path(doc) for doc in topology["architecture_docs"]):
+            raise ValueError("topology.architecture_docs must be safe repository-relative paths")
     layers = topology.get("layers", {})
     if not isinstance(layers, dict) or any(
         not isinstance(k, str) or not k.strip() for k in layers

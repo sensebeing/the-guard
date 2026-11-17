@@ -26,7 +26,7 @@ from .init import initialize
 from .policy import PolicyError, load_policy
 from .review.cli import main as review_main
 from .review.github import publish_github_pr_review
-from .topology import audit_topology, run_topology_guard, sync_topology
+from .topology import check_contract_drift, audit_topology, run_topology_guard, sync_topology
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
                 root, args.file or changed_files(root, base), base=base, config=cfg
             )
         )
+        if not args.file and not (args.command == "check" and args.policy_only):
+            findings.extend(check_contract_drift(root, changed_files(root, base), base=base, config=cfg))
         should_trigger_auto_update = args.command == "check"
         gh_receipt = _publish_check_github_review(
             root,

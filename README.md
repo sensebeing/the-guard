@@ -399,3 +399,19 @@ If `the-guard` helps your team build with AI, a star on GitHub helps other teams
 ## License
 
 [MIT](LICENSE)
+
+### Keep architecture contracts current
+
+Declare root blueprints with `topology.architecture_docs` (safe repository-relative paths).
+Module `path` entries support directories and individual files such as `src/core/config.py`;
+set each owner's `layer`, `role`, `dependencies` and `boundary_docs` explicitly.
+`guard review` automatically reads root agent instructions, declared blueprints and existing
+`ARCHITECTURE.md` / `docs/architecture.md` from the reviewed commit. These document snapshots
+also invalidate prior review evidence when their contents change.
+
+Branch-wide `guard check` and `guard topology check` reject newly missing declared documents
+and newly stale dependency declarations; changed production files must belong to a declared
+module when dependency/layer governance is enabled. The edit hook checks that ownership too,
+and the protected-push hook checks deterministic constraints before review exemptions or receipts.
+Untouched legacy debt stays grandfathered; use `guard topology audit` for the full inventory.
+Update configuration and authoritative boundary docs in the same change as responsibilities.

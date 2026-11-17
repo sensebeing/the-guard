@@ -25,6 +25,7 @@ from .contract import (
     ReviewScope,
     SubmoduleChange,
 )
+from .documents import is_architecture_contract
 from .session import (
     RECEIPT_SCHEMA,
     UTC,
@@ -125,7 +126,7 @@ def resolve_base_ref(repo_root: Path, main_branch: str = "main") -> str:
 def is_reviewable_path(rel_path: str, config: GuardConfig | None = None) -> bool:
     cfg = config or GuardConfig()
     settings = cfg.review
-    if rel_path == ".guard/config.json" or rel_path == cfg.manifest_file:
+    if rel_path == ".guard/config.json" or is_architecture_contract(rel_path, cfg):
         return True
     if any(
         fnmatch.fnmatchcase(rel_path, p)
@@ -168,6 +169,8 @@ def _classify_file_tier(rel_path: str, config: GuardConfig | None = None) -> int
         *cfg.review.get("reviewable_prefixes", []),
     )
     posix = PurePosixPath(rel_path)
+    if is_architecture_contract(rel_path, cfg):
+        return 0
     name_low = posix.name.lower()
     if posix.name in LOCK_FILENAMES or name_low == "conftest.py":
         return 2
@@ -542,7 +545,11 @@ def resolve_or_carry_forward_receipt(
     repo_root: Path, scope: ReviewScope, *, persist: bool = True
 ) -> dict[str, Any] | None:
     existing = load_valid_receipt(repo_root, scope.patch_digest)
-    if existing is not None:
+    if (
+        existing is not None
+        and existing.get("head_sha") == scope.head_sha
+        and existing.get("merge_base") == scope.merge_base
+    ):
         return existing
     session = load_review_session(repo_root)
     if (
@@ -554,9 +561,19 @@ def resolve_or_carry_forward_receipt(
         return None
     current_policy = load_policy(repo_root, revision=scope.head_sha)
     current_config = load_config(repo_root, revision=scope.head_sha)
-    current_contract_digest = compute_review_contract_digest(current_policy, current_config)
-    if not contract_digest_matches(session.contract_digest, current_policy, current_config):
+    current_contract_digest = compute_review_contract_digest(
+        current_policy, current_config, repo_root=repo_root, revision=scope.head_sha
+    )
+    if not contract_digest_matches(
+        session.contract_digest,
+        current_policy,
+        current_config,
+        repo_root=repo_root,
+        revision=scope.head_sha,
+    ):
         return None
+    if existing is not None and session.last_patch_digest == scope.patch_digest:
+        return existing
     prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
     if prior_receipt is None:
         return None

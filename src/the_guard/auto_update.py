@@ -14,7 +14,7 @@ import sys
 import time
 from typing import Any, Iterator
 
-from . import __version__
+from .config import VERSION as __version__
 
 AUTO_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 SKILL_NAMES = ("the-guard", "the-guard-setup")

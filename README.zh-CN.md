@@ -389,3 +389,17 @@ uv run guard check --base origin/main
 ## 许可证
 
 [MIT](LICENSE)
+
+### 持续维护架构契约
+
+用 `topology.architecture_docs` 声明根架构蓝图，路径必须相对仓库且不能越界。
+模块 `path` 同时支持目录和 `src/core/config.py` 这样的单文件；明确填写各 owner 的
+`layer`、`role`、`dependencies` 与 `boundary_docs`。
+`guard review` 自动从被审查提交读取根 Agent 指令、已声明蓝图，以及存在的
+`ARCHITECTURE.md` / `docs/architecture.md`。这些文档快照的内容变化会使旧审查证据失效。
+
+分支范围的 `guard check` 和 `guard topology check` 会阻断新增的文档缺失与失效依赖声明；
+启用依赖或分层治理后，改动的生产文件必须归属已声明模块。编辑 hook 同样检查归属，
+受保护分支的推送 hook 在审查豁免和回执判断之前执行确定性检查。
+未触及的历史债务仍按基线保留；用 `guard topology audit` 查看全仓问题。
+职责变化时，在同一次改动中同步配置和权威边界文档。

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
-from pathlib import Path
+from collections.abc import Iterator, Sequence
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
@@ -73,6 +73,30 @@ def source_files(root: Path) -> Iterator[Path]:
                 yield path
 
 
+def candidate_module_for_path(
+    rel_posix: str, module_doc_roots: Sequence[str]
+) -> str | None:
+    """Propose an owner for uncovered production source using inventory rules."""
+    path = PurePosixPath(rel_posix)
+    if path.suffix not in LANGUAGES or is_excluded_topology_path(rel_posix):
+        return None
+    parts = path.parts
+    if (
+        len(parts) >= 3
+        and parts[0] in module_doc_roots
+        and not parts[1].startswith(".")
+        and parts[1] not in {"tests", "test"}
+    ):
+        return "/".join(parts[:2])
+    if (
+        len(parts) >= 2
+        and not parts[0].startswith(".")
+        and parts[0] not in NON_MODULE_TOP_DIRS
+    ):
+        return parts[0]
+    return None
+
+
 def discover_topology(
     root: Path, config: GuardConfig | None = None
 ) -> dict[str, list[dict[str, Any]]]:
@@ -94,20 +118,11 @@ def discover_topology(
             or owner_module(rel.as_posix(), declared) is not None
         ):
             continue
-        parts = rel.parts
-        if (
-            len(parts) >= 3
-            and parts[0] in config.module_doc_roots
-            and not parts[1].startswith(".")
-            and parts[1] not in {"tests", "test"}
-        ):
-            rooted_candidates.add("/".join(parts[:2]))
-        elif (
-            len(parts) >= 2
-            and not parts[0].startswith(".")
-            and parts[0] not in NON_MODULE_TOP_DIRS
-        ):
-            fallback_candidates.add(parts[0])
+        candidate = candidate_module_for_path(rel.as_posix(), config.module_doc_roots)
+        if candidate is not None:
+            (rooted_candidates if "/" in candidate else fallback_candidates).add(
+                candidate
+            )
     candidates = rooted_candidates | (
         fallback_candidates - {p.split("/")[0] for p in rooted_candidates}
     )
@@ -144,7 +159,8 @@ def discover_topology(
                 "boundary_docs": [
                     f"{directory}/{name}"
                     for name in ("AGENTS.md", "CLAUDE.md", "README.md")
-                    if (root / directory / name).is_file()
+                    if (root / directory).is_dir()
+                    and (root / directory / name).is_file()
                 ],
             }
         )

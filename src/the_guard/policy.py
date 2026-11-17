@@ -58,11 +58,14 @@ def _read_policy_file(
     *,
     revision: str | None,
     _seen: frozenset[str] = frozenset(),
+    loaded_paths: set[str] | None = None,
 ) -> str:
     if Path(rel_path).is_absolute() or ".." in Path(rel_path).parts:
         raise PolicyError(f"Unsafe policy path: {rel_path}")
     if rel_path in _seen:
         raise PolicyError(f"Cyclic policy symlink: {rel_path}")
+    if loaded_paths is not None:
+        loaded_paths.add(rel_path)
     if revision is not None:
         try:
             entry = subprocess.run(
@@ -86,7 +89,8 @@ def _read_policy_file(
                     posixpath.join(posixpath.dirname(rel_path), link)
                 )
                 return _read_policy_file(
-                    repo_root, target, revision=revision, _seen=_seen | {rel_path}
+                    repo_root, target, revision=revision, _seen=_seen | {rel_path},
+                    loaded_paths=loaded_paths,
                 )
             proc = subprocess.run(
                 ["git", "show", f"{revision}:{rel_path}"],

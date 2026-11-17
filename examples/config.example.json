@@ -166,6 +166,9 @@
       "surface": [
         "foundation"
       ]
-    }
+    },
+    "architecture_docs": [
+      "AGENTS.md"
+    ]
   }
 }

@@ -8,8 +8,10 @@ import sys
 from pathlib import Path
 
 from .config import load_config
+from .git_helpers import changed_files
+from .policy import PolicyError, load_policy
 from .review.repository import collect_review_scope, resolve_or_carry_forward_receipt
-from .topology import run_topology_guard
+from .topology import check_contract_drift, run_topology_guard
 
 
 HOOK_CONTENT = (
@@ -84,6 +86,23 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
             raise ValueError(
                 "Protected branch creation needs an explicit reviewed baseline; initialize the remote before enabling this hook"
             )
+        try:
+            load_policy(root, revision=local_sha, config=config)
+            changed = changed_files(root, remote_sha)
+            findings = run_topology_guard(root, changed, base=remote_sha, config=config)
+            findings.extend(
+                check_contract_drift(root, changed, base=remote_sha, config=config)
+            )
+        except PolicyError as exc:
+            print(f"NO-GO: {exc}", file=sys.stderr)
+            return 2
+        for finding in findings:
+            print(
+                f"{finding.path}:{finding.line}: {finding.rule_id}: {finding.message}",
+                file=sys.stderr,
+            )
+        if findings:
+            return 2
         scope = collect_review_scope(root, main_branch=remote_sha)
         if (
             not scope.is_exempt

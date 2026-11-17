@@ -76,7 +76,10 @@ def run_topology_guard(
             replace(f, rule_id=config.rule_id_prefix + f.rule_id.removeprefix("guard."))
             for f in current
         )
-        findings.extend(check_configured(path, text, baseline, changed, config))
+        # Full audit reports unregistered modules through its inventory column.
+        findings.extend(check_configured(
+            path, text, baseline, changed, config, check_unregistered=not full_scan
+        ))
     return findings
 
 

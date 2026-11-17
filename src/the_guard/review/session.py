@@ -13,6 +13,7 @@ from typing import IO, Any
 from ..config import GuardConfig
 from ..policy import Policy
 from .contract import BlockingFinding
+from .documents import architecture_document_paths, boundary_document_paths, read_document
 
 RECEIPT_SCHEMA = "the-guard-receipt/v1"
 SESSION_SCHEMA = "the-guard-session/v1"
@@ -24,34 +25,70 @@ MAX_RETAINED_SESSIONS = 30
 MAX_RETAINED_RECEIPTS = 200
 
 
-def compute_review_contract_digest(policy: Policy, config: GuardConfig) -> str:
+def compute_review_contract_digest(
+    policy: Policy,
+    config: GuardConfig,
+    *,
+    repo_root: Path | None = None,
+    revision: str | None = None,
+) -> str:
     """Hash the complete reviewer contract and its policy/config dependencies."""
     digest = hashlib.sha256()
     source_dir = Path(__file__).parent
     for path in sorted(source_dir.glob("*.py")):
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
-    for path in (Path(__file__).parents[1] / "config.py", Path(__file__).parents[1] / "policy.py"):
+    for path in (
+        Path(__file__).parents[1] / "config.py",
+        Path(__file__).parents[1] / "policy.py",
+    ):
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
+    documents = {}
+    if repo_root is not None:
+        paths = architecture_document_paths(config)
+        for module in config.topology.get("modules", []):
+            paths.update(boundary_document_paths(module))
+        for path in sorted(paths):
+            body = read_document(repo_root, path, revision)
+            if body is not None:
+                documents[path] = body
     payload = {
+        "documents": documents,
         "config": asdict(config),
         "policy": {
             "manifest_schema": policy.schema,
             "rules": [
-                {"id": rule.id, "severity": rule.severity, "scope": list(rule.scope),
-                 "summary": rule.summary, "details": rule.details, "detail_body": rule.detail_body}
+                {
+                    "id": rule.id,
+                    "severity": rule.severity,
+                    "scope": list(rule.scope),
+                    "summary": rule.summary,
+                    "details": rule.details,
+                    "detail_body": rule.detail_body,
+                }
                 for rule in policy.rules
             ],
         },
     }
-    digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    digest.update(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
     return digest.hexdigest()
 
 
-def contract_digest_matches(stored_digest: str, policy: Policy, config: GuardConfig) -> bool:
+def contract_digest_matches(
+    stored_digest: str,
+    policy: Policy,
+    config: GuardConfig,
+    *,
+    repo_root: Path | None = None,
+    revision: str | None = None,
+) -> bool:
     """Return whether persisted session evidence belongs to the current contract."""
-    return bool(stored_digest) and stored_digest == compute_review_contract_digest(policy, config)
+    return bool(stored_digest) and stored_digest == compute_review_contract_digest(
+        policy, config, repo_root=repo_root, revision=revision
+    )
 
 
 @dataclass(frozen=True)

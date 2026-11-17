@@ -77,11 +77,14 @@ def run_architecture_review(
 
     policy = load_policy(repo_root, revision=scope.head_sha)
     contract_config = load_config(repo_root, revision=scope.head_sha)
-    current_contract_digest = compute_review_contract_digest(policy, contract_config)
+    current_contract_digest = compute_review_contract_digest(
+        policy, contract_config, repo_root=repo_root, revision=scope.head_sha
+    )
     branch = current_branch_name(repo_root)
     prior_session = None if force else load_review_session(repo_root, branch)
     contract_changed = prior_session is not None and not contract_digest_matches(
-        prior_session.contract_digest, policy, contract_config
+        prior_session.contract_digest, policy, contract_config,
+        repo_root=repo_root, revision=scope.head_sha
     )
     if contract_changed:
         prior_session = None

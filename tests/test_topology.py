@@ -10,6 +10,7 @@ from pathlib import Path
 from the_guard.config import GuardConfig, load_config
 from the_guard.topology import (
     audit_topology,
+    check_contract_drift,
     discover_topology,
     run_topology_guard,
     sync_topology,
@@ -54,6 +55,68 @@ class TopologyTests(unittest.TestCase):
             base,
             _compute_changed_lines(base, text) if base is not None else None,
         )
+
+    def test_file_module_resolution_and_root_disambiguation(self):
+        modules = ["src/the_guard/config.py", "src/the_guard/review", "packages/core/config.ts"]
+        for spec in ("the_guard.config.load_config", "src.the_guard.config", "../config", "../config.py"):
+            with self.subTest(spec=spec):
+                self.assertEqual(resolve_target_module("src/the_guard/review/main.py", spec, modules),
+                                 "src/the_guard/config.py")
+        self.assertEqual(resolve_target_module("packages/core/nested/a.ts", "../config.js", modules),
+                         "packages/core/config.ts")
+        self.assertEqual(resolve_target_module("packages/plugin/a.ts", "@scope/core/config.js", modules),
+                         "packages/core/config.ts")
+        self.assertEqual(owner_module("src/the_guard/config.py", modules), "src/the_guard/config.py")
+        self.assertIsNone(owner_module("src/the_guard/config.pyx", modules))
+        imports = extract_imports("services/billing/nested/main.py", "from ..api import value\n")
+        specs = {spec for _, _, spec in imports}
+        self.assertIn("services.billing.api", specs)
+        self.assertIn("billing.api", specs)
+        targets = {resolve_target_module("services/billing/nested/main.py", spec,
+                   ["services/billing/nested", "services/billing", "packages/billing"]) for spec in specs}
+        self.assertEqual(targets, {None, "services/billing"})
+        self.assertEqual(extract_imports("packages/plugin/a.cjs", "require('../core/config.js',)"),
+                         [(1, 1, "../core/config.js")])
+
+    def test_unregistered_ownership_ratchets_whole_file_but_exempts_line_one(self):
+        cfg = GuardConfig(topology={"enforce_module_dependencies": True})
+        path, text = "packages/new/main.py", "value = 1\nvalue = 2\n"
+        self.assertEqual(check_configured(path, text, text, set(), cfg), [])
+        findings = check_configured(path, text, text, {2}, cfg)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].line, 1)
+        exempt = "# guard-exempt guard.service-boundaries: fixture ownership\nvalue = 2\n"
+        self.assertEqual(check_configured(path, exempt, None, {2}, cfg), [])
+        self.assertEqual(check_configured("tests/main.py", text, None, None, cfg), [])
+
+    def test_contract_drift_preserves_legacy_and_blocks_last_import_removal(self):
+        self.config({"enforce_module_dependencies": True, "architecture_docs": ["docs/old.md"],
+            "modules": [{"path": "packages/a", "dependencies": ["packages/b", "packages/c"]},
+                        {"path": "packages/b", "dependencies": []},
+                        {"path": "packages/c", "dependencies": []}]})
+        self.write("packages/a/main.ts", "import '../b/main.js';\n")
+        self.write("packages/a/keep.ts", "export const value = 1;\n")
+        self.write("packages/b/main.ts", "export const value = 1;\n")
+        self.write("packages/c/main.ts", "export const value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "legacy debt with one live edge")
+        self.assertEqual(check_contract_drift(self.root, ["packages/a/main.ts"], base="HEAD"), [])
+        self.write("packages/a/keep.ts", "export const value = 2;\n")
+        self.assertEqual(check_contract_drift(self.root, ["packages/a/keep.ts"], base="HEAD"), [])
+        (self.root / "packages/a/main.ts").unlink()
+        findings = check_contract_drift(self.root, [], base="HEAD")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("packages/b", findings[0].message)
+        self.assertNotIn("packages/c", findings[0].message)
+        self.assertEqual(findings[0].rule_id, "guard.single-source-of-truth")
+        self.assertTrue(check_contract_drift(self.root, [], base="absent-base"))
+
+    def test_self_repository_has_complete_minimal_governance(self):
+        root = Path(__file__).resolve().parents[1]
+        report = audit_topology(root)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(len(load_config(root).topology["modules"]), 12)
+        self.assertEqual(report["stale_dependencies"], [])
 
     def test_regex_literals_do_not_hide_imports_or_confuse_division(self):
         cases = [
