@@ -26,6 +26,8 @@ IGNORED = {
 NON_MODULE_TOP_DIRS = {
     "docs",
     "build_docs",
+    "examples",
+    "benchmarks",
     "scripts",
     "tests",
     "test",
@@ -121,7 +123,7 @@ def discover_topology(
             if path.suffix not in JS_EXTENSIONS | {".py"}:
                 continue
             relative = path.relative_to(root).as_posix()
-            for _, spec in extract_imports(
+            for _, _, spec in extract_imports(
                 relative, path.read_text(errors="replace"), config.module_doc_roots
             ):
                 target = resolve_target_module(

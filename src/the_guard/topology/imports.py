@@ -20,8 +20,8 @@ _JS_TOKEN = re.compile(
 
 def extract_imports(
     path: str, text: str, module_doc_roots: Sequence[str] = GuardConfig.module_doc_roots
-) -> list[tuple[int, str]]:
-    """Return (statement start line, specifier), including Python from-import aliases."""
+) -> list[tuple[int, int, str]]:
+    """Return (statement start line, end line, specifier), including Python from-import aliases."""
     if path.endswith(".py"):
         try:
             tree = ast.parse(text)
@@ -30,7 +30,10 @@ def extract_imports(
         imports = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                imports.extend((node.lineno, alias.name) for alias in node.names)
+                imports.extend(
+                    (node.lineno, node.end_lineno or node.lineno, alias.name)
+                    for alias in node.names
+                )
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 if node.level:
@@ -43,16 +46,22 @@ def extract_imports(
                         parts = parts[1:]
                     module = ".".join([*parts, *([module] if module else [])])
                 imports.extend(
-                    (node.lineno, module + "." + alias.name if module else alias.name)
+                    (
+                        node.lineno,
+                        node.end_lineno or node.lineno,
+                        module + "." + alias.name if module else alias.name,
+                    )
                     for alias in node.names
                 )
                 if module:
-                    imports.append((node.lineno, module))
+                    imports.append(
+                        (node.lineno, node.end_lineno or node.lineno, module)
+                    )
         return sorted(set(imports))
     if PurePosixPath(path).suffix not in JS_EXTENSIONS:
         # Preserve configured import-prefix checks for other language text.
         return [
-            (number, match.group(1))
+            (number, number, match.group(1))
             for number, line in enumerate(text.splitlines(), 1)
             for match in re.finditer(
                 r"""(?:from\s+|import\s+|require\(\s*)["']([^"']+)["']""", line
@@ -87,13 +96,18 @@ def extract_imports(
         elif value in {"import", "export"} and tokens[tail][0][0] not in "\"'":
             # Static declarations may span lines, but not other statements.
             while tail < len(tokens) and tokens[tail][0] not in {
-                "from",
                 ";",
                 "import",
                 "export",
                 "=",
                 "(",
             }:
+                if (
+                    tokens[tail][0] == "from"
+                    and tail + 1 < len(tokens)
+                    and tokens[tail + 1][0].startswith(("'", '"'))
+                ):
+                    break
                 tail += 1
             if tail >= len(tokens) or tokens[tail][0] != "from":
                 continue
@@ -103,7 +117,7 @@ def extract_imports(
         if tail < len(tokens):
             spec = tokens[tail][0]
             if spec.startswith(("'", '"')):
-                imports.append((number, spec[1:-1]))
+                imports.append((number, tokens[tail][1], spec[1:-1]))
     return sorted(set(imports))
 
 

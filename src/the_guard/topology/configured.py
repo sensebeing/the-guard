@@ -158,22 +158,14 @@ def check_configured(
         )
         rule_id = rule.get("rule_id", prefix + "service-boundaries")
         reported_lines = set()
-        for number, name in imports:
+        for start, end, name in imports:
+            number = _import_finding_line(
+                start, end, lines, changed_lines, rule_id, config
+            )
             if (
-                number not in reported_lines
-                and _is_range_touched(changed_lines, number, number)
-                and not _line_exempts_rule(
-                    lines[number - 1], rule_id, exempt_tag=config.exempt_tag
-                )
-                and any(
-                    p
-                    and (
-                        name == p
-                        or name.startswith(p + ".")
-                        or name.startswith(p + "/")
-                    )
-                    for p in forbidden
-                )
+                number is not None
+                and number not in reported_lines
+                and any(_matches_import_prefix(name, p) for p in forbidden)
             ):
                 reported_lines.add(number)
                 findings.append(
@@ -199,7 +191,7 @@ def _is_range_touched(changed: set[int] | None, start: int, end: int) -> bool:
 
 def _check_module_imports(
     path: str,
-    imports: list[tuple[int, str]],
+    imports: list[tuple[int, int, str]],
     lines: list[str],
     changed_lines: set[int] | None,
     config: GuardConfig,
@@ -214,11 +206,10 @@ def _check_module_imports(
     layers = topology.get("layers", {})
     rule_id = config.rule_id_prefix + "service-boundaries"
     findings = []
-    for number, spec in imports:
+    for start, end, spec in imports:
         target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)
-        if target_path is None or not _is_range_touched(changed_lines, number, number):
-            continue
-        if _line_exempts_rule(lines[number - 1], rule_id, exempt_tag=config.exempt_tag):
+        number = _import_finding_line(start, end, lines, changed_lines, rule_id, config)
+        if target_path is None or number is None:
             continue
         target = modules[target_path]
         source_layer, target_layer = source.get("layer"), target.get("layer")
@@ -243,3 +234,33 @@ def _check_module_imports(
             continue
         findings.append(Finding(rule_id, path, number, message))
     return findings
+
+
+def _import_finding_line(
+    start: int,
+    end: int,
+    lines: list[str],
+    changed_lines: set[int] | None,
+    rule_id: str,
+    config: GuardConfig,
+) -> int | None:
+    """Apply one touched-span/exemption policy to all import boundary checks."""
+    if not _is_range_touched(changed_lines, start, end):
+        return None
+    if any(
+        _line_exempts_rule(lines[line - 1], rule_id, exempt_tag=config.exempt_tag)
+        for line in {start, end}
+    ):
+        return None
+    return end if changed_lines is not None and start not in changed_lines else start
+
+
+def _matches_import_prefix(name: str, prefix: str) -> bool:
+    if not prefix:
+        return False
+    base = prefix.rstrip("/.")
+    return (
+        (prefix.endswith(("/", ".")) and name.startswith(prefix))
+        or name == base
+        or (bool(base) and name.startswith((base + ".", base + "/")))
+    )

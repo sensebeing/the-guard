@@ -55,6 +55,56 @@ class TopologyTests(unittest.TestCase):
             _compute_changed_lines(base, text) if base is not None else None,
         )
 
+    def test_multiline_import_spans_and_boundary_ratchets(self):
+        modules = [
+            {"path": "packages/core", "dependencies": []},
+            {"path": "packages/target", "dependencies": []},
+        ]
+        cases = [
+            ("packages/core/index.ts", 'import {\n from as f,\n} from "../target/index.ts";\n', (1, 3, "../target/index.ts"), "../"),
+            ("packages/core/index.ts", 'export {\n from\n} from "../target/index.ts";\n', (1, 3, "../target/index.ts"), "../target/"),
+            ("packages/core/index.py", 'from .. import (\n target,\n)\n', (1, 3, "target"), "target/"),
+        ]
+        for path, code, extracted, prefix in cases:
+            with self.subTest(path=path, code=code):
+                self.assertIn(extracted, extract_imports(path, code))
+                for topology in (
+                    {"modules": modules, "enforce_module_dependencies": True},
+                    {"forbidden_imports": [{"imports": [prefix]}]},
+                    {"module_boundaries": [{"from": "packages/core/", "to": prefix}]},
+                ):
+                    cfg = GuardConfig(topology=topology)
+                    for changed, expected in (({2}, 3), ({3}, 3), ({1}, 1), (None, 1)):
+                        findings = check_configured(path, code, None, changed, cfg)
+                        self.assertEqual([f.line for f in findings], [expected])
+                    self.assertEqual(check_configured(path, code, code, {4}, cfg), [])
+                    comment = " #" if path.endswith(".py") else " //"
+                    for line in (0, 2):
+                        lines = code.splitlines()
+                        lines[line] += comment + " guard-exempt guard.service-boundaries: approved boundary fixture"
+                        self.assertEqual(check_configured(path, "\n".join(lines), None, {2}, cfg), [])
+        for prefix in ("pkg/", "pkg."):
+            cfg = GuardConfig(topology={"forbidden_imports": [{"to": prefix}]})
+            for spec in ("pkg", "pkg/item", "pkg.item"):
+                self.assertEqual(len(check_configured("src/a.ts", f'import "{spec}";', None, None, cfg)), 1)
+            self.assertEqual(check_configured("src/a.ts", 'import "pkg_other";', None, None, cfg), [])
+
+    def test_examples_and_benchmarks_are_not_production_modules(self):
+        self.config({"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/core", "dependencies": []},
+            {"path": "packages/host", "dependencies": []},
+        ]})
+        self.write("packages/core/index.ts", "export const x = 1;")
+        self.write("packages/host/index.ts", "export const x = 1;")
+        for directory in ("examples", "benchmarks"):
+            self.write(f"{directory}/main.ts", "import '../packages/host/index.ts';")
+            self.write(f"packages/core/{directory}/main.ts", "import '../../host/index.ts';")
+        report = audit_topology(self.root)
+        self.assertEqual(report["unregistered_modules"], [])
+        self.assertEqual(report["findings"], [])
+        self.assertTrue(report["passed"])
+        self.assertEqual(discover_topology(self.root)["modules"][0]["dependencies"], [])
+
     def test_shared_js_extraction_and_discovery(self):
         code = '''// import "ignored";
 /* export * from "ignored";
@@ -75,8 +125,8 @@ import '../orca-workspace/index.ts';
             with self.subTest(extension=extension):
                 path = f"packages/mailbox/main.{extension}"
                 imports = extract_imports(path, code)
-                self.assertEqual([line for line, _ in imports], [5, 8, 9, 10, 13, 14])
-                self.assertEqual({spec for _, spec in imports}, {"../orca-workspace/index.ts"})
+                self.assertEqual([line for line, _, _ in imports], [5, 8, 9, 10, 13, 14])
+                self.assertEqual({spec for _, _, spec in imports}, {"../orca-workspace/index.ts"})
                 self.write(path, code)
         self.write("packages/orca-workspace/index.ts", "export const host = 1;")
         modules = {m["path"]: m for m in discover_topology(self.root)["modules"]}
@@ -113,10 +163,10 @@ import '../orca-workspace/index.ts';
     def test_python_from_and_relative_imports_share_resolution(self):
         code = "from ..storage import rows\nfrom internal import storage\n"
         imports = extract_imports("src/api/sub/main.py", code)
-        self.assertIn((1, "api.storage.rows"), imports)
-        self.assertIn((2, "internal.storage"), imports)
-        self.assertIn((2, "internal"), imports)
-        self.assertIn((1, "api.storage.rows"), extract_imports("src/api/sub/main.py", code, ("custom",)))
+        self.assertIn((1, 1, "api.storage.rows"), imports)
+        self.assertIn((2, 2, "internal.storage"), imports)
+        self.assertIn((2, 2, "internal"), imports)
+        self.assertIn((1, 1, "api.storage.rows"), extract_imports("src/api/sub/main.py", code, ("custom",)))
         self.write("src/api/main.py", "from ..storage import rows\n")
         self.write("src/storage/__init__.py", "")
         modules = {m["path"]: m for m in discover_topology(self.root)["modules"]}

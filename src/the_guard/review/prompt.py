@@ -12,6 +12,7 @@ from typing import Any
 
 from ..config import load_config
 from ..policy import Policy, load_policy
+from ..topology.imports import owner_module
 from .contract import (
     DEFAULT_INCREMENTAL_DIFF_MAX_CHARS,
     MAX_REVIEWER_NOTE_CHARS,
@@ -295,14 +296,16 @@ def _render_prior_findings_section(
 
 def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
     config = load_config(repo_root, revision=scope.head_sha)
+    declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
     touched = set()
     for path in scope.reviewable_files:
-        parts = PurePosixPath(path).parts
-        if len(parts) >= 2 and parts[0] in config.module_doc_roots:
-            touched.add("/".join(parts[:2]))
-    for module in config.topology.get("modules", []):
-        if any(p.startswith(module["path"] + "/") for p in scope.reviewable_files):
-            touched.add(module["path"])
+        owner = owner_module(path, list(declared_modules))
+        if owner is not None:
+            touched.add(owner)
+        else:
+            parts = PurePosixPath(path).parts
+            if len(parts) >= 2 and parts[0] in config.module_doc_roots:
+                touched.add("/".join(parts[:2]))
     rendered_topology = dict(config.topology)
     sections = [
         f"Project: {config.review.get('project_title', repo_root.name)}",
@@ -311,7 +314,6 @@ def _snapshot_context(repo_root: Path, scope: ReviewScope) -> list[str]:
     ]
     loaded_boundary_modules: set[str] = set()
     loaded_docs: set[str] = set()
-    declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
     for module in sorted(touched):
         paths = list(
             dict.fromkeys([
@@ -418,7 +420,13 @@ def _has_explicit_topology_contract(
             return True
     return any(
         module.get("path") == module_path
-        and (module.get("boundary_docs") or module.get("dependencies"))
+        and (
+            module.get("boundary_docs")
+            or module.get("dependencies")
+            or topology.get("enforce_module_dependencies") is True
+            or bool(topology.get("layers") and module.get("layer"))
+            or bool(module.get("role"))
+        )
         for module in topology.get("modules", [])
         if isinstance(module, dict)
     )

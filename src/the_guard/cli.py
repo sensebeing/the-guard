@@ -226,6 +226,12 @@ def main(argv: list[str] | None = None) -> int:
             return (edit_guard if args.action == "edit-guard" else main_push_gate)(
                 root, sys.stdin.read()
             )
+        if (
+            args.command == "topology"
+            and args.action in {"sync", "audit"}
+            and (args.base is not None or args.file)
+        ):
+            raise ValueError(f"topology {args.action} does not accept --base or --file")
         if args.command == "topology" and args.action == "sync":
             print(json.dumps(sync_topology(root), indent=2))
             return 0

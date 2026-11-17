@@ -100,6 +100,17 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not depend"):
             load_config(self.root)
 
+    def test_topology_inventory_actions_reject_diff_scope_flags(self):
+        before = (self.root / ".guard/config.json").read_text()
+        for action in ("sync", "audit"):
+            for flags in (["--base", "main"], ["--file", "src/api.py"]):
+                with self.subTest(action=action, flags=flags):
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        result = main(["topology", action, "--json", "--repo-root", str(self.root), *flags])
+                    self.assertEqual(result, 2)
+                    self.assertIn("does not accept --base or --file", err.getvalue())
+                    self.assertEqual((self.root / ".guard/config.json").read_text(), before)
+
     def test_topology_audit_cli_full_scan_json_and_text_exit_codes(self):
         self.write("src/api.py", 'def get_item():\n    return "FOR UPDATE"\n')
         self.commit()

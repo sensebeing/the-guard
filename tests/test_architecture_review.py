@@ -909,6 +909,36 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 {"reviewed_head_sha": previous, "summary": expected}, expected
             )
 
+    def test_prompt_resolves_nested_leaf_and_top_level_contracts(self) -> None:
+        for contract in (
+            {"enforce_module_dependencies": True},
+            {"layers": {"core": []}},
+            {},
+        ):
+            with self.subTest(contract=contract), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                (repo / "packages/host/nested").mkdir(parents=True)
+                (repo / "frontend").mkdir()
+                (repo / "docs/frontend.md").write_text("FRONTEND OWNER DOCUMENT")
+                (repo / "packages/host/nested/main.py").write_text("value = 1\n")
+                (repo / "frontend/main.py").write_text("value = 1\n")
+                leaf = {"path": "packages/host/nested", "dependencies": []}
+                if "layers" in contract:
+                    leaf["layer"] = "core"
+                elif not contract:
+                    leaf["role"] = "Foundation state owner"
+                topology = {**contract, "modules": [leaf,
+                    {"path": "frontend", "boundary_docs": ["docs/frontend.md"], "dependencies": []},
+                ]}
+                (repo / ".guard").mkdir(exist_ok=True)
+                (repo / ".guard/config.json").write_text(json.dumps({"topology": topology}))
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "nested and top level contracts")
+                prompt = build_review_prompt(repo, collect_review_scope(repo))
+                self.assertIn("FRONTEND OWNER DOCUMENT", prompt)
+                self.assertNotIn("## Unbound Module Topology Guidance", prompt)
+                self.assertNotIn("## Boundary reference: packages/host/", prompt)
+
     def test_prompt_keeps_full_topology_and_snapshot_declared_docs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))

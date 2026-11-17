@@ -31,7 +31,7 @@ def audit_topology(
         source = owner_module(path, paths)
         if source is None:
             continue
-        for _, spec in extract_imports(
+        for _, _, spec in extract_imports(
             path, (root / path).read_text(errors="replace"), config.module_doc_roots
         ):
             target = resolve_target_module(path, spec, paths, config.module_doc_roots)

@@ -8,6 +8,8 @@ def is_excluded_topology_path(path: str) -> bool:
     return bool(
         parts
         & {
+            "examples",
+            "benchmarks",
             "tests",
             "test",
             "migrations",
