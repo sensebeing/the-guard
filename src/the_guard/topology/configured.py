@@ -267,6 +267,22 @@ def _check_module_imports(
     )
     old_paths = list(old_modules)
     old_source = owner_module(path, old_paths)
+    old_targets = (
+        {
+            (
+                start,
+                end,
+                resolve_target_module(
+                    path, spec, old_paths, baseline_config.module_doc_roots
+                ),
+            )
+            for start, end, spec in extract_imports(
+                path, "\n".join(lines), baseline_config.module_doc_roots
+            )
+        }
+        if baseline_config is not None
+        else set()
+    )
     findings = []
     for start, end, spec in imports:
         target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)
@@ -278,18 +294,11 @@ def _check_module_imports(
         if violation is None:
             continue
         if baseline_config is not None and old_source == source_path:
-            old_target = resolve_target_module(
-                path, spec, old_paths, baseline_config.module_doc_roots
-            )
-            if (
-                old_target == target_path
-                and _module_import_violation(
-                    old_modules[old_source],
-                    old_modules[old_target],
-                    baseline_config.topology,
-                )
-                is not None
-            ):
+            if (start, end, target_path) in old_targets and _module_import_violation(
+                old_modules[old_source],
+                old_modules[target_path],
+                baseline_config.topology,
+            ) is not None:
                 continue
         if violation == "layer":
             message = (

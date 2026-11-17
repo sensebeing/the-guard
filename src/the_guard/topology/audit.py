@@ -199,7 +199,10 @@ def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set
     ) or (current.get("layers") and not old.get("layers")):
         return set(modules)
     old_modules = {m["path"]: m for m in old.get("modules", [])}
-    if set(modules) != set(old_modules):
+    if (
+        set(modules) != set(old_modules)
+        or config.module_doc_roots != baseline.module_doc_roots
+    ):
         # Owner additions/removals change longest-prefix and alias resolution globally.
         return set(modules)
     tightened = {

@@ -463,6 +463,36 @@ class TopologyTests(unittest.TestCase):
             check_contract_drift(self.root, [".guard/config.json"], base="HEAD"), []
         )
 
+    def test_module_roots_changes_recheck_working_and_committed_resolution(self):
+        config = {
+            "module_doc_roots": ["src"],
+            "topology": {
+                "enforce_module_dependencies": True,
+                "modules": [
+                    {"path": "packages/a", "dependencies": []},
+                    {"path": "packages/b", "dependencies": []},
+                ],
+            },
+        }
+        self.write(".guard/config.json", json.dumps(config))
+        self.write("packages/a/main.py", "import b\n")
+        self.write("packages/b/main.py", "value = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "external alias baseline")
+        base = self.git("rev-parse", "HEAD")
+        config["module_doc_roots"].append("packages")
+        self.write(".guard/config.json", json.dumps(config))
+        working = check_contract_drift(self.root, [".guard/config.json"], base=base)
+        self.assertEqual(len(working), 1)
+        self.assertEqual(working[0].path, "packages/a/main.py")
+        self.assertIn("packages/b", working[0].message)
+        self.git("add", ".")
+        self.git("commit", "-m", "alias now resolves to internal owner")
+        snapshot = check_contract_drift(
+            self.root, [".guard/config.json"], base=base, revision="HEAD"
+        )
+        self.assertEqual(snapshot, working)
+
     def test_missing_document_grandfathering_is_per_declaration(self):
         topology = {"architecture_docs": ["docs/legacy-root.md"], "modules": [
             {"path": "packages/a", "boundary_docs": ["docs/legacy-a.md"]},
