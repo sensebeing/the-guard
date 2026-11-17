@@ -78,6 +78,28 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(extract_imports("packages/plugin/a.cjs", "require('../core/config.js',)"),
                          [(1, 1, "../core/config.js")])
 
+    def test_package_initializers_and_root_file_aliases_enforce_layers(self):
+        modules = ["src/the_guard/__init__.py", "src/the_guard/config.py", "src/config.py"]
+        for spec in ("the_guard", "the_guard.load_config", "src.the_guard", "src.the_guard.load_config"):
+            self.assertEqual(resolve_target_module("src/the_guard/config.py", spec, modules),
+                             "src/the_guard/__init__.py")
+        self.assertEqual(resolve_target_module("src/the_guard/__init__.py", "the_guard.config.load_config", modules),
+                         "src/the_guard/config.py")
+        self.assertEqual(resolve_target_module("src/the_guard/config.py", "config", modules), "src/config.py")
+        self.assertIsNone(resolve_target_module("src/other.py", "config", ["src/config.py", "packages/config.py"]))
+        topology = {"layers": {"foundation": ["foundation"], "surface": ["foundation"]},
+                    "enforce_module_dependencies": True, "modules": [
+                        {"path": modules[0], "layer": "surface", "dependencies": [modules[1]]},
+                        {"path": modules[1], "layer": "foundation", "dependencies": []}]}
+        self.config(topology)
+        self.write(modules[0], "from .config import load_config\n")
+        self.write(modules[1], "from the_guard import load_config\n")
+        findings = run_topology_guard(self.root, [modules[1]], config=load_config(self.root))
+        self.assertTrue(any("layer 'surface'" in finding.message for finding in findings), findings)
+        inventory = {m["path"]: m for m in discover_topology(self.root)["modules"]}
+        self.assertEqual(inventory[modules[1]]["dependencies"], [modules[0]])
+        self.assertEqual(audit_topology(self.root)["stale_dependencies"], [])
+
     def test_unregistered_ownership_ratchets_whole_file_but_exempts_line_one(self):
         cfg = GuardConfig(topology={"enforce_module_dependencies": True})
         path, text = "packages/new/main.py", "value = 1\nvalue = 2\n"

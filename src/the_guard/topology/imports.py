@@ -268,13 +268,28 @@ def _module_stem(path: str) -> str:
     )
 
 
+def _module_identities(path: str) -> tuple[str, ...]:
+    stem = _module_stem(path)
+    if path.endswith("/__init__.py"):
+        return stem, stem.removesuffix("/__init__")
+    return (stem,)
+
+
 def _target_owner(path: str, module_paths: Sequence[str]) -> str | None:
     stem = _module_stem(path)
+    identities = sorted(
+        (
+            (identity, module)
+            for module in module_paths
+            for identity in _module_identities(module)
+        ),
+        key=lambda item: (-len(item[0]), -len(_module_stem(item[1])), item[1]),
+    )
     return next(
         (
-            m
-            for m in module_paths
-            if stem == _module_stem(m) or stem.startswith(_module_stem(m) + "/")
+            module
+            for identity, module in identities
+            if stem == identity or stem.startswith(identity + "/")
         ),
         None,
     )
@@ -300,29 +315,23 @@ def resolve_target_module(
                 parts.append(part)
         target = _target_owner("/".join(parts), paths)
     else:
-        target = next(
-            (
-                m
-                for m in paths
-                if _module_stem(spec) == _module_stem(m)
-                or spec == _module_stem(m).replace("/", ".")
-                or spec.startswith(
-                    (_module_stem(m) + "/", _module_stem(m).replace("/", ".") + ".")
-                )
-            ),
-            None,
+        literal = _module_stem(spec)
+        target = _target_owner(
+            literal if "/" in literal else literal.replace(".", "/"), paths
         )
         if target is None:
             alias = (
                 spec.split("/", 1)[1] if spec.startswith("@") and "/" in spec else spec
             )
             # Slash paths preserve file extensions; dotted Python paths become segments.
+            alias = _module_stem(alias)
             alias_path = alias if "/" in alias else alias.replace(".", "/")
             name, _, suffix = alias_path.partition("/")
             roots = {
                 "/".join(parts[:2])
                 for module in paths
-                if len(parts := module.split("/")) >= 2
+                for identity in _module_identities(module)
+                if len(parts := identity.split("/")) >= 2
                 and parts[0] in module_doc_roots
                 and parts[1] == name
             }
