@@ -14,6 +14,11 @@ DETERMINISTIC_IMPORT_EXTENSIONS = JS_EXTENSIONS | {".py"}
 _JS_TOKEN = re.compile(
     r"//[^\n]*|/\*[\s\S]*?\*/|"
     r"'(?:\\[\s\S]|[^'\\\r\n])*'|\"(?:\\[\s\S]|[^\"\\\r\n])*\"|"
+    r"\+\+|--|=>|\.\.\.|===|!==|==|!=|<=|>=|&&|\|\||\?\?|<<|>>>|>>|\*\*|"
+    r"[+\-*/%&|^~!<>=]=|\?\.|"
+    r"0[xX][\da-fA-F_]+n?|0[bB][01_]+n?|0[oO][0-7_]+n?|"
+    r"\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?[\d_]+)?n?|"
+    r"\.\d[\d_]*(?:[eE][+-]?[\d_]+)?|"
     r"[A-Za-z_$][\w$]*|\s+|[^\s]"
 )
 
@@ -61,8 +66,10 @@ def _regex_literal_end(text: str, start: int) -> int | None:
 
 def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
     """Skip template text but tokenize executable interpolations at any nesting depth."""
-    # None marks template text; integers count braces in code/interpolations.
-    contexts: list[int | None] = [0]
+    # Each code/interpolation frame owns its brace kinds; None marks template text.
+    contexts: list[list[str] | None] = [[]]
+    parens: list[bool] = []
+    regex_allowed = True
     index, line = 0, 1
     previous = ""
     while index < len(text):
@@ -73,10 +80,12 @@ def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
                 size = 2
             elif char == "`":
                 contexts.pop()
+                regex_allowed = False
                 previous = "`"
                 yield previous, line
             elif text.startswith("${", index):
-                contexts.append(0)
+                contexts.append([])
+                regex_allowed = True
                 previous = "{"
                 yield previous, line
                 size = 2
@@ -87,15 +96,10 @@ def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
         if match is None:
             break
         value = match.group()
-        expression_start = (
-            not previous
-            or previous in {"(", "[", "{", ",", ";", ":", "?", "!", "~"}
-            or previous[-1:] in "=&|+-*<>^%"
-            or previous in _JS_EXPRESSION_KEYWORDS
-        )
-        if value == "/" and expression_start:
+        if value in {"/", "/="} and regex_allowed:
             regex_end = _regex_literal_end(text, index)
             if regex_end is not None:
+                regex_allowed = False
                 previous = text[index:regex_end]
                 yield previous, line
                 index = regex_end
@@ -107,13 +111,41 @@ def _js_tokens(text: str) -> Iterator[tuple[str, int]]:
             continue
         if value == "`":
             contexts.append(None)
+        elif value == "(":
+            parens.append(previous in {"if", "while", "for", "with"})
+            regex_allowed = True
+        elif value == ")":
+            regex_allowed = parens.pop() if parens else False
         elif value == "{":
-            contexts[-1] += 1
+            is_expr_brace = regex_allowed and previous not in {
+                ")",
+                "else",
+                "do",
+                "try",
+                "finally",
+            }
+            contexts[-1].append("expr" if is_expr_brace else "block")
+            regex_allowed = True
         elif value == "}":
-            if contexts[-1] == 0 and len(contexts) > 1:
+            if not contexts[-1] and len(contexts) > 1:
                 contexts.pop()
             else:
-                contexts[-1] = max(0, contexts[-1] - 1)
+                kind = contexts[-1].pop() if contexts[-1] else "block"
+                regex_allowed = kind == "block"
+        elif value in {"++", "--"}:
+            # Prefix keeps expression-start context; postfix keeps division context.
+            pass
+        elif re.fullmatch(r"[A-Za-z_$][\w$]*", value):
+            regex_allowed = value in _JS_EXPRESSION_KEYWORDS
+        elif (
+            value.startswith(("'", '"'))
+            or value == "]"
+            or value[0].isdigit()
+            or (value.startswith(".") and len(value) > 1 and value[1].isdigit())
+        ):
+            regex_allowed = False
+        else:
+            regex_allowed = value not in {".", "?."}
         previous = value
         yield value, start_line
 

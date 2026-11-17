@@ -77,6 +77,31 @@ class TopologyTests(unittest.TestCase):
                 self.assertEqual(extract_imports("main.ts", code), [(2, 2, "../host/index.ts")])
         self.assertEqual(extract_imports("main.ts", "const broken = /unterminated"), [])
 
+    def test_regex_and_division_context_after_control_flow_and_expressions(self):
+        cases = [
+            'if (ready) /"/.test(value); import("../host/index.js");',
+            'while (ready) /"/.test(value); import("../host/index.js");',
+            'for (const x of list) /"/.test(x); import("../host/index.js");',
+            'if (ready) { act(); } /"/.test(value); import("../host/index.js");',
+            'const ratio = n++ / (await import("../host/index.js")).denominator / 2;',
+            'const ratio = (a + b) / (await import("../host/index.js")).denominator / 2;',
+            'const ratio = { valueOf: () => 4 } / (await import("../host/index.js")).denominator / 2;',
+        ]
+        cfg = GuardConfig(topology={"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/core", "dependencies": []},
+            {"path": "packages/host", "dependencies": []},
+        ]})
+        for code in cases:
+            with self.subTest(code=code):
+                self.assertEqual(extract_imports("packages/core/main.ts", code), [(1, 1, "../host/index.js")])
+                findings = check_configured("packages/core/main.ts", code, None, None, cfg)
+                self.assertEqual(len(findings), 1)
+                self.assertIn("packages/host", findings[0].message)
+        for value in ("n--", "++n", "fn()", "0xffn", "0b10", "0o77", "1.2e-3", ".5", "this", "true", "null", "arr[0]"):
+            with self.subTest(value=value):
+                code = f'const ratio = {value} / (await import("../host/index.js")).denominator / 2;'
+                self.assertEqual(extract_imports("main.ts", code), [(1, 1, "../host/index.js")])
+
     def test_explicit_script_rules_apply_in_both_changed_scope_and_audit(self):
         self.config({"forbidden_patterns": [{"scope_prefixes": ["scripts/"], "literal_or_regex": "private_state"}]})
         self.write("scripts/deploy.sh", "echo private_state\n")
