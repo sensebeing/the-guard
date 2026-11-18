@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .auto_update import maybe_activate_newer_checkout_package as _maybe_activate_newer_checkout_package
+
+_maybe_activate_newer_checkout_package(__path__)
+
 from .config import VERSION, GuardConfig, load_config
 from .finding import Finding, exempt_pattern
 from .policy import Policy, PolicyError, Rule, load_policy

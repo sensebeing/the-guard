@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 from .github import publish_github_pr_review
 
+from ..auto_update import maybe_delegate_to_checkout, maybe_trigger_background_auto_update
 from ..config import load_config
 from ..policy import PolicyError, load_policy
 from ..topology import run_topology_guard, check_contract_drift
@@ -36,10 +37,15 @@ def _parse_provider_model(value: str) -> tuple[str, dict[str, str]]:
     return provider, {"model": model, **({"effort": effort} if effort else {})}
 
 
-def main(argv: list[str] | None = None) -> int:
+def should_update_after_review(command: str, exit_code: int | None) -> bool:
+    return (
+        exit_code in {0, 2}
+        and (not command or command.startswith("-") or command in {"run", "check-push"})
+    )
+
+
+def main(argv: list[str] | None = None, *, _from_root_cli: bool = False) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
-    if not values or values[0].startswith("-"):
-        values.insert(0, "run")
     parser = argparse.ArgumentParser(prog="guard review")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("run", "check-push", "probe", "publish-github"):
@@ -65,8 +71,22 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument(
                 "--provider-model", type=_parse_provider_model, action="append"
             )
-    args = parser.parse_args(values)
+    args = parser.parse_args(values if values and not values[0].startswith("-") else ["run", *values])
     root = Path(args.repo_root).resolve()
+    if not _from_root_cli:
+        delegated = maybe_delegate_to_checkout(["review", *values], active_repo_root=root)
+        if delegated is not None:
+            return delegated
+    exit_code = None
+    try:
+        exit_code = _run_review(args, root)
+        return exit_code
+    finally:
+        if not _from_root_cli and should_update_after_review(args.command, exit_code):
+            maybe_trigger_background_auto_update(active_repo_root=root)
+
+
+def _run_review(args: argparse.Namespace, root: Path) -> int:
     try:
         config = load_config(root)
         main_branch = args.main_branch or config.main_branch
@@ -241,3 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"CHECKER_UNAVAILABLE: {exc}", file=sys.stderr)
         return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

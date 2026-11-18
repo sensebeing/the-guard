@@ -17,14 +17,14 @@ from .auto_update import (
     maybe_trigger_background_auto_update,
     self_update,
 )
-from .config import REVIEW_INTEGRATION_MODES, load_config
+from .config import REVIEW_INTEGRATION_MODES, VERSION, load_config
 from .distill import distill
 from .finding import Finding
 from .git_helpers import changed_files, resolve_changed_base
 from .hooks import edit_guard, main_push_gate
 from .init import initialize
 from .policy import PolicyError, load_policy
-from .review.cli import main as review_main
+from .review.cli import main as review_main, should_update_after_review
 from .review.github import publish_github_pr_review
 from .topology import check_contract_drift, audit_topology, run_topology_guard, sync_topology
 
@@ -155,16 +155,10 @@ def main(argv: list[str] | None = None) -> int:
                 return delegated_code
         if command in {"review", "check-push", "probe"}:
             sub_values = values[1:] if command == "review" else values
-            code = review_main(sub_values)
-            sub_cmd = (
-                sub_values[0]
-                if sub_values and not sub_values[0].startswith("-")
-                else "run"
+            code = review_main(sub_values, _from_root_cli=True)
+            should_trigger_auto_update = should_update_after_review(
+                sub_values[0] if sub_values else "", code
             )
-            should_trigger_auto_update = sub_cmd in {"run", "check-push"} and code in {
-                0,
-                2,
-            }
             return code
         parser = build_parser()
         args = parser.parse_args(values)
@@ -187,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "status":
             report = guard_status(
+                version=VERSION,
                 home_dir=args.home_dir,
                 state_dir=args.state_dir,
                 gemini_dir=args.gemini_dir,
