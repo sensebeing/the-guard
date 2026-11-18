@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import importlib
 import io
 import json
 import os
@@ -132,7 +133,7 @@ class AutoUpdateTests(unittest.TestCase):
                 self.assertIsNone(auto_update.maybe_delegate_to_checkout(["status"], home_dir=home, env=env))
                 trigger.assert_not_called()
 
-    def test_activate_newer_checkout_package_prepends_path_and_schedules_update(self) -> None:
+    def test_activate_newer_checkout_package_prepends_path_and_reloads_once(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             home, package, metadata, sha = self._make_checkout(root_path)
@@ -144,6 +145,7 @@ class AutoUpdateTests(unittest.TestCase):
                 mock.patch.object(Path, "home", return_value=home),
                 mock.patch.object(auto_update, "PACKAGE_DIR", install),
                 mock.patch.object(auto_update, "maybe_trigger_background_auto_update") as trigger,
+                mock.patch.object(importlib, "reload", return_value=auto_update) as reload,
             ):
                 (package / "untracked.py").touch()
                 self.assertFalse(auto_update.maybe_activate_newer_checkout_package(package_path))
@@ -152,10 +154,9 @@ class AutoUpdateTests(unittest.TestCase):
                 (package / "untracked.py").unlink()
                 self.assertTrue(auto_update.maybe_activate_newer_checkout_package(package_path))
                 self.assertEqual(package_path, [str(package.resolve()), str(install)])
-                trigger.assert_called_once_with()
-                with mock.patch.object(auto_update, "_subprocess_run") as git:
-                    self.assertFalse(auto_update.maybe_activate_newer_checkout_package(package_path))
-                    git.assert_not_called()
+                self.assertFalse(auto_update.maybe_activate_newer_checkout_package(package_path))
+                reload.assert_called_once_with(auto_update)
+                trigger.assert_not_called()
 
     def test_imports_resolve_config_and_policy_from_activated_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -170,17 +171,77 @@ class AutoUpdateTests(unittest.TestCase):
                 encoding="utf-8",
             )
             sha = self._commit_checkout(home / "the-guard", "new package version")
+            original_metadata = json.dumps({"installed_sha": sha[:7]})
+            metadata.write_text(original_metadata, encoding="utf-8")
+            result = subprocess.check_output(
+                [sys.executable, "-c", "import the_guard; from the_guard import policy; "
+                 "print(the_guard.__version__); print(policy.__file__)"],
+                env={"HOME": str(home), "PYTHONPATH": str(install.parent), "PATH": os.environ["PATH"],
+                     "THE_GUARD_BIN": "/usr/bin/true"},
+                text=True,
+            )
+            self.assertEqual(result.splitlines(), ["9.8.7", str(package.resolve() / "policy.py")])
+            self.assertEqual(metadata.read_text(encoding="utf-8"), original_metadata)
+            self.assertEqual(list(metadata.parent.iterdir()), [metadata])
+
+    def test_review_import_reloads_checkout_updater_then_delegates(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            consumer = Path(root)
+            home, package, metadata, _ = self._make_checkout(consumer)
+            install = self._make_stale_install(consumer, auto_update.PACKAGE_DIR)
+            shutil.copytree(install, package, dirs_exist_ok=True)
+            updater = package / "auto_update.py"
+            with updater.open("a", encoding="utf-8") as handle:
+                handle.write("\nCHECKOUT_ONLY_SYMBOL = 'checkout updater'\n")
+            review = package / "review/cli.py"
+            with review.open("a", encoding="utf-8") as handle:
+                handle.write("\nfrom ..auto_update import CHECKOUT_ONLY_SYMBOL\n")
+                handle.write("assert CHECKOUT_ONLY_SYMBOL == 'checkout updater'\n")
+            (package / "cli.py").write_text(
+                "import os\nimport sys\n"
+                "assert os.environ['THE_GUARD_DELEGATED'] == '1'\n"
+                "assert sys.argv[1:] == ['review', '--repo-root', '.']\n"
+                "print('delegated review')\n",
+                encoding="utf-8",
+            )
+            sha = self._commit_checkout(home / "the-guard", "checkout updater API")
             metadata.write_text(
                 json.dumps({"installed_sha": sha[:7], "last_checked_at": time.time()}),
                 encoding="utf-8",
             )
             result = subprocess.check_output(
-                [sys.executable, "-c", "import the_guard; from the_guard import policy; "
-                 "print(the_guard.__version__); print(policy.__file__)"],
-                env={"HOME": str(home), "PYTHONPATH": str(install.parent), "PATH": os.environ["PATH"]},
+                [sys.executable, "-c", 'from the_guard.review.cli import main; raise SystemExit(main(["--repo-root", "."]))'],
+                cwd=consumer,
+                env={"HOME": str(home), "PYTHONPATH": str(install.parent), "PATH": os.environ["PATH"],
+                     "THE_GUARD_BIN": "/usr/bin/true"},
                 text=True,
             )
-            self.assertEqual(result.splitlines(), ["9.8.7", str(package.resolve() / "policy.py")])
+            self.assertEqual(result.strip(), "delegated review")
+
+    def test_site_packages_uses_vcs_commit_without_global_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            home, package, metadata, installed_sha = self._make_checkout(root_path)
+            install = self._make_stale_install(root_path, package)
+            direct_url = install.parent / "the_guard-0.1.0.dist-info/direct_url.json"
+            direct_url.parent.mkdir()
+            direct_url.write_text(
+                json.dumps({"vcs_info": {"vcs": "git", "commit_id": installed_sha}}),
+                encoding="utf-8",
+            )
+            env = {"THE_GUARD_AUTO_UPDATE": "1", "PATH": os.environ["PATH"]}
+            with (
+                mock.patch.object(auto_update, "PACKAGE_DIR", install),
+                mock.patch.object(auto_update, "maybe_trigger_background_auto_update") as trigger,
+            ):
+                metadata.write_text(json.dumps({"installed_sha": installed_sha}), encoding="utf-8")
+                self.assertIsNone(auto_update.maybe_delegate_to_checkout(["status"], home_dir=home, env=env))
+                trigger.assert_not_called()
+                metadata.unlink()
+                (package / "new_module.py").touch()
+                self._commit_checkout(home / "the-guard", "advance checkout")
+                self.assertEqual(auto_update.maybe_delegate_to_checkout(["status"], home_dir=home, env=env), 2)
+                trigger.assert_called_once()
 
     def test_self_update_reinstalls_uv_tool_when_head_already_pulled(self) -> None:
         """A stale installed commit is repaired even when git pull has no new commit."""

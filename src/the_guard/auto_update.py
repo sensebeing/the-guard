@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,8 @@ from typing import Any, Iterator, Mapping
 
 AUTO_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 SKILL_NAMES = ("the-guard", "the-guard-setup")
-PACKAGE_DIR = Path(__file__).resolve().parent
+_BOOT_PACKAGE_DIR = globals().get("_BOOT_PACKAGE_DIR", Path(__file__).resolve().parent)
+PACKAGE_DIR = _BOOT_PACKAGE_DIR
 
 
 def compute_package_tree_digest(package_dir: Path) -> str:
@@ -87,6 +89,19 @@ def _load_json_dict(path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _installed_vcs_commit(package_dir: Path) -> str | None:
+    site_packages = package_dir.parent
+    if site_packages.name != "site-packages":
+        return None
+    for direct_url in sorted(site_packages.glob("the_guard-*.dist-info/direct_url.json")):
+        vcs_info = _load_json_dict(direct_url).get("vcs_info")
+        if isinstance(vcs_info, dict):
+            commit_id = vcs_info.get("commit_id")
+            if isinstance(commit_id, str) and commit_id.strip():
+                return commit_id.strip()
+    return None
 
 
 def _append_log(state_dir: Path, event: str, **fields: Any) -> None:
@@ -526,7 +541,6 @@ def maybe_trigger_background_auto_update(
 
 def _newer_checkout_package(
     *,
-    package_path: list[str],
     home_dir: Path | None = None,
     active_repo_root: str | Path | None = None,
     state_dir: str | Path | None = None,
@@ -544,7 +558,7 @@ def _newer_checkout_package(
         package = (checkout / "src/the_guard").resolve()
         if not package.is_dir() or package == PACKAGE_DIR.resolve():
             return None
-        if str(package) in package_path or not (checkout / ".git").exists():
+        if not (checkout / ".git").exists():
             return None
         if active_repo_root is not None and _is_same_git_repo(Path(active_repo_root), checkout):
             return None
@@ -555,20 +569,22 @@ def _newer_checkout_package(
             return None
         checkout_sha = _subprocess_run([*git, "rev-parse", "HEAD"], 20).strip()
         current_repo = PACKAGE_DIR.parents[1]
+        allow_same_commit = False
         if (current_repo / ".git").exists():
             if _is_same_git_repo(current_repo, checkout):
                 return None
             baseline = _subprocess_run(
                 ["git", "-C", str(current_repo), "rev-parse", "HEAD"], 20
             ).strip()
-            allow_same_commit = False
         else:
-            metadata_path = state_dir_for(home_dir=home_dir, state_dir=state_dir, env=env) / "auto_update.json"
-            metadata = _load_json_dict(metadata_path)
-            installed_sha = metadata.get("installed_sha")
-            baseline = installed_sha or metadata.get("source_sha")
-            # The installed SHA describes the global tool. A project venv can still be stale.
-            allow_same_commit = bool(installed_sha) and PACKAGE_DIR.parent.name == "site-packages"
+            baseline = _installed_vcs_commit(PACKAGE_DIR)
+            if baseline is None:
+                metadata_path = state_dir_for(home_dir=home_dir, state_dir=state_dir, env=env) / "auto_update.json"
+                metadata = _load_json_dict(metadata_path)
+                installed_sha = metadata.get("installed_sha")
+                baseline = installed_sha or metadata.get("source_sha")
+                # The installed SHA describes the global tool. A project venv can still be stale.
+                allow_same_commit = bool(installed_sha) and PACKAGE_DIR.parent.name == "site-packages"
         if not isinstance(baseline, str) or not baseline:
             return None
         baseline_sha = _subprocess_run(
@@ -588,17 +604,13 @@ def _newer_checkout_package(
 
 def maybe_activate_newer_checkout_package(package_path: list[str]) -> bool:
     """Use the selected checkout for submodules imported after package bootstrap."""
-    package = _newer_checkout_package(
-        package_path=package_path, active_repo_root=Path("."), env=os.environ
-    )
-    if package is None:
+    package = _newer_checkout_package(active_repo_root=Path("."), env=os.environ)
+    if package is None or str(package) in package_path:
         return False
     package_path[0:0] = [str(package)]
-    try:
-        maybe_trigger_background_auto_update()
-    except OSError:
-        # The update state directory can be unavailable while the checkout is readable.
-        pass
+    # Load the checkout's updater API while retaining the original delegation baseline.
+    boot_package_dir = PACKAGE_DIR
+    importlib.reload(sys.modules[__name__]).PACKAGE_DIR = boot_package_dir
     return True
 
 
@@ -613,9 +625,7 @@ def maybe_delegate_to_checkout(
         return None
     eff_env = dict(os.environ if env is None else env)
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    # Bootstrap stays imported from the installed tree after redirecting the package path.
     package = _newer_checkout_package(
-        package_path=sys.modules[__package__].__path__,
         home_dir=resolved_home,
         active_repo_root=active_repo_root,
         state_dir=state_dir,
