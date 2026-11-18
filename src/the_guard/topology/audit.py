@@ -185,6 +185,13 @@ def _snapshot_paths(
         metadata, separator, path = entry.partition("\t")
         if separator and (not files_only or not metadata.startswith("040000 ")):
             result.add(path)
+            if not recursive and not files_only:
+                # With nested pathspecs, ls-tree can emit children in place of a tree.
+                parent = path.rpartition("/")[0]
+                while parent:
+                    if parent in paths:
+                        result.add(parent)
+                    parent = parent.rpartition("/")[0]
     return result
 
 

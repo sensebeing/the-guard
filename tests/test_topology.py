@@ -135,6 +135,25 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(findings[0].rule_id, "guard.single-source-of-truth")
         self.assertTrue(check_contract_drift(self.root, [], base="absent-base"))
 
+    def test_contract_drift_recognizes_nested_modules_in_snapshot(self):
+        self.config({
+            "modules": [
+                {"path": "packages"},
+                {"path": "packages/cli"},
+            ],
+        })
+        self.write("packages/index.ts", "export const value = 1;\n")
+        self.write("packages/cli/index.ts", "export const value = 2;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "add nested modules")
+
+        self.assertEqual(
+            check_contract_drift(
+                self.root, [".guard/config.json"], base="HEAD", revision="HEAD"
+            ),
+            [],
+        )
+
     def test_missing_modules_ratchet_snapshot_and_sync_prunes_incoming_edges(self):
         topology = {
             "enforce_module_dependencies": True,
