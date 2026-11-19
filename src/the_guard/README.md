@@ -47,6 +47,17 @@ coupling never authorizes introducing or deepening a declared core boundary viol
 reviewed commit. Full, batched and incremental reviews map changes to these contracts
 before examining hunks. Missing boundary declarations do not count as loaded evidence.
 
+Full and incremental prompts also load up to four task blueprints from the target commit.
+Changed Markdown documents take priority, followed by repository-relative Markdown references
+from those documents or `--note`, including earlier Anchor-0 reports. Operational ledgers
+are excluded. Changes limited to non-contract reports or plans remain review-exempt.
+
+Reviewers derive the minimal target architecture from the business goal and loaded blueprints,
+then compare it with the committed schema, writers, lifecycle transitions, and readers across
+the touched subsystem. New capabilities belong on the authoritative entity lifecycle or read
+projection. Consolidation and root-cause repairs must remove the redundant persistence and
+state transitions targeted by the change.
+
 `guard check`, branch-wide `guard topology check`, and protected-push hooks reject
 new missing declared documents and newly stale dependency edges. An edited production
 file without a declared module also fails the edit guard. Untouched baseline debt stays

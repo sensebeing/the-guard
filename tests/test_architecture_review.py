@@ -24,7 +24,12 @@ from the_guard.review.engine import (
     resolve_provider_order,
     run_architecture_review,
 )
-from the_guard.review.prompt import _render_bounded_diff_section, _snapshot_context, build_incremental_review_prompt
+from the_guard.review.prompt import (
+    METHODOLOGY,
+    _render_bounded_diff_section,
+    _snapshot_context,
+    build_incremental_review_prompt,
+)
 from the_guard.review.provider import (
     _has_provider_credentials,
     isolated_codex_home,
@@ -37,6 +42,7 @@ from the_guard.review.provider import (
 )
 from the_guard.review.repository import (
     _classify_file_tier,
+    collect_incremental_scope,
     resolve_or_carry_forward_receipt,
     load_review_session,
     git_common_dir,
@@ -52,7 +58,12 @@ from the_guard.review.runner import (
     _verify_reviewed_head_sha,
 )
 from the_guard.config import load_config, GuardConfig
-from the_guard.review.documents import boundary_document_paths, existing_document_paths, read_document
+from the_guard.review.documents import (
+    boundary_document_paths,
+    existing_document_paths,
+    read_document,
+    task_design_document_paths,
+)
 from the_guard.review.session import compute_review_contract_digest
 from the_guard.policy import PolicyError, load_policy
 from architecture_review_support import (
@@ -245,6 +256,105 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 self.assertNotIn("## Boundary reference: CLAUDE.md", prompt)
             self.assertIn("Holistic Root-Cause & Layer Boundary Integrity", prompts[1])
             self.assertIn("introduced_by_delta", prompts[1])
+
+    def test_task_blueprints_are_snapshot_bound_in_full_and_incremental_prompts(self):
+        plan = "docs/superpowers/plans/consolidation.md"
+        anchor = "docs/reports/anchor-0.md"
+        for source in ("plan", "note"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                (repo / anchor).parent.mkdir(parents=True)
+                (repo / anchor).write_text("Committed Anchor-0 audit\n")
+                _git(repo, "add", anchor)
+                _git(repo, "commit", "-m", "Record Anchor-0 before implementation")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+                plan_body = "Committed consolidation plan\n"
+                if source == "plan":
+                    plan_body += f"See [Anchor-0]({anchor}#findings).\n"
+                (repo / plan).parent.mkdir(parents=True)
+                (repo / plan).write_text(plan_body)
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", plan, "app.py")
+                _git(repo, "commit", "-m", "Consolidate the owner")
+                run_architecture_review(repo, reviewer_fn=lambda _: {
+                    "verdict": "GO", "summary": "reviewed", "blocking_findings": []})
+                session = load_review_session(repo)
+                (repo / "app.py").write_text("value = 2\n")
+                _git(repo, "add", "app.py")
+                _git(repo, "commit", "-m", "Refine the owner implementation")
+
+                scope = collect_review_scope(repo)
+                incremental_scope = collect_incremental_scope(repo, scope, session)
+                self.assertIn(plan, scope.changed_files)
+                self.assertNotIn(anchor, scope.changed_files)
+                self.assertEqual(incremental_scope.changed_files, ("app.py",))
+
+                (repo / plan).write_text("DIRTY PLAN\n")
+                (repo / anchor).write_text("DIRTY ANCHOR\n")
+                note = f"Verify `{anchor}`" if source == "note" else "Verify the plan"
+                prompts = (
+                    build_review_prompt(repo, scope, reviewer_note=note),
+                    build_incremental_review_prompt(
+                        repo, scope, session, incremental_scope, reviewer_note=note,
+                    ),
+                )
+                plan_section = f"## Task design & architecture blueprint: {plan}\n{plan_body}"
+                anchor_section = (
+                    f"## Task design & architecture blueprint: {anchor}\n"
+                    "Committed Anchor-0 audit"
+                )
+                for mode, prompt in zip(("full", "incremental"), prompts):
+                    with self.subTest(mode=mode):
+                        self.assertIn(plan_section, prompt)
+                        self.assertIn(anchor_section, prompt)
+                        self.assertLess(prompt.index(plan_section), prompt.index(anchor_section))
+                        self.assertNotIn("DIRTY PLAN", prompt)
+                        self.assertNotIn("DIRTY ANCHOR", prompt)
+                        self.assertIn(
+                            "## Zero-Based Target Architecture & Whole-Module Reconciliation", prompt
+                        )
+
+    def test_task_blueprint_discovery_prioritizes_and_caps_snapshot_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            documents = {
+                "task-plan.md": (
+                    "See ./docs/context.md, docs/contract.md, docs/missing.md, "
+                    "docs/pending-prod-publish.md and ../docs/overflow.md."
+                ),
+                "docs/summary.md": "Task summary",
+                "docs/context.md": "See docs/overflow.md for additional detail.",
+                "docs/note.md": "Note evidence",
+                "docs/overflow.md": "Outside the document budget",
+                "docs/contract.md": "Already loaded contract",
+                "docs/pending-prod-publish.md": "Publishing ledger",
+                "WORKING.md": "Working ledger",
+            }
+            for path, body in documents.items():
+                (repo / path).write_text(body)
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Record design documents")
+            (repo / "docs/missing.md").write_text("Working-tree only")
+
+            modes = {}
+            paths = task_design_document_paths(
+                repo,
+                ("task-plan.md", "docs/missing.md", "WORKING.md", "docs/summary.md"),
+                _git(repo, "rev-parse", "HEAD"),
+                reviewer_note="See docs/context.md, docs/note.md, then docs/overflow.md.",
+                excluded_paths=("docs/contract.md",),
+                snapshot_modes=modes,
+            )
+            self.assertEqual(
+                paths, ["task-plan.md", "docs/summary.md", "docs/context.md", "docs/note.md"]
+            )
+            self.assertTrue(set(paths) <= modes.keys())
+
+    def test_methodology_requires_zero_based_whole_module_reconciliation(self):
+        self.assertIn(
+            "## Zero-Based Target Architecture & Whole-Module Reconciliation", METHODOLOGY
+        )
 
     def test_declared_contracts_override_extension_and_test_tiers(self):
         config = GuardConfig(topology={"architecture_docs": ["docs/root.json"], "modules": [
@@ -605,10 +715,15 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
     def test_pure_documentation_diff_is_exempt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))
-            (repo / "docs").mkdir(exist_ok=True)
-            (repo / "docs/design.md").write_text("# Doc only\n", encoding="utf-8")
+            report = "docs/reports/anchor-0.md"
+            (repo / report).parent.mkdir(parents=True)
+            (repo / report).write_text("# Doc only\n", encoding="utf-8")
+            _git(repo, "add", report)
+            _git(repo, "commit", "-m", "report only")
+            self.assertTrue(collect_review_scope(repo).is_exempt)
+
             (repo / "WORKING.md").write_text("# Working\n", encoding="utf-8")
-            _git(repo, "add", "docs/design.md", "WORKING.md")
+            _git(repo, "add", "WORKING.md")
             _git(repo, "commit", "-m", "docs only")
 
             scope = collect_review_scope(repo)

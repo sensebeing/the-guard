@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
@@ -9,6 +10,14 @@ from ..config import GuardConfig, repository_path
 from ..git_helpers import git_stdout
 from ..git_helpers import read_repository_file
 from .contract import CODE_EXTENSIONS
+
+MAX_TASK_DESIGN_DOCS = 4
+_OPERATIONAL_LEDGERS = {"WORKING.md", "CHANGELOG.md", "docs/pending-prod-publish.md"}
+_TASK_DESIGN_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:\./)?"
+    r"(?:docs/[A-Za-z0-9_./-]+|[A-Za-z0-9_./-]*(?:plan|spec|blueprint|audit|report|design)[A-Za-z0-9_./-]*)\.md"
+    r"(?![\w/-]|\.[\w.])"
+)
 
 
 def architecture_document_paths(config: GuardConfig) -> set[str]:
@@ -53,6 +62,48 @@ def resolved_contract_paths(root: Path, config: GuardConfig, revision: str) -> s
                 root, path, revision, loaded_paths=paths, snapshot_modes=modes
             )
     return paths
+
+
+def task_design_document_paths(
+    repo_root: Path,
+    changed_files: Iterable[str],
+    revision: str | None,
+    *,
+    reviewer_note: str = "",
+    excluded_paths: Iterable[str] = (),
+    snapshot_modes: dict[str, str] | None = None,
+) -> list[str]:
+    """Find changed Markdown and its direct references, in prompt priority order."""
+    excluded = _OPERATIONAL_LEDGERS.union(excluded_paths)
+    changed_candidates = dict.fromkeys(
+        path for path in changed_files if path.endswith(".md") and path not in excluded
+    )
+    modes = {} if snapshot_modes is None else snapshot_modes
+    existing_changed = existing_document_paths(
+        repo_root, changed_candidates, revision, snapshot_modes=modes
+    )
+    changed_docs = [path for path in changed_candidates if path in existing_changed]
+    if len(changed_docs) >= MAX_TASK_DESIGN_DOCS:
+        return changed_docs[:MAX_TASK_DESIGN_DOCS]
+
+    bodies = [
+        read_document(repo_root, path, revision, snapshot_modes=modes) or ""
+        for path in changed_docs
+    ]
+    references = {}
+    for body in (*bodies, reviewer_note):
+        for match in _TASK_DESIGN_REFERENCE.finditer(body):
+            path = PurePosixPath(match.group())
+            if path.is_absolute() or ".." in path.parts:
+                continue
+            reference = path.as_posix()
+            if reference not in excluded and reference not in existing_changed:
+                references[reference] = None
+    existing_references = existing_document_paths(
+        repo_root, references, revision, snapshot_modes=modes
+    )
+    referenced_docs = [path for path in references if path in existing_references]
+    return (changed_docs + referenced_docs)[:MAX_TASK_DESIGN_DOCS]
 
 
 def existing_document_paths(
