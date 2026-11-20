@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
+from ..git_helpers import git_ok
 from ..policy import Policy, load_policy
 from .contract import (
     CODE_EXTENSIONS,
@@ -581,6 +582,29 @@ def collect_incremental_scope(
     return delta if (delta is not None and delta.has_changes) else None
 
 
+def review_anchor_session(
+    repo_root: Path,
+    scope: ReviewScope,
+    session: ReviewSessionState | None,
+    *,
+    config: GuardConfig,
+) -> ReviewSessionState | None:
+    """Keep branch blueprint evidence across provider or reviewer contract changes."""
+    if session is None or not session.initial_head_sha or not git_ok(
+        repo_root, ["git", "cat-file", "-e", f"{session.initial_head_sha}^{{commit}}"]
+    ):
+        return None
+    if session.merge_base == scope.merge_base:
+        return session
+    if session.last_patch_digest == scope.patch_digest:
+        valid_rebase = _is_ancestor(repo_root, session.merge_base, scope.merge_base)
+    else:
+        valid_rebase = (
+            _collect_branch_delta(repo_root, scope, session, config=config) is not None
+        )
+    return session if valid_rebase else None
+
+
 def resolve_or_carry_forward_receipt(
     repo_root: Path,
     scope: ReviewScope,
@@ -678,6 +702,7 @@ def resolve_or_carry_forward_receipt(
             contract_digest=current_contract_digest,
             round_count=session.round_count,
             updated_at=datetime.now(UTC).isoformat(),
+            initial_head_sha=session.initial_head_sha,
         ),
     )
     return load_valid_receipt(repo_root, scope.patch_digest)

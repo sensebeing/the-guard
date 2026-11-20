@@ -27,13 +27,14 @@ from .repository import (
     _require_submodule_checkout,
 )
 from .documents import (
+    TaskBlueprintSnapshot,
     architecture_document_paths,
     boundary_document_paths,
     contract_document_paths,
     existing_document_paths,
     read_document,
+    resolve_task_design_blueprints,
     resolved_contract_paths,
-    task_design_document_paths,
 )
 from .session import ReviewSessionState
 
@@ -55,6 +56,18 @@ writers, lifecycle transitions, and readers with `git show <target-sha>:<path>` 
   blueprint calls for consolidation or root-cause repair and the live module retains dual
   persistence, split state machines, cross-table business-writing triggers, or substitutes
   Python wrappers or formatting compaction for removing redundant paths.
+- Baseline task blueprints from the merge base or reviewed rounds, their referenced Anchor-0
+  reports, and baseline complexity budgets define binding acceptance scope. Compare any
+  changed complexity budget against the merge base or earliest available reviewed snapshot
+  containing it. Block under
+  guard.architecture-simplicity or guard.single-source-of-truth when blueprint or budget edits
+  or deletions relax target thresholds, drop named table, trigger, or state-machine retirements,
+  or defer committed convergence to a later wave. Allow re-scoping only when the developer note
+  cites explicit user authorization and schema and lifecycle evidence establishes that the
+  surviving entity is genuinely orthogonal.
+- Block column-inlining mirages under those rules when a consolidation removes a child process
+  or outbox table by copying its prefixed columns and secondary `*_status` or `*_state` lifecycle
+  onto a parent table while the split state machine, claim loop, or dual track remains live.
 """
 
 METHODOLOGY = """You are an independent Adversarial Architecture & Engineering Quality Reviewer.
@@ -362,12 +375,52 @@ def _bounded_document(body: str) -> str:
     return body[:24_000] + ("\n... [truncated]" if len(body) > 24_000 else "")
 
 
+def _render_task_blueprint(
+    repo_root: Path, head_sha: str, snapshot: TaskBlueprintSnapshot
+) -> str:
+    if snapshot.baseline_body is None or snapshot.baseline_body == snapshot.head_body:
+        assert snapshot.head_body is not None
+        return (
+            f"## Task design & architecture blueprint: {snapshot.path}\n"
+            + _bounded_document(snapshot.head_body)
+        )
+
+    baseline_sha = snapshot.baseline_sha
+    assert baseline_sha is not None
+    changes = "[DELETED AT HEAD]"
+    if snapshot.head_body is not None:
+        diff = _git(
+            repo_root,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            "--text",
+            "--unified=3",
+            f"{baseline_sha}..{head_sha}",
+            *_literal_pathspecs((snapshot.path,)),
+        ).stdout.decode("utf-8", errors="replace")
+        limit = 8_000
+        if len(diff) > limit:
+            suffix = "\n... [truncated, inspect the full snapshot diff]"
+            diff = diff[: limit - len(suffix)].rpartition("\n")[0] + suffix
+        changes = f"```diff\n{diff.rstrip()}\n```"
+    return (
+        f"## Baseline task blueprint (immutable Anchor 0 @ {baseline_sha[:12]}): "
+        f"{snapshot.path}\n{_bounded_document(snapshot.baseline_body)}\n"
+        f"### Task blueprint modifications on reviewed branch: {snapshot.path}\n{changes}"
+    )
+
+
 def _snapshot_context(
     repo_root: Path,
     scope: ReviewScope,
     *,
     config: GuardConfig | None = None,
     reviewer_note: str = "",
+    initial_reviewed_sha: str = "",
+    prior_reviewed_sha: str = "",
 ) -> list[str]:
     config = config or load_config(repo_root, revision=scope.head_sha)
     declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
@@ -479,25 +532,17 @@ def _snapshot_context(
                     sections.append(
                         f"## Boundary reference: {path}\n" + _bounded_document(body)
                     )
-    for path in task_design_document_paths(
+    for snapshot in resolve_task_design_blueprints(
         repo_root,
         scope.changed_files,
-        scope.head_sha,
+        base_sha=scope.merge_base,
+        head_sha=scope.head_sha,
+        initial_reviewed_sha=initial_reviewed_sha,
+        prior_reviewed_sha=prior_reviewed_sha,
         reviewer_note=reviewer_note,
         excluded_paths=loaded_docs,
-        snapshot_modes=modes,
     ):
-        if path in loaded_docs:
-            continue
-        aliases = set()
-        body = read_document(
-            repo_root, path, scope.head_sha, loaded_paths=aliases, snapshot_modes=modes
-        )
-        if body is not None and not loaded_docs & aliases:
-            sections.append(
-                f"## Task design & architecture blueprint: {path}\n" + _bounded_document(body)
-            )
-        loaded_docs.update(aliases)
+        sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
     # Missing declarations are not evidence of a contract at the reviewed snapshot.
     effective_topology = {
         **rendered_topology,
@@ -620,16 +665,29 @@ def build_review_prompt(
     *,
     prior_session: ReviewSessionState | None = None,
     incremental_scope: IncrementalReviewScope | None = None,
+    initial_reviewed_sha: str | None = None,
+    prior_reviewed_sha: str | None = None,
     reviewer_note: str = "",
     policy: Policy | None = None,
     config: GuardConfig | None = None,
 ) -> str:
     config = config or load_config(repo_root, revision=scope.head_sha)
     policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
+    if initial_reviewed_sha is None:
+        initial_reviewed_sha = prior_session.initial_head_sha if prior_session else ""
+    if prior_reviewed_sha is None:
+        prior_reviewed_sha = prior_session.last_head_sha if prior_session else ""
+        if incremental_scope is not None:
+            prior_reviewed_sha = incremental_scope.base_head_sha
     sections = [
         METHODOLOGY,
         *_snapshot_context(
-            repo_root, scope, config=config, reviewer_note=reviewer_note
+            repo_root,
+            scope,
+            config=config,
+            reviewer_note=reviewer_note,
+            initial_reviewed_sha=initial_reviewed_sha,
+            prior_reviewed_sha=prior_reviewed_sha,
         ),
         *_render_policy_sections(policy),
     ]
@@ -673,6 +731,8 @@ def build_incremental_review_prompt(
     session: ReviewSessionState,
     inc_scope: IncrementalReviewScope | None,
     *,
+    initial_reviewed_sha: str | None = None,
+    prior_reviewed_sha: str | None = None,
     reviewer_note: str = "",
     policy: Policy | None = None,
     config: GuardConfig | None = None,
@@ -685,6 +745,10 @@ def build_incremental_review_prompt(
         )
     config = config or load_config(repo_root, revision=scope.head_sha)
     policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
+    if initial_reviewed_sha is None:
+        initial_reviewed_sha = session.initial_head_sha
+    if prior_reviewed_sha is None:
+        prior_reviewed_sha = inc_scope.base_head_sha if inc_scope else session.last_head_sha
     sections = [
         (
             "Read-only static review: no writes, tests, builds or delegation. Use git show/grep at"
@@ -698,7 +762,7 @@ def build_incremental_review_prompt(
         "with changed responsibilities. Apply guard.service-boundaries or guard.single-source-of-truth.",
         _ZERO_BASED_RECONCILIATION,
         "## Incremental Session Continuation",
-        f"Continue round {session.round_count + 1}, anchored ONLY to current HEAD {scope.head_sha}.",
+        f"Continue round {session.round_count + 1}. Verify the implementation at HEAD {scope.head_sha}.",
         (
             "Resolve every prior finding and inspect the verified delta. Leave unrelated baseline "
             "defects outside the findings. A prior item must explain the unmet original requirement. "
@@ -710,7 +774,12 @@ def build_incremental_review_prompt(
             session, scope, inc_scope, reviewer_note=reviewer_note
         ),
         *_snapshot_context(
-            repo_root, scope, config=config, reviewer_note=reviewer_note
+            repo_root,
+            scope,
+            config=config,
+            reviewer_note=reviewer_note,
+            initial_reviewed_sha=initial_reviewed_sha,
+            prior_reviewed_sha=prior_reviewed_sha,
         ),
         *_render_policy_sections(policy),
     ]

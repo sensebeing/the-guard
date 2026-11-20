@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ..config import GuardConfig, repository_path
@@ -64,32 +65,111 @@ def resolved_contract_paths(root: Path, config: GuardConfig, revision: str) -> s
     return paths
 
 
-def task_design_document_paths(
+@dataclass(frozen=True)
+class TaskBlueprintSnapshot:
+    path: str
+    baseline_sha: str | None
+    baseline_body: str | None
+    head_body: str | None
+
+
+def resolve_task_design_blueprints(
     repo_root: Path,
     changed_files: Iterable[str],
-    revision: str | None,
     *,
+    base_sha: str,
+    head_sha: str,
+    initial_reviewed_sha: str = "",
+    prior_reviewed_sha: str = "",
     reviewer_note: str = "",
     excluded_paths: Iterable[str] = (),
-    snapshot_modes: dict[str, str] | None = None,
-) -> list[str]:
-    """Find changed Markdown and its direct references, in prompt priority order."""
+) -> list[TaskBlueprintSnapshot]:
+    """Resolve changed Markdown and direct references against binding Git snapshots."""
+    baselines = {base_sha: None}
+    for revision in dict.fromkeys((initial_reviewed_sha, prior_reviewed_sha)):
+        if not revision or revision in baselines:
+            continue
+        if revision == head_sha:
+            baselines[head_sha] = None
+            continue
+        commit = git_stdout(
+            repo_root,
+            ["git", "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
+        )
+        if commit:
+            baselines[commit.strip()] = None
+
     excluded = _OPERATIONAL_LEDGERS.union(excluded_paths)
+    # A plan introduced in a reviewed round and later removed is absent from the
+    # current branch diff. Use each reviewed branch's change list so an upstream
+    # deletion during a rebase is not attributed to the reviewed branch.
+    historical_changes = []
+    for revision in baselines:
+        if revision in (base_sha, head_sha):
+            continue
+        changed = git_stdout(
+            repo_root,
+            [
+                "git", "diff", "--name-only", "-z", "--no-renames",
+                f"{base_sha}...{revision}", "--", "*.md",
+            ],
+        )
+        if changed is None:
+            raise ValueError(f"Cannot inspect task blueprint changes at {base_sha}...{revision}")
+        historical_changes.extend(changed.split("\0"))
     changed_candidates = dict.fromkeys(
-        path for path in changed_files if path.endswith(".md") and path not in excluded
+        path for path in (*changed_files, *historical_changes)
+        if path.endswith(".md") and path not in excluded
     )
-    modes = {} if snapshot_modes is None else snapshot_modes
-    existing_changed = existing_document_paths(
-        repo_root, changed_candidates, revision, snapshot_modes=modes
-    )
-    changed_docs = [path for path in changed_candidates if path in existing_changed]
-    if len(changed_docs) >= MAX_TASK_DESIGN_DOCS:
-        return changed_docs[:MAX_TASK_DESIGN_DOCS]
+
+    def resolve_candidates(
+        paths: Collection[str], limit: int
+    ) -> list[TaskBlueprintSnapshot]:
+        modes_by_revision: dict[str, dict[str, str]] = {}
+        for revision in dict.fromkeys((*baselines, head_sha)):
+            modes: dict[str, str] = {}
+            existing_document_paths(repo_root, paths, revision, snapshot_modes=modes)
+            modes_by_revision[revision] = modes
+
+        snapshots = []
+        for path in paths:
+            baseline_sha = next(
+                (rev for rev in baselines if path in modes_by_revision[rev]), None
+            )
+            head_body = read_document(
+                repo_root, path, head_sha, snapshot_modes=modes_by_revision[head_sha]
+            )
+            baseline_body = None
+            if baseline_sha == head_sha:
+                baseline_body = head_body
+            elif baseline_sha is not None:
+                baseline_body = read_document(
+                    repo_root,
+                    path,
+                    baseline_sha,
+                    snapshot_modes=modes_by_revision[baseline_sha],
+                )
+            if head_body is None and baseline_body is None:
+                continue
+            snapshots.append(
+                TaskBlueprintSnapshot(path, baseline_sha, baseline_body, head_body)
+            )
+            if len(snapshots) == limit:
+                break
+        return snapshots
+
+    changed_docs = resolve_candidates(changed_candidates, MAX_TASK_DESIGN_DOCS)
+    reference_slots = MAX_TASK_DESIGN_DOCS - len(changed_docs)
+    if not reference_slots:
+        return changed_docs
 
     bodies = [
-        read_document(repo_root, path, revision, snapshot_modes=modes) or ""
-        for path in changed_docs
+        body
+        for snapshot in changed_docs
+        for body in (snapshot.baseline_body, snapshot.head_body)
+        if body is not None
     ]
+    changed_paths = {snapshot.path for snapshot in changed_docs}
     references = {}
     for body in (*bodies, reviewer_note):
         for match in _TASK_DESIGN_REFERENCE.finditer(body):
@@ -97,13 +177,9 @@ def task_design_document_paths(
             if path.is_absolute() or ".." in path.parts:
                 continue
             reference = path.as_posix()
-            if reference not in excluded and reference not in existing_changed:
+            if reference not in excluded and reference not in changed_paths:
                 references[reference] = None
-    existing_references = existing_document_paths(
-        repo_root, references, revision, snapshot_modes=modes
-    )
-    referenced_docs = [path for path in references if path in existing_references]
-    return (changed_docs + referenced_docs)[:MAX_TASK_DESIGN_DOCS]
+    return changed_docs + resolve_candidates(references, reference_slots)
 
 
 def existing_document_paths(

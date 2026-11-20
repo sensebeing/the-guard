@@ -127,6 +127,7 @@ class ReviewSessionState:
     contract_digest: str = ""
     round_count: int = 1
     updated_at: str = ""
+    initial_head_sha: str = ""
 
 
 def worktree_session_key(worktree_path: Path, branch: str) -> str:
@@ -228,6 +229,7 @@ def load_review_session(
         contract_digest=str(raw.get("contract_digest") or ""),
         round_count=int(raw.get("round_count") or 1),
         updated_at=str(raw.get("updated_at") or ""),
+        initial_head_sha=str(raw.get("initial_head_sha") or raw.get("last_head_sha") or ""),
     )
 
 
@@ -255,6 +257,7 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
         "provider": state.provider,
         "session_id": state.session_id,
         "last_head_sha": state.last_head_sha,
+        "initial_head_sha": state.initial_head_sha,
         "last_patch_digest": state.last_patch_digest,
         "last_verdict": state.last_verdict,
         "last_summary": state.last_summary,
