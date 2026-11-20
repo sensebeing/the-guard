@@ -50,14 +50,14 @@ before examining hunks. Missing boundary declarations do not count as loaded evi
 Full and incremental prompts preview up to four task blueprints. Discovery scans changed
 Markdown at the merge base, reviewed revisions, and HEAD, plus `--note`. Links beginning with
 `./` or `../` resolve against the source document directory. Other links try the repository root
-first and then the source directory. Previews prioritize unchanged referenced merge-base
-evidence, then changed merge-base blueprints, then branch blueprints. The merge base supplies
-immutable Anchor 0. Recorded revisions and the first and previous reviewed heads supply branch
-draft history and its reviewed commitments. When a branch changes or deletes a blueprint, the
-prompt includes the historical body followed by a bounded diff or a deletion marker. Symlink-backed
-blueprints compare resolved bodies. Every resolved changed blueprint and referenced merge-base
-document gets a persistent anchor, with an index for paths outside the inline preview. Anchors
-survive provider restarts and verified rebases. Operational ledgers are excluded.
+first and then the source directory, using the tree where the link appears. Previews prioritize
+unchanged referenced merge-base evidence, then changed merge-base blueprints, then branch
+blueprints. The merge base supplies immutable Anchor 0. Each changed blueprint and referenced
+merge-base document retains ordered
+revisions for every distinct reviewed body. Inline previews include each historical body and a
+bounded diff or deletion marker when it differs from HEAD. Symlink-backed blueprints compare
+resolved bodies. The prompt indexes revision lists for paths outside the inline preview.
+Anchor histories survive provider restarts and verified rebases. Operational ledgers are excluded.
 Changes limited to non-contract reports or plans remain review-exempt.
 
 Reviewers derive the minimal target architecture from the business goal and loaded blueprints,

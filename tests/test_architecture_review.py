@@ -536,7 +536,122 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     prompts[-1],
                 )
                 self.assertIn("Authoritative audit evidence", prompts[-1])
-                self.assertEqual(load_review_session(repo).task_blueprint_anchors[anchor], base)
+                self.assertEqual(load_review_session(repo).task_blueprint_anchors[anchor], (base,))
+
+    def test_reviewed_blueprint_tightening_survives_reversion_and_forced_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            merged_plan = "docs/merged-plan.md"
+            branch_plan = "docs/branch-plan.md"
+            original = "Keep one owner.\n"
+            (repo / merged_plan).write_text(original)
+            _git(repo, "add", merged_plan)
+            _git(repo, "commit", "-m", "Publish merge-base blueprint")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", base)
+
+            prompts = []
+
+            def reviewer(prompt):
+                prompts.append(prompt)
+                return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": []}
+
+            (repo / merged_plan).write_text(original + "Begin consolidation.\n")
+            (repo / branch_plan).write_text(original)
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Start the branch")
+            first = run_architecture_review(repo, reviewer_fn=reviewer)
+
+            session_path, = (git_common_dir(repo) / "the-guard-sessions").glob("*.json")
+            legacy = json.loads(session_path.read_text())
+            legacy["task_blueprint_anchors"] = {merged_plan: base, branch_plan: first.head_sha}
+            session_path.write_text(json.dumps(legacy))
+            legacy_anchors = load_review_session(repo).task_blueprint_anchors
+
+            commitments = {
+                merged_plan: "Retire the named outbox.",
+                branch_plan: "Limit the owner to one state transition.",
+            }
+            for path, commitment in commitments.items():
+                (repo / path).write_text(original + commitment + "\n")
+            _git(repo, "commit", "-am", "Tighten both reviewed blueprints")
+            second = run_architecture_review(repo, reviewer_fn=reviewer)
+
+            for path in commitments:
+                (repo / path).write_text(original)
+            _git(repo, "commit", "-am", "Restore the original blueprints")
+            run_architecture_review(repo, force=True, reviewer_fn=reviewer)
+            (repo / "app.py").write_text("value = 2\n")
+            _git(repo, "commit", "-am", "Change implementation only")
+            run_architecture_review(repo, reviewer_fn=reviewer)
+
+            for prompt in prompts[-2:]:
+                for path, commitment in commitments.items():
+                    self.assertIn(
+                        f"### Prior reviewed branch blueprint (@ {second.head_sha[:12]}): "
+                        f"{path}\n{original}{commitment}",
+                        prompt,
+                    )
+                    self.assertIn(f"-{commitment}", prompt)
+            self.assertEqual(legacy_anchors, {merged_plan: (base,), branch_plan: (first.head_sha,)})
+            expected = {
+                merged_plan: (base, first.head_sha, second.head_sha),
+                branch_plan: (first.head_sha, second.head_sha),
+            }
+            self.assertEqual(load_review_session(repo).task_blueprint_anchors, expected)
+            self.assertEqual(
+                json.loads(session_path.read_text())["task_blueprint_anchors"],
+                {path: list(revisions) for path, revisions in expected.items()},
+            )
+
+    def test_blueprint_references_resolve_in_the_source_revision(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            plan = "docs/specs/plan.md"
+            audit = "docs/specs/audit.md"
+            (repo / plan).parent.mkdir()
+            (repo / plan).write_text("[Audit](audit.md)\n")
+            (repo / audit).write_text("Original audit beside the plan\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Publish plan and its audit")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", base)
+
+            (repo / plan).write_text("[Audit](audit.md)\nRevise the plan.\n")
+            (repo / "audit.md").write_text("New audit at the repository root\n")
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Add a competing audit at the root")
+            scope = collect_review_scope(repo)
+            context = _snapshot_context(repo, scope)
+            prompt = "\n".join(context.sections)
+            original_audit = f"immutable Anchor 0 @ {base[:12]}): {audit}\nOriginal audit"
+            changed_plan = f"immutable Anchor 0 @ {base[:12]}): {plan}"
+            self.assertIn(original_audit, prompt)
+            self.assertIn("## Task design & architecture blueprint: audit.md", prompt)
+            self.assertLess(prompt.index(original_audit), prompt.index(changed_plan))
+            self.assertEqual(context.task_blueprint_anchors[audit], (base,))
+            self.assertEqual(context.task_blueprint_anchors["audit.md"], (scope.head_sha,))
+            selection = resolve_task_design_blueprints(
+                repo, (plan,), base_sha=base, head_sha=scope.head_sha,
+            )
+            self.assertEqual([snapshot.path for snapshot in selection.previews], [audit, plan, "audit.md"])
+
+    def test_recorded_blueprint_revision_requires_the_anchored_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            before_plan = _git(repo, "rev-parse", "HEAD")
+            plan = "docs/plan.md"
+            (repo / plan).write_text("Merge-base plan\n")
+            _git(repo, "add", plan)
+            _git(repo, "commit", "-m", "Publish blueprint")
+            base = _git(repo, "rev-parse", "HEAD")
+            with self.assertRaisesRegex(ValueError, f"Recorded task blueprint missing at {before_plan}"):
+                resolve_task_design_blueprints(
+                    repo, (plan,), base_sha=base, head_sha=base,
+                    retained_anchors={plan: (base, before_plan)},
+                )
 
     def test_relative_audits_from_reviewed_snapshots_take_priority_and_survive_overflow(self):
         plan = "docs/superpowers/specs/consolidation.md"
@@ -577,7 +692,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 _git(repo, "commit", "-m", "Remove the audit links")
                 scope = collect_review_scope(repo)
 
-                def assert_context(context, first_draft_sha=initial):
+                head = scope.head_sha
+
+                def assert_context(context):
                     prompt = "\n".join(context.sections)
                     evidence = f"Authoritative audit evidence in {audits[0]}"
                     self.assertIn(evidence, prompt)
@@ -589,16 +706,17 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     index, _ = json.JSONDecoder().raw_decode(index_json)
                     self.assertEqual(
                         context.task_blueprint_anchors,
-                        dict.fromkeys((*audits, plan, merged_plan), base)
-                        | dict.fromkeys(drafts, initial)
-                        | {drafts[0]: first_draft_sha},
+                        dict.fromkeys(audits, (base,))
+                        | dict.fromkeys(drafts, (initial,))
+                        | {plan: (base, intermediate, head), merged_plan: (base, initial)},
                     )
                     if audit_count == 1:
                         self.assertLess(prompt.index(evidence), prompt.index("Baseline budget"))
                         self.assertLess(prompt.index("Baseline budget"), prompt.index("Branch draft"))
                         self.assertEqual(len(set(drafts) & index.keys()), 3)
                     else:
-                        self.assertEqual(index[audits[-1]], base)
+                        self.assertEqual(index[audits[-1]], [base])
+                        self.assertEqual(index[plan], [base, intermediate, head])
                         self.assertEqual(set(index), {audits[-1], plan, merged_plan, *drafts})
 
                 context = _snapshot_context(
@@ -608,7 +726,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 assert_context(_snapshot_context(
                     repo, scope, initial_reviewed_sha=initial,
                     task_blueprint_anchors={drafts[0]: intermediate},
-                ), first_draft_sha=intermediate)
+                ))
                 assert_context(_snapshot_context(
                     repo, scope, initial_reviewed_sha=initial,
                     task_blueprint_anchors=context.task_blueprint_anchors,
@@ -645,8 +763,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             context = _snapshot_context(repo, collect_review_scope(repo))
             self.assertEqual(
                 context.task_blueprint_anchors,
-                dict.fromkeys(("root-audit.md", "docs/specs/sibling-audit.md", "docs/specs/foo.md"), base)
-                | {plan: _git(repo, "rev-parse", "HEAD")},
+                dict.fromkeys(
+                    ("root-audit.md", "docs/specs/sibling-audit.md", "docs/specs/foo.md"), (base,)
+                ) | {plan: (_git(repo, "rev-parse", "HEAD"),)},
             )
             prompt = "\n".join(context.sections)
             for path in ("root-audit.md", "docs/specs/sibling-audit.md", "docs/specs/foo.md"):

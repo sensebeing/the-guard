@@ -16,6 +16,7 @@ from .contract import BlockingFinding
 from .documents import (
     contract_document_paths,
     existing_document_paths,
+    normalize_task_blueprint_anchors,
     read_document,
 )
 
@@ -128,7 +129,7 @@ class ReviewSessionState:
     round_count: int = 1
     updated_at: str = ""
     initial_head_sha: str = ""
-    task_blueprint_anchors: dict[str, str] = field(default_factory=dict)
+    task_blueprint_anchors: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def worktree_session_key(worktree_path: Path, branch: str) -> str:
@@ -227,7 +228,7 @@ def load_review_session(
         round_count=int(raw.get("round_count") or 1),
         updated_at=str(raw.get("updated_at") or ""),
         initial_head_sha=str(raw.get("initial_head_sha") or raw.get("last_head_sha") or ""),
-        task_blueprint_anchors=string_map("task_blueprint_anchors"),
+        task_blueprint_anchors=normalize_task_blueprint_anchors(raw.get("task_blueprint_anchors")),
     )
 
 
