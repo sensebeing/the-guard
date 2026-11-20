@@ -53,8 +53,8 @@ Markdown at the merge base, reviewed revisions, and HEAD, plus `--note`. Links b
 first and then the source directory. Previews prioritize unchanged referenced merge-base
 evidence, then changed merge-base blueprints, then branch blueprints. The merge base supplies
 immutable Anchor 0. Recorded revisions and the first and previous reviewed heads supply branch
-draft history. When a branch changes or deletes a blueprint, the prompt includes the historical
-body followed by a bounded diff of the committed bodies or a deletion marker. Symlink-backed
+draft history and its reviewed commitments. When a branch changes or deletes a blueprint, the
+prompt includes the historical body followed by a bounded diff or a deletion marker. Symlink-backed
 blueprints compare resolved bodies. Every resolved changed blueprint and referenced merge-base
 document gets a persistent anchor, with an index for paths outside the inline preview. Anchors
 survive provider restarts and verified rebases. Operational ledgers are excluded.
@@ -64,9 +64,12 @@ Reviewers derive the minimal target architecture from the business goal and load
 then compare it with the committed schema, writers, lifecycle transitions, and readers across
 the touched subsystem. New capabilities belong on the authoritative entity lifecycle or read
 projection. Consolidation and root-cause repairs must remove the redundant persistence and
-state transitions targeted by the change. Reviewers use baseline blueprints, referenced Anchor-0
-reports and complexity budgets to detect unauthorized scope reductions. They block consolidations
-that move a secondary lifecycle into parent-table columns while its state machine remains live.
+state transitions targeted by the change. Reviewers check binding scope against merge-base
+Anchor 0 and prior reviewed branch blueprints, including referenced audit evidence, root-cause
+repairs, retirement and convergence commitments, and target complexity budgets. Branch-introduced
+overdesign can be simplified at the sole owner when the change preserves those obligations and
+equivalent safety boundaries. Reviewers block consolidations that move a secondary lifecycle into
+parent-table columns while its state machine remains live.
 
 `guard check`, branch-wide `guard topology check`, and protected-push hooks reject
 new missing declared documents and newly stale dependency edges. An edited production

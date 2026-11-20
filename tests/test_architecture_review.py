@@ -25,7 +25,6 @@ from the_guard.review.engine import (
     run_architecture_review,
 )
 from the_guard.review.prompt import (
-    METHODOLOGY,
     _render_bounded_diff_section,
     _snapshot_context,
     build_incremental_review_prompt,
@@ -584,8 +583,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     self.assertIn(evidence, prompt)
                     index_text = prompt.split(
                         "## Additional previously reviewed task blueprints\n", 1
-                    )[1].split("\n", 1)[1]
-                    index, _ = json.JSONDecoder().raw_decode(index_text)
+                    )[1]
+                    guidance, index_json = index_text.split("\n", 1)
+                    self.assertIn("Apply the binding acceptance scope", guidance)
+                    index, _ = json.JSONDecoder().raw_decode(index_json)
                     self.assertEqual(
                         context.task_blueprint_anchors,
                         dict.fromkeys((*audits, plan, merged_plan), base)
@@ -677,20 +678,51 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("-Retire the outbox.\n+Defer outbox retirement.", prompt)
 
     def test_methodology_requires_zero_based_whole_module_reconciliation(self):
-        self.assertIn(
-            "## Zero-Based Target Architecture & Whole-Module Reconciliation", METHODOLOGY
-        )
-        for obligation in (
-            "deleting a branch blueprint, removing a reference, or rewriting a draft",
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "app.py")
+            _git(repo, "commit", "-m", "Start implementation")
+            run_architecture_review(repo, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "reviewed", "blocking_findings": [],
+            })
+            session = load_review_session(repo)
+            (repo / "app.py").write_text("value = 2\n")
+            _git(repo, "commit", "-am", "Revise implementation")
+            scope = collect_review_scope(repo)
+            incremental_scope = collect_incremental_scope(repo, scope, session)
+            prompts = {
+                "full": build_review_prompt(repo, scope),
+                "incremental": build_incremental_review_prompt(
+                    repo, scope, session, incremental_scope,
+                ),
+            }
+
+        obligations = (
+            "Immutable Anchor 0 blueprints, referenced audit evidence, and baseline complexity budgets",
+            "retirement commitments, convergence requirements, and target complexity budgets "
+            "established in prior reviewed branch blueprints define binding acceptance scope",
+            "Block under guard.architecture-simplicity or guard.single-source-of-truth",
+            "editing or deleting a merge-base contract or prior reviewed branch blueprint, "
+            "or removing a reference",
             "abandon or defer an Anchor 0 root-cause repair",
-            "drop a merge-base commitment to retire a table, trigger, or state machine",
-            "relax a merge-base complexity budget",
+            "drop a named table, trigger, or state-machine retirement",
+            "defer committed convergence to a later wave",
+            "relax a merge-base or reviewed target complexity budget",
+            "Allow re-scoping only when the developer note cites explicit user authorization",
+            "schema and lifecycle evidence establishes that the surviving entity is genuinely orthogonal",
             "Allow removal of cross-module intrusion or overdesign",
             "the simplest implementation at the sole owner",
-            "equivalent safety boundaries",
-        ):
-            with self.subTest(obligation=obligation):
-                self.assertIn(obligation, " ".join(METHODOLOGY.split()))
+            "preserves all Anchor 0 obligations, committed retirements, convergence requirements, "
+            "target budgets, and equivalent safety boundaries",
+        )
+        heading = "## Zero-Based Target Architecture & Whole-Module Reconciliation"
+        for mode, prompt in prompts.items():
+            self.assertIn(heading, prompt)
+            section = prompt.split(heading, 1)[1].split("\n## ", 1)[0]
+            for obligation in obligations:
+                with self.subTest(mode=mode, obligation=obligation):
+                    self.assertIn(obligation, " ".join(section.split()))
 
     def test_declared_contracts_override_extension_and_test_tiers(self):
         config = GuardConfig(topology={"architecture_docs": ["docs/root.json"], "modules": [

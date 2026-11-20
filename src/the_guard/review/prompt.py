@@ -57,18 +57,20 @@ writers, lifecycle transitions, and readers with `git show <target-sha>:<path>` 
   blueprint calls for consolidation or root-cause repair and the live module retains dual
   persistence, split state machines, cross-table business-writing triggers, or substitutes
   Python wrappers or formatting compaction for removing redundant paths.
-- Immutable Anchor 0 blueprints, audit evidence, and complexity budgets from the merge base
-  define binding acceptance scope. Prior reviewed branch blueprints record implementation
-  history and can carry those obligations forward. Block under guard.architecture-simplicity
-  or guard.single-source-of-truth when deleting a branch blueprint, removing a reference,
-  or rewriting a draft serves to abandon or defer an Anchor 0 root-cause repair, drop a
-  merge-base commitment to retire a table, trigger, or state machine, or relax a merge-base
-  complexity budget. Apply the same rule to edits or deletions of the merge-base contracts
-  themselves. Allow re-scoping only when the developer note cites explicit user authorization
-  and schema and lifecycle evidence establishes that the surviving entity is genuinely orthogonal.
+- Immutable Anchor 0 blueprints, referenced audit evidence, and baseline complexity budgets from
+  the merge base together with retirement commitments, convergence requirements, and target
+  complexity budgets established in prior reviewed branch blueprints define binding acceptance
+  scope. Block under guard.architecture-simplicity or guard.single-source-of-truth when editing
+  or deleting a merge-base contract or prior reviewed branch blueprint, or removing a reference,
+  serves to abandon or defer an Anchor 0 root-cause repair, drop a named table, trigger, or
+  state-machine retirement, defer committed convergence to a later wave, or relax a merge-base
+  or reviewed target complexity budget. Allow re-scoping only when the developer note cites
+  explicit user authorization and schema and lifecycle evidence establishes that the surviving
+  entity is genuinely orthogonal.
 - Allow removal of cross-module intrusion or overdesign introduced in a prior reviewed branch
   blueprint when the change converges on the simplest implementation at the sole owner and
-  preserves all Anchor 0 obligations and equivalent safety boundaries.
+  preserves all Anchor 0 obligations, committed retirements, convergence requirements, target
+  budgets, and equivalent safety boundaries.
 - Block column-inlining mirages under those rules when a consolidation removes a child process
   or outbox table by copying its prefixed columns and secondary `*_status` or `*_state` lifecycle
   onto a parent table while the split state machine, claim loop, or dual track remains live.
@@ -588,9 +590,10 @@ def _snapshot_context(
     if omitted:
         sections.append(
             "## Additional previously reviewed task blueprints\n"
-            "A revision equal to the merge base is immutable Anchor 0. Other revisions record "
-            "prior reviewed branch blueprints. Read the recorded bodies and compare each path "
-            "at HEAD, including changes to references and the linked Anchor 0 evidence.\n"
+            "A revision equal to the merge base is immutable Anchor 0. Branch blueprints record "
+            "the reviewed revision or HEAD for newly discovered drafts. Apply the binding acceptance "
+            "scope above, including commitments established in prior reviewed branch blueprints. "
+            "Compare the recorded bodies with HEAD and inspect changes to references and linked evidence.\n"
             + json.dumps({path: anchors[path] for path in sorted(omitted)}, indent=2)
         )
     # Missing declarations are not evidence of a contract at the reviewed snapshot.
