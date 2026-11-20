@@ -62,7 +62,7 @@ from the_guard.review.documents import (
     boundary_document_paths,
     existing_document_paths,
     read_document,
-    task_design_document_paths,
+    resolve_task_design_blueprints,
 )
 from the_guard.review.session import compute_review_contract_digest
 from the_guard.policy import PolicyError, load_policy
@@ -337,19 +337,219 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             _git(repo, "commit", "-m", "Record design documents")
             (repo / "docs/missing.md").write_text("Working-tree only")
 
-            modes = {}
-            paths = task_design_document_paths(
+            snapshots = resolve_task_design_blueprints(
                 repo,
                 ("task-plan.md", "docs/missing.md", "WORKING.md", "docs/summary.md"),
-                _git(repo, "rev-parse", "HEAD"),
+                base_sha=_git(repo, "rev-parse", "HEAD^"),
+                head_sha=_git(repo, "rev-parse", "HEAD"),
+                initial_reviewed_sha="0" * 40,
                 reviewer_note="See docs/context.md, docs/note.md, then docs/overflow.md.",
                 excluded_paths=("docs/contract.md",),
-                snapshot_modes=modes,
             )
             self.assertEqual(
-                paths, ["task-plan.md", "docs/summary.md", "docs/context.md", "docs/note.md"]
+                [snapshot.path for snapshot in snapshots],
+                ["task-plan.md", "docs/summary.md", "docs/context.md", "docs/note.md"],
             )
-            self.assertTrue(set(paths) <= modes.keys())
+            self.assertTrue(all(snapshot.baseline_sha is None for snapshot in snapshots))
+
+    def test_merge_base_blueprint_and_anchor_survive_edit_or_deletion(self):
+        plan = "docs/consolidation-plan.md"
+        anchor = "docs/anchor-0-audit.md"
+        for change in ("weaken", "delete"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                (repo / plan).write_text(
+                    f"Retire the outbox.\nSee [Anchor 0]({anchor}#findings).\n"
+                )
+                (repo / anchor).write_text("Original audit evidence\n")
+                _git(repo, "add", plan, anchor)
+                _git(repo, "commit", "-m", "Commit the original acceptance scope")
+                base = _git(repo, "rev-parse", "HEAD")
+                _git(repo, "update-ref", "refs/remotes/origin/main", base)
+
+                if change == "delete":
+                    (repo / plan).unlink()
+                else:
+                    (repo / plan).write_text(
+                        "Defer outbox retirement.\n" + "Additional scope commentary.\n" * 500
+                    )
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", "-A")
+                _git(repo, "commit", "-m", "Revise acceptance scope and code")
+                prompt = build_review_prompt(repo, collect_review_scope(repo))
+
+                self.assertIn(
+                    f"## Baseline task blueprint (immutable Anchor 0 @ {base[:12]}): "
+                    f"{plan}\nRetire the outbox.",
+                    prompt,
+                )
+                changes = f"### Task blueprint modifications on reviewed branch: {plan}"
+                self.assertIn(changes, prompt)
+                self.assertIn(
+                    "[DELETED AT HEAD]" if change == "delete" else "+Defer outbox retirement.",
+                    prompt,
+                )
+                if change == "weaken":
+                    diff = prompt.split(changes + "\n```diff\n", 1)[1].split("\n```", 1)[0]
+                    self.assertLessEqual(len(diff), 8_000)
+                    self.assertTrue(diff.endswith("[truncated, inspect the full snapshot diff]"))
+                self.assertIn(
+                    f"## Task design & architecture blueprint: {anchor}\nOriginal audit evidence",
+                    prompt,
+                )
+
+    def test_first_reviewed_blueprint_survives_later_rounds_and_provider_restarts(self):
+        plan = "docs/consolidation-plan.md"
+        no_go = {"verdict": "NO-GO", "summary": "Outbox still live", "blocking_findings": []}
+        for change in ("incremental", "force", "provider", "contract", "delete"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                (repo / plan).write_text("Retire the outbox.\n")
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "Round 1 plan and implementation")
+
+                provider = "codex"
+                with (
+                    patch("the_guard.review.engine.resolve_provider_order") as providers,
+                    patch("the_guard.review.engine._invoke_provider") as invoke,
+                    patch("the_guard.review.engine.record_working_provider"),
+                ):
+                    providers.return_value = ([(provider, "/mock/codex")], {})
+                    invoke.return_value = (no_go, "review-session", "")
+                    first = run_architecture_review(repo)
+                    first_state = load_review_session(repo)
+                    self.assertEqual(first.verdict, "NO-GO")
+                    self.assertEqual(first_state.initial_head_sha, first.head_sha)
+
+                    if change == "delete":
+                        (repo / plan).unlink()
+                    else:
+                        (repo / plan).write_text("Defer outbox retirement.\n")
+                    if change == "provider":
+                        providers.return_value = ([("claude", "/mock/claude")], {})
+                    if change == "contract":
+                        (repo / ".guard").mkdir()
+                        (repo / ".guard/config.json").write_text(
+                            '{"review": {"project_title": "Renamed project"}}\n'
+                        )
+                    (repo / "app.py").write_text("value = 2\n")
+                    _git(repo, "add", "-A")
+                    _git(repo, "commit", "-m", "Round 2 relaxes the original plan")
+                    second = run_architecture_review(repo, force=change == "force")
+                    second_prompt = invoke.call_args.args[2]
+                    expected_mode = (
+                        "full" if change in {"force", "provider", "contract"} else "incremental"
+                    )
+                    self.assertEqual(second.mode, expected_mode)
+                    self.assertEqual(load_review_session(repo).initial_head_sha, first.head_sha)
+
+                    (repo / "app.py").write_text("value = 3\n")
+                    _git(repo, "add", "app.py")
+                    _git(repo, "commit", "-m", "Round 3 changes only code")
+                    third = run_architecture_review(repo)
+                    third_prompt = invoke.call_args.args[2]
+                    third_state = load_review_session(repo)
+                    self.assertEqual(third.mode, "incremental")
+                    self.assertEqual(third_state.initial_head_sha, first.head_sha)
+                    self.assertEqual(third_state.last_head_sha, third.head_sha)
+                    if change == "incremental":
+                        self.assertEqual(third_state.round_count, 3)
+                    if change == "delete":
+                        self.assertNotIn(plan, collect_review_scope(repo).changed_files)
+
+                for prompt in (second_prompt, third_prompt):
+                    self.assertIn(
+                        "## Baseline task blueprint (immutable Anchor 0 @ "
+                        f"{first.head_sha[:12]}): {plan}\nRetire the outbox.",
+                        prompt,
+                    )
+                    self.assertIn(
+                        "[DELETED AT HEAD]" if change == "delete" else
+                        "-Retire the outbox.\n+Defer outbox retirement.",
+                        prompt,
+                    )
+
+    def test_later_reviewed_blueprints_survive_classification_changes_and_deletion(self):
+        plan = "docs/consolidation-plan.md"
+        anchor = "docs/referenced-audit.md"
+        for change in ("promote", "delete"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                (repo / anchor).write_text("Authoritative audit evidence\n")
+                _git(repo, "add", anchor)
+                _git(repo, "commit", "-m", "Record the audit upstream")
+                base = _git(repo, "rev-parse", "HEAD")
+                _git(repo, "update-ref", "refs/remotes/origin/main", base)
+
+                prompts = []
+
+                def reviewer(prompt):
+                    prompts.append(prompt)
+                    return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": []}
+
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", "app.py")
+                _git(repo, "commit", "-m", "Start work without a task blueprint")
+                run_architecture_review(repo, reviewer_fn=reviewer)
+
+                (repo / plan).write_text(f"Retire the outbox. See {anchor}.\n")
+                _git(repo, "add", plan)
+                _git(repo, "commit", "-m", "Commit the acceptance scope in round 2")
+                second = run_architecture_review(repo, reviewer_fn=reviewer)
+
+                if change == "promote":
+                    (repo / ".guard").mkdir()
+                    (repo / ".guard/config.json").write_text(json.dumps({
+                        "topology": {"architecture_docs": [plan]},
+                    }))
+                    (repo / plan).write_text("Defer outbox retirement.\n")
+                else:
+                    (repo / plan).unlink()
+                _git(repo, "add", "-A")
+                _git(repo, "commit", "-m", "Weaken the reviewed plan")
+                run_architecture_review(repo, reviewer_fn=reviewer)
+
+                (repo / "app.py").write_text("value = 2\n")
+                _git(repo, "add", "app.py")
+                _git(repo, "commit", "-m", "Continue with a code-only change")
+                run_architecture_review(repo, force=True, reviewer_fn=reviewer)
+
+                self.assertIn(
+                    f"## Baseline task blueprint (immutable Anchor 0 @ {second.head_sha[:12]}): "
+                    f"{plan}\nRetire the outbox.",
+                    prompts[-1],
+                )
+                self.assertIn(
+                    "[DELETED AT HEAD]" if change == "delete" else "+Defer outbox retirement.",
+                    prompts[-1],
+                )
+                self.assertIn("Authoritative audit evidence", prompts[-1])
+
+    def test_blueprint_symlink_diff_compares_the_committed_target_bodies(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "docs/task-plan.md").symlink_to("plan-source.txt")
+            source = repo / "docs/plan-source.txt"
+            source.write_text("Retire the outbox.\n")
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "Commit the original symlinked blueprint")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", base)
+            source.write_text("Defer outbox retirement.\n")
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "docs", "app.py")
+            _git(repo, "commit", "-m", "Change the blueprint target")
+
+            scope = collect_review_scope(repo)
+            self.assertEqual(scope.reviewable_files, ("app.py",))
+            prompt = build_review_prompt(repo, scope, reviewer_note="Verify docs/task-plan.md")
+            self.assertIn(
+                f"## Baseline task blueprint (immutable Anchor 0 @ {base[:12]}): "
+                "docs/task-plan.md\nRetire the outbox.",
+                prompt,
+            )
+            self.assertIn("-Retire the outbox.\n+Defer outbox retirement.", prompt)
 
     def test_methodology_requires_zero_based_whole_module_reconciliation(self):
         self.assertIn(
@@ -718,7 +918,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             report = "docs/reports/anchor-0.md"
             (repo / report).parent.mkdir(parents=True)
             (repo / report).write_text("# Doc only\n", encoding="utf-8")
-            _git(repo, "add", report)
+            plan = "docs/consolidation-plan.md"
+            (repo / plan).write_text(f"See {report}.\n")
+            _git(repo, "add", report, plan)
             _git(repo, "commit", "-m", "report only")
             self.assertTrue(collect_review_scope(repo).is_exempt)
 

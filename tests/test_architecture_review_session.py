@@ -154,6 +154,11 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(saved_session.session_id, r1.session_id)
             self.assertEqual(saved_session.round_count, 1)
             self.assertEqual(len(saved_session.last_blocking_findings), 1)
+            session_file = next((repo / ".git/the-guard-sessions").glob("*.json"))
+            legacy_payload = json.loads(session_file.read_text())
+            self.assertEqual(legacy_payload.pop("initial_head_sha"), r1.head_sha)
+            session_file.write_text(json.dumps(legacy_payload))
+            self.assertEqual(load_review_session(repo).initial_head_sha, r1.head_sha)
 
             readers_py.write_text(
                 "def read_completion_tail():\n    return {'tail': 1}\n",
@@ -356,6 +361,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 saved = load_review_session(repo)
                 self.assertEqual(saved.session_id, "conv-fresh-full")
                 self.assertEqual(saved.last_head_sha, r2.head_sha)
+                self.assertEqual(saved.initial_head_sha, r1.head_sha)
                 self.assertEqual(saved.last_summary, "verified full review go")
                 failures = [
                     json.loads(p.read_text())
@@ -576,6 +582,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             assert carried is not None
             self.assertEqual(carried["mode"], "carried-forward")
             self.assertIsNotNone(load_valid_receipt(repo, merged_scope.patch_digest))
+            self.assertEqual(load_review_session(repo).initial_head_sha, r1.head_sha)
             self.assertEqual(
                 len(
                     [
@@ -621,6 +628,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             _git(repo, "commit", "-m", "new code with non-ancestor session merge_base")
             cur_session = load_review_session(repo)
             assert cur_session is not None
+            self.assertEqual(cur_session.initial_head_sha, r1.head_sha)
             save_review_session(
                 repo,
                 type(cur_session)(
@@ -640,6 +648,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 reviewer_note="Note with non-ancestor merge_base.",
             )
             self.assertEqual(r4.mode, "full")
+            self.assertEqual(load_review_session(repo).initial_head_sha, r4.head_sha)
             calls_final = [
                 json.loads(l)
                 for l in calls_file.read_text(encoding="utf-8").splitlines()

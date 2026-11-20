@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
@@ -127,6 +127,8 @@ class ReviewSessionState:
     contract_digest: str = ""
     round_count: int = 1
     updated_at: str = ""
+    initial_head_sha: str = ""
+    task_blueprint_anchors: dict[str, str] = field(default_factory=dict)
 
 
 def worktree_session_key(worktree_path: Path, branch: str) -> str:
@@ -203,16 +205,12 @@ def load_review_session(
         for item in (raw.get("last_blocking_findings") or [])
         if isinstance(item, dict)
     )
-    sub_shas_raw = raw.get("last_submodule_shas")
-    sub_shas = (
-        {
-            str(k): str(v)
-            for k, v in sub_shas_raw.items()
-            if isinstance(k, str) and isinstance(v, str)
-        }
-        if isinstance(sub_shas_raw, dict)
-        else {}
-    )
+    def string_map(key: str) -> dict[str, str]:
+        value = raw.get(key)
+        if not isinstance(value, dict):
+            return {}
+        return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+
     return ReviewSessionState(
         worktree_path=str(raw.get("worktree_path") or ""),
         branch=str(raw.get("branch") or ""),
@@ -224,10 +222,12 @@ def load_review_session(
         last_verdict=str(raw.get("last_verdict") or ""),
         last_summary=str(raw.get("last_summary") or ""),
         last_blocking_findings=findings,
-        last_submodule_shas=sub_shas,
+        last_submodule_shas=string_map("last_submodule_shas"),
         contract_digest=str(raw.get("contract_digest") or ""),
         round_count=int(raw.get("round_count") or 1),
         updated_at=str(raw.get("updated_at") or ""),
+        initial_head_sha=str(raw.get("initial_head_sha") or raw.get("last_head_sha") or ""),
+        task_blueprint_anchors=string_map("task_blueprint_anchors"),
     )
 
 
@@ -255,6 +255,8 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
         "provider": state.provider,
         "session_id": state.session_id,
         "last_head_sha": state.last_head_sha,
+        "initial_head_sha": state.initial_head_sha,
+        "task_blueprint_anchors": state.task_blueprint_anchors,
         "last_patch_digest": state.last_patch_digest,
         "last_verdict": state.last_verdict,
         "last_summary": state.last_summary,

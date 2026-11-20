@@ -27,12 +27,12 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   and callers affected by target-layer or owner-resolution changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
   granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
 - `review/contract` owns reviewer types and wire schema; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope and patch identity;
-  `documents` owns review document inventory and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
+  `documents` owns review document inventory, binding blueprint selection and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
   `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;
   `engine` composes review and continuation. These modules do not implement product policy semantics.
 - `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows.
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update cooldown metadata in `~/.guard`. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports and reloads the updater from the checkout while retaining the original package as the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
-- Review sessions persist a contract digest covering reviewer code, repository configuration, policy rules, root instructions and architecture/boundary document snapshots; a digest change discards incremental continuation and starts a fresh full review.
+- Review sessions persist the first reviewed head, the binding revisions of task blueprints already reviewed, and a contract digest covering reviewer code, configuration, policy rules, root instructions and architecture/boundary snapshots. A digest change starts a fresh full review while preserving the binding blueprint revisions for a valid branch baseline.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
 Discovery reports observed structure; it never grants ownership or changes declared constraints.
@@ -47,16 +47,24 @@ coupling never authorizes introducing or deepening a declared core boundary viol
 reviewed commit. Full, batched and incremental reviews map changes to these contracts
 before examining hunks. Missing boundary declarations do not count as loaded evidence.
 
-Full and incremental prompts also load up to four task blueprints from the target commit.
-Changed Markdown documents take priority, followed by repository-relative Markdown references
-from those documents or `--note`, including earlier Anchor-0 reports. Operational ledgers
-are excluded. Changes limited to non-contract reports or plans remain review-exempt.
+Full and incremental prompts preview up to four task blueprints. Changed Markdown documents take
+priority, followed by direct repository-relative Markdown references from baseline and reviewed
+bodies or `--note`. For each path, the merge base takes precedence over its recorded binding
+revision. Unrecorded paths also consult the first and previous reviewed heads. When a branch
+changes or deletes a blueprint, the prompt includes the binding baseline followed by a bounded
+diff of the committed bodies or a deletion marker. Symlink-backed blueprints compare the
+resolved bodies. Previously reviewed paths retain their binding revisions after reclassification
+and are listed separately when the inline preview is full. Anchors survive provider restarts and
+verified rebases. Operational ledgers are excluded.
+Changes limited to non-contract reports or plans remain review-exempt.
 
 Reviewers derive the minimal target architecture from the business goal and loaded blueprints,
 then compare it with the committed schema, writers, lifecycle transitions, and readers across
 the touched subsystem. New capabilities belong on the authoritative entity lifecycle or read
 projection. Consolidation and root-cause repairs must remove the redundant persistence and
-state transitions targeted by the change.
+state transitions targeted by the change. Reviewers use baseline blueprints, referenced Anchor-0
+reports and complexity budgets to detect unauthorized scope reductions. They block consolidations
+that move a secondary lifecycle into parent-table columns while its state machine remains live.
 
 `guard check`, branch-wide `guard topology check`, and protected-push hooks reject
 new missing declared documents and newly stale dependency edges. An edited production
