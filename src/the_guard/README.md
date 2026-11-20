@@ -47,15 +47,17 @@ coupling never authorizes introducing or deepening a declared core boundary viol
 reviewed commit. Full, batched and incremental reviews map changes to these contracts
 before examining hunks. Missing boundary declarations do not count as loaded evidence.
 
-Full and incremental prompts preview up to four task blueprints. Changed Markdown documents take
-priority, followed by direct repository-relative Markdown references from baseline and reviewed
-bodies or `--note`. For each path, the merge base takes precedence over its recorded binding
-revision. Unrecorded paths also consult the first and previous reviewed heads. When a branch
-changes or deletes a blueprint, the prompt includes the binding baseline followed by a bounded
-diff of the committed bodies or a deletion marker. Symlink-backed blueprints compare the
-resolved bodies. Previously reviewed paths retain their binding revisions after reclassification
-and are listed separately when the inline preview is full. Anchors survive provider restarts and
-verified rebases. Operational ledgers are excluded.
+Full and incremental prompts preview up to four task blueprints. Discovery scans changed
+Markdown at the merge base, reviewed revisions, and HEAD, plus `--note`. Links beginning with
+`./` or `../` resolve against the source document directory. Other links try the repository root
+first and then the source directory. Previews prioritize unchanged referenced merge-base
+evidence, then changed merge-base blueprints, then branch blueprints. The merge base supplies
+immutable Anchor 0. Recorded revisions and the first and previous reviewed heads supply branch
+draft history. When a branch changes or deletes a blueprint, the prompt includes the historical
+body followed by a bounded diff of the committed bodies or a deletion marker. Symlink-backed
+blueprints compare resolved bodies. Every resolved changed blueprint and referenced merge-base
+document gets a persistent anchor, with an index for paths outside the inline preview. Anchors
+survive provider restarts and verified rebases. Operational ledgers are excluded.
 Changes limited to non-contract reports or plans remain review-exempt.
 
 Reviewers derive the minimal target architecture from the business goal and loaded blueprints,

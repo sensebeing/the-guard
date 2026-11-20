@@ -57,15 +57,18 @@ writers, lifecycle transitions, and readers with `git show <target-sha>:<path>` 
   blueprint calls for consolidation or root-cause repair and the live module retains dual
   persistence, split state machines, cross-table business-writing triggers, or substitutes
   Python wrappers or formatting compaction for removing redundant paths.
-- Baseline task blueprints from the merge base or reviewed rounds, their referenced Anchor-0
-  reports, and baseline complexity budgets define binding acceptance scope. Compare any
-  changed complexity budget against the merge base or earliest available reviewed snapshot
-  containing it. Block under
-  guard.architecture-simplicity or guard.single-source-of-truth when blueprint or budget edits
-  or deletions relax target thresholds, drop named table, trigger, or state-machine retirements,
-  or defer committed convergence to a later wave. Allow re-scoping only when the developer note
-  cites explicit user authorization and schema and lifecycle evidence establishes that the
-  surviving entity is genuinely orthogonal.
+- Immutable Anchor 0 blueprints, audit evidence, and complexity budgets from the merge base
+  define binding acceptance scope. Prior reviewed branch blueprints record implementation
+  history and can carry those obligations forward. Block under guard.architecture-simplicity
+  or guard.single-source-of-truth when deleting a branch blueprint, removing a reference,
+  or rewriting a draft serves to abandon or defer an Anchor 0 root-cause repair, drop a
+  merge-base commitment to retire a table, trigger, or state machine, or relax a merge-base
+  complexity budget. Apply the same rule to edits or deletions of the merge-base contracts
+  themselves. Allow re-scoping only when the developer note cites explicit user authorization
+  and schema and lifecycle evidence establishes that the surviving entity is genuinely orthogonal.
+- Allow removal of cross-module intrusion or overdesign introduced in a prior reviewed branch
+  blueprint when the change converges on the simplest implementation at the sole owner and
+  preserves all Anchor 0 obligations and equivalent safety boundaries.
 - Block column-inlining mirages under those rules when a consolidation removes a child process
   or outbox table by copying its prefixed columns and secondary `*_status` or `*_state` lifecycle
   onto a parent table while the split state machine, claim loop, or dual track remains live.
@@ -379,7 +382,7 @@ def _bounded_document(body: str) -> str:
 def _render_task_blueprint(
     repo_root: Path, head_sha: str, snapshot: TaskBlueprintSnapshot
 ) -> str:
-    if snapshot.baseline_body is None or snapshot.baseline_body == snapshot.head_body:
+    if snapshot.baseline_body is None:
         assert snapshot.head_body is not None
         return (
             f"## Task design & architecture blueprint: {snapshot.path}\n"
@@ -388,6 +391,16 @@ def _render_task_blueprint(
 
     baseline_sha = snapshot.baseline_sha
     assert baseline_sha is not None
+    revision = baseline_sha[:12]
+    title = (
+        f"Baseline task blueprint (immutable Anchor 0 @ {revision})"
+        if snapshot.in_merge_base
+        else f"Prior reviewed branch blueprint (@ {revision})"
+    )
+    blueprint = f"## {title}: {snapshot.path}\n{_bounded_document(snapshot.baseline_body)}"
+    if snapshot.baseline_body == snapshot.head_body:
+        return blueprint
+
     changes = "[DELETED AT HEAD]"
     if snapshot.head_body is not None:
         if snapshot.follows_symlink:
@@ -421,8 +434,7 @@ def _render_task_blueprint(
             diff = diff[: limit - len(suffix)].rpartition("\n")[0] + suffix
         changes = f"```diff\n{diff.rstrip()}\n```"
     return (
-        f"## Baseline task blueprint (immutable Anchor 0 @ {baseline_sha[:12]}): "
-        f"{snapshot.path}\n{_bounded_document(snapshot.baseline_body)}\n"
+        f"{blueprint}\n"
         f"### Task blueprint modifications on reviewed branch: {snapshot.path}\n{changes}"
     )
 
@@ -554,7 +566,7 @@ def _snapshot_context(
                         f"## Boundary reference: {path}\n" + _bounded_document(body)
                     )
     anchors = dict(task_blueprint_anchors or {})
-    snapshots = resolve_task_design_blueprints(
+    selection = resolve_task_design_blueprints(
         repo_root,
         scope.changed_files,
         base_sha=scope.merge_base,
@@ -565,17 +577,20 @@ def _snapshot_context(
         reviewer_note=reviewer_note,
         excluded_paths=loaded_docs,
     )
-    for snapshot in snapshots:
-        anchors.setdefault(snapshot.path, snapshot.baseline_sha or scope.head_sha)
+    for snapshot in selection.anchor_snapshots:
+        anchors[snapshot.path] = snapshot.baseline_sha or scope.head_sha
+    previewed_paths = set()
+    for snapshot in selection.previews:
         if snapshot.path not in loaded_docs or snapshot.baseline_body != snapshot.head_body:
             sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
-    omitted = anchors.keys() - {snapshot.path for snapshot in snapshots}
+            previewed_paths.add(snapshot.path)
+    omitted = anchors.keys() - previewed_paths
     if omitted:
         sections.append(
             "## Additional previously reviewed task blueprints\n"
-            "Compare each listed path at HEAD against the merge base if present there, "
-            "otherwise against the recorded revision below. Review changes and referenced "
-            "Anchor-0 evidence even when the blueprint has no inline preview.\n"
+            "A revision equal to the merge base is immutable Anchor 0. Other revisions record "
+            "prior reviewed branch blueprints. Read the recorded bodies and compare each path "
+            "at HEAD, including changes to references and the linked Anchor 0 evidence.\n"
             + json.dumps({path: anchors[path] for path in sorted(omitted)}, indent=2)
         )
     # Missing declarations are not evidence of a contract at the reviewed snapshot.
