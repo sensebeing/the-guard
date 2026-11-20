@@ -703,6 +703,7 @@ def resolve_or_carry_forward_receipt(
             round_count=session.round_count,
             updated_at=datetime.now(UTC).isoformat(),
             initial_head_sha=session.initial_head_sha,
+            task_blueprint_anchors=session.task_blueprint_anchors,
         ),
     )
     return load_valid_receipt(repo_root, scope.patch_digest)

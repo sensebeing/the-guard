@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import shlex
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -389,18 +390,31 @@ def _render_task_blueprint(
     assert baseline_sha is not None
     changes = "[DELETED AT HEAD]"
     if snapshot.head_body is not None:
-        diff = _git(
-            repo_root,
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--no-renames",
-            "--text",
-            "--unified=3",
-            f"{baseline_sha}..{head_sha}",
-            *_literal_pathspecs((snapshot.path,)),
-        ).stdout.decode("utf-8", errors="replace")
+        if snapshot.follows_symlink:
+            # Git records only the link text at this path. Compare the committed
+            # bodies the snapshot reader resolved on each side of the link.
+            diff = "".join(
+                line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                for line in difflib.unified_diff(
+                    snapshot.baseline_body.splitlines(keepends=True),
+                    snapshot.head_body.splitlines(keepends=True),
+                    fromfile=f"{baseline_sha}:{snapshot.path} (resolved)",
+                    tofile=f"{head_sha}:{snapshot.path} (resolved)",
+                )
+            )
+        else:
+            diff = _git(
+                repo_root,
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--no-renames",
+                "--text",
+                "--unified=3",
+                f"{baseline_sha}..{head_sha}",
+                *_literal_pathspecs((snapshot.path,)),
+            ).stdout.decode("utf-8", errors="replace")
         limit = 8_000
         if len(diff) > limit:
             suffix = "\n... [truncated, inspect the full snapshot diff]"
@@ -413,6 +427,12 @@ def _render_task_blueprint(
     )
 
 
+@dataclass(frozen=True)
+class _ReviewSnapshotContext:
+    sections: list[str]
+    task_blueprint_anchors: dict[str, str]
+
+
 def _snapshot_context(
     repo_root: Path,
     scope: ReviewScope,
@@ -421,7 +441,8 @@ def _snapshot_context(
     reviewer_note: str = "",
     initial_reviewed_sha: str = "",
     prior_reviewed_sha: str = "",
-) -> list[str]:
+    task_blueprint_anchors: dict[str, str] | None = None,
+) -> _ReviewSnapshotContext:
     config = config or load_config(repo_root, revision=scope.head_sha)
     declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
     touched = set()
@@ -532,17 +553,31 @@ def _snapshot_context(
                     sections.append(
                         f"## Boundary reference: {path}\n" + _bounded_document(body)
                     )
-    for snapshot in resolve_task_design_blueprints(
+    anchors = dict(task_blueprint_anchors or {})
+    snapshots = resolve_task_design_blueprints(
         repo_root,
         scope.changed_files,
         base_sha=scope.merge_base,
         head_sha=scope.head_sha,
         initial_reviewed_sha=initial_reviewed_sha,
         prior_reviewed_sha=prior_reviewed_sha,
+        retained_anchors=anchors,
         reviewer_note=reviewer_note,
         excluded_paths=loaded_docs,
-    ):
-        sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
+    )
+    for snapshot in snapshots:
+        anchors.setdefault(snapshot.path, snapshot.baseline_sha or scope.head_sha)
+        if snapshot.path not in loaded_docs or snapshot.baseline_body != snapshot.head_body:
+            sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
+    omitted = anchors.keys() - {snapshot.path for snapshot in snapshots}
+    if omitted:
+        sections.append(
+            "## Additional previously reviewed task blueprints\n"
+            "Compare each listed path at HEAD against the merge base if present there, "
+            "otherwise against the recorded revision below. Review changes and referenced "
+            "Anchor-0 evidence even when the blueprint has no inline preview.\n"
+            + json.dumps({path: anchors[path] for path in sorted(omitted)}, indent=2)
+        )
     # Missing declarations are not evidence of a contract at the reviewed snapshot.
     effective_topology = {
         **rendered_topology,
@@ -574,7 +609,7 @@ def _snapshot_context(
             '4. Flag test issues under `guard.test-case-quality` when an existing or modified test has a wrong assertion, tests the wrong variable, or fails to exercise the query/code path it claims to test; do NOT block a PR solely with a generic "missing new unit tests" complaint.\n'
             "5. Report each distinct root-cause defect once at its primary location instead of splitting one defect into multiple cascading findings."
         )
-    return sections
+    return _ReviewSnapshotContext(sections, anchors)
 
 
 def _has_explicit_topology_contract(
@@ -665,30 +700,29 @@ def build_review_prompt(
     *,
     prior_session: ReviewSessionState | None = None,
     incremental_scope: IncrementalReviewScope | None = None,
-    initial_reviewed_sha: str | None = None,
-    prior_reviewed_sha: str | None = None,
+    snapshot_context: _ReviewSnapshotContext | None = None,
     reviewer_note: str = "",
     policy: Policy | None = None,
     config: GuardConfig | None = None,
 ) -> str:
     config = config or load_config(repo_root, revision=scope.head_sha)
     policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
-    if initial_reviewed_sha is None:
-        initial_reviewed_sha = prior_session.initial_head_sha if prior_session else ""
-    if prior_reviewed_sha is None:
+    if snapshot_context is None:
         prior_reviewed_sha = prior_session.last_head_sha if prior_session else ""
         if incremental_scope is not None:
             prior_reviewed_sha = incremental_scope.base_head_sha
-    sections = [
-        METHODOLOGY,
-        *_snapshot_context(
+        snapshot_context = _snapshot_context(
             repo_root,
             scope,
             config=config,
             reviewer_note=reviewer_note,
-            initial_reviewed_sha=initial_reviewed_sha,
+            initial_reviewed_sha=prior_session.initial_head_sha if prior_session else "",
             prior_reviewed_sha=prior_reviewed_sha,
-        ),
+            task_blueprint_anchors=prior_session.task_blueprint_anchors if prior_session else None,
+        )
+    sections = [
+        METHODOLOGY,
+        *snapshot_context.sections,
         *_render_policy_sections(policy),
     ]
     if prior_session:
@@ -731,8 +765,7 @@ def build_incremental_review_prompt(
     session: ReviewSessionState,
     inc_scope: IncrementalReviewScope | None,
     *,
-    initial_reviewed_sha: str | None = None,
-    prior_reviewed_sha: str | None = None,
+    snapshot_context: _ReviewSnapshotContext | None = None,
     reviewer_note: str = "",
     policy: Policy | None = None,
     config: GuardConfig | None = None,
@@ -745,10 +778,16 @@ def build_incremental_review_prompt(
         )
     config = config or load_config(repo_root, revision=scope.head_sha)
     policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
-    if initial_reviewed_sha is None:
-        initial_reviewed_sha = session.initial_head_sha
-    if prior_reviewed_sha is None:
-        prior_reviewed_sha = inc_scope.base_head_sha if inc_scope else session.last_head_sha
+    if snapshot_context is None:
+        snapshot_context = _snapshot_context(
+            repo_root,
+            scope,
+            config=config,
+            reviewer_note=reviewer_note,
+            initial_reviewed_sha=session.initial_head_sha,
+            prior_reviewed_sha=inc_scope.base_head_sha if inc_scope else session.last_head_sha,
+            task_blueprint_anchors=session.task_blueprint_anchors,
+        )
     sections = [
         (
             "Read-only static review: no writes, tests, builds or delegation. Use git show/grep at"
@@ -773,14 +812,7 @@ def build_incremental_review_prompt(
         *_render_prior_findings_section(
             session, scope, inc_scope, reviewer_note=reviewer_note
         ),
-        *_snapshot_context(
-            repo_root,
-            scope,
-            config=config,
-            reviewer_note=reviewer_note,
-            initial_reviewed_sha=initial_reviewed_sha,
-            prior_reviewed_sha=prior_reviewed_sha,
-        ),
+        *snapshot_context.sections,
         *_render_policy_sections(policy),
     ]
     if inc_scope and inc_scope.reviewable_files:

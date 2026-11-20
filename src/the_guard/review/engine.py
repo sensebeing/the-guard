@@ -14,6 +14,7 @@ from ..policy import Policy, load_policy
 from .contract import ReviewScope
 from .prompt import (
     _sanitize_reviewer_note,
+    _snapshot_context,
     build_incremental_review_prompt,
     build_review_prompt,
 )
@@ -135,7 +136,15 @@ def run_architecture_review(
         repo_root, scope, stored_session, config=contract_config
     )
     initial_reviewed_sha = anchor_session.initial_head_sha if anchor_session else ""
-    prior_reviewed_sha = anchor_session.last_head_sha if anchor_session else ""
+    snapshot_context = _snapshot_context(
+        repo_root,
+        scope,
+        config=contract_config,
+        reviewer_note=eff_note,
+        initial_reviewed_sha=initial_reviewed_sha,
+        prior_reviewed_sha=anchor_session.last_head_sha if anchor_session else "",
+        task_blueprint_anchors=anchor_session.task_blueprint_anchors if anchor_session else None,
+    )
     inc_scope = collect_incremental_scope(
         repo_root, scope, prior_session, config=contract_config
     )
@@ -150,8 +159,7 @@ def run_architecture_review(
                 scope,
                 prior_session=prior_session,
                 incremental_scope=inc_scope,
-                initial_reviewed_sha=initial_reviewed_sha,
-                prior_reviewed_sha=prior_reviewed_sha,
+                snapshot_context=snapshot_context,
                 reviewer_note=eff_note,
                 policy=policy,
                 config=contract_config,
@@ -168,8 +176,7 @@ def run_architecture_review(
             scope,
             prior_session,
             inc_scope,
-            initial_reviewed_sha=initial_reviewed_sha,
-            prior_reviewed_sha=prior_reviewed_sha,
+            snapshot_context=snapshot_context,
             reviewer_note=eff_note,
             policy=policy,
             config=contract_config,
@@ -326,6 +333,7 @@ def run_architecture_review(
             else 1,
             updated_at=datetime.now(UTC).isoformat(),
             initial_head_sha=initial_reviewed_sha or scope.head_sha,
+            task_blueprint_anchors=snapshot_context.task_blueprint_anchors,
         ),
     )
     if result.verdict == "GO":

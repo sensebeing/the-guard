@@ -470,6 +470,87 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                         prompt,
                     )
 
+    def test_later_reviewed_blueprints_survive_classification_changes_and_deletion(self):
+        plan = "docs/consolidation-plan.md"
+        anchor = "docs/referenced-audit.md"
+        for change in ("promote", "delete"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                (repo / anchor).write_text("Authoritative audit evidence\n")
+                _git(repo, "add", anchor)
+                _git(repo, "commit", "-m", "Record the audit upstream")
+                base = _git(repo, "rev-parse", "HEAD")
+                _git(repo, "update-ref", "refs/remotes/origin/main", base)
+
+                prompts = []
+
+                def reviewer(prompt):
+                    prompts.append(prompt)
+                    return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": []}
+
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", "app.py")
+                _git(repo, "commit", "-m", "Start work without a task blueprint")
+                run_architecture_review(repo, reviewer_fn=reviewer)
+
+                (repo / plan).write_text(f"Retire the outbox. See {anchor}.\n")
+                _git(repo, "add", plan)
+                _git(repo, "commit", "-m", "Commit the acceptance scope in round 2")
+                second = run_architecture_review(repo, reviewer_fn=reviewer)
+
+                if change == "promote":
+                    (repo / ".guard").mkdir()
+                    (repo / ".guard/config.json").write_text(json.dumps({
+                        "topology": {"architecture_docs": [plan]},
+                    }))
+                    (repo / plan).write_text("Defer outbox retirement.\n")
+                else:
+                    (repo / plan).unlink()
+                _git(repo, "add", "-A")
+                _git(repo, "commit", "-m", "Weaken the reviewed plan")
+                run_architecture_review(repo, reviewer_fn=reviewer)
+
+                (repo / "app.py").write_text("value = 2\n")
+                _git(repo, "add", "app.py")
+                _git(repo, "commit", "-m", "Continue with a code-only change")
+                run_architecture_review(repo, force=True, reviewer_fn=reviewer)
+
+                self.assertIn(
+                    f"## Baseline task blueprint (immutable Anchor 0 @ {second.head_sha[:12]}): "
+                    f"{plan}\nRetire the outbox.",
+                    prompts[-1],
+                )
+                self.assertIn(
+                    "[DELETED AT HEAD]" if change == "delete" else "+Defer outbox retirement.",
+                    prompts[-1],
+                )
+                self.assertIn("Authoritative audit evidence", prompts[-1])
+
+    def test_blueprint_symlink_diff_compares_the_committed_target_bodies(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "docs/task-plan.md").symlink_to("plan-source.txt")
+            source = repo / "docs/plan-source.txt"
+            source.write_text("Retire the outbox.\n")
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "Commit the original symlinked blueprint")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", base)
+            source.write_text("Defer outbox retirement.\n")
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "docs", "app.py")
+            _git(repo, "commit", "-m", "Change the blueprint target")
+
+            scope = collect_review_scope(repo)
+            self.assertEqual(scope.reviewable_files, ("app.py",))
+            prompt = build_review_prompt(repo, scope, reviewer_note="Verify docs/task-plan.md")
+            self.assertIn(
+                f"## Baseline task blueprint (immutable Anchor 0 @ {base[:12]}): "
+                "docs/task-plan.md\nRetire the outbox.",
+                prompt,
+            )
+            self.assertIn("-Retire the outbox.\n+Defer outbox retirement.", prompt)
+
     def test_methodology_requires_zero_based_whole_module_reconciliation(self):
         self.assertIn(
             "## Zero-Based Target Architecture & Whole-Module Reconciliation", METHODOLOGY

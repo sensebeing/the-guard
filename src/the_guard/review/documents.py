@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -71,6 +71,7 @@ class TaskBlueprintSnapshot:
     baseline_sha: str | None
     baseline_body: str | None
     head_body: str | None
+    follows_symlink: bool = False
 
 
 def resolve_task_design_blueprints(
@@ -81,10 +82,12 @@ def resolve_task_design_blueprints(
     head_sha: str,
     initial_reviewed_sha: str = "",
     prior_reviewed_sha: str = "",
+    retained_anchors: Mapping[str, str] | None = None,
     reviewer_note: str = "",
     excluded_paths: Iterable[str] = (),
 ) -> list[TaskBlueprintSnapshot]:
     """Resolve changed Markdown and direct references against binding Git snapshots."""
+    anchors = retained_anchors or {}
     baselines = {base_sha: None}
     for revision in dict.fromkeys((initial_reviewed_sha, prior_reviewed_sha)):
         if not revision or revision in baselines:
@@ -99,7 +102,7 @@ def resolve_task_design_blueprints(
         if commit:
             baselines[commit.strip()] = None
 
-    excluded = _OPERATIONAL_LEDGERS.union(excluded_paths)
+    excluded = _OPERATIONAL_LEDGERS | (set(excluded_paths) - anchors.keys())
     # A plan introduced in a reviewed round and later removed is absent from the
     # current branch diff. Use each reviewed branch's change list so an upstream
     # deletion during a rebase is not attributed to the reviewed branch.
@@ -118,7 +121,7 @@ def resolve_task_design_blueprints(
             raise ValueError(f"Cannot inspect task blueprint changes at {base_sha}...{revision}")
         historical_changes.extend(changed.split("\0"))
     changed_candidates = dict.fromkeys(
-        path for path in (*changed_files, *historical_changes)
+        path for path in (*changed_files, *historical_changes, *anchors)
         if path.endswith(".md") and path not in excluded
     )
 
@@ -130,12 +133,28 @@ def resolve_task_design_blueprints(
             modes: dict[str, str] = {}
             existing_document_paths(repo_root, paths, revision, snapshot_modes=modes)
             modes_by_revision[revision] = modes
+        pinned_paths_by_revision: dict[str, list[str]] = {}
+        for path in paths:
+            revision = anchors.get(path)
+            if revision is not None and revision not in modes_by_revision:
+                pinned_paths_by_revision.setdefault(revision, []).append(path)
+        for revision, pinned_paths in pinned_paths_by_revision.items():
+            modes = {}
+            existing_document_paths(repo_root, pinned_paths, revision, snapshot_modes=modes)
+            modes_by_revision[revision] = modes
 
         snapshots = []
         for path in paths:
-            baseline_sha = next(
-                (rev for rev in baselines if path in modes_by_revision[rev]), None
-            )
+            if path in modes_by_revision[base_sha]:
+                baseline_sha = base_sha
+            elif path in anchors:
+                baseline_sha = anchors[path]
+                if path not in modes_by_revision[baseline_sha]:
+                    raise ValueError(f"Recorded task blueprint missing at {baseline_sha}: {path}")
+            else:
+                baseline_sha = next(
+                    (rev for rev in baselines if path in modes_by_revision[rev]), None
+                )
             head_body = read_document(
                 repo_root, path, head_sha, snapshot_modes=modes_by_revision[head_sha]
             )
@@ -152,7 +171,14 @@ def resolve_task_design_blueprints(
             if head_body is None and baseline_body is None:
                 continue
             snapshots.append(
-                TaskBlueprintSnapshot(path, baseline_sha, baseline_body, head_body)
+                TaskBlueprintSnapshot(
+                    path, baseline_sha, baseline_body, head_body,
+                    follows_symlink=any(
+                        modes_by_revision[rev].get(path) == "120000"
+                        for rev in (baseline_sha, head_sha)
+                        if rev is not None
+                    ),
+                )
             )
             if len(snapshots) == limit:
                 break
