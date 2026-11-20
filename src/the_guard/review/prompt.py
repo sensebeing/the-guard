@@ -6,7 +6,7 @@ import difflib
 import json
 import re
 import shlex
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -33,6 +33,7 @@ from .documents import (
     boundary_document_paths,
     contract_document_paths,
     existing_document_paths,
+    normalize_task_blueprint_anchors,
     read_document,
     resolve_task_design_blueprints,
     resolved_contract_paths,
@@ -57,15 +58,20 @@ writers, lifecycle transitions, and readers with `git show <target-sha>:<path>` 
   blueprint calls for consolidation or root-cause repair and the live module retains dual
   persistence, split state machines, cross-table business-writing triggers, or substitutes
   Python wrappers or formatting compaction for removing redundant paths.
-- Baseline task blueprints from the merge base or reviewed rounds, their referenced Anchor-0
-  reports, and baseline complexity budgets define binding acceptance scope. Compare any
-  changed complexity budget against the merge base or earliest available reviewed snapshot
-  containing it. Block under
-  guard.architecture-simplicity or guard.single-source-of-truth when blueprint or budget edits
-  or deletions relax target thresholds, drop named table, trigger, or state-machine retirements,
-  or defer committed convergence to a later wave. Allow re-scoping only when the developer note
-  cites explicit user authorization and schema and lifecycle evidence establishes that the
-  surviving entity is genuinely orthogonal.
+- Immutable Anchor 0 blueprints, referenced audit evidence, and baseline complexity budgets from
+  the merge base together with retirement commitments, convergence requirements, and target
+  complexity budgets established in prior reviewed branch blueprints define binding acceptance
+  scope. Block under guard.architecture-simplicity or guard.single-source-of-truth when editing
+  or deleting a merge-base contract or prior reviewed branch blueprint, or removing a reference,
+  serves to abandon or defer an Anchor 0 root-cause repair, drop a named table, trigger, or
+  state-machine retirement, defer committed convergence to a later wave, or relax a merge-base
+  or reviewed target complexity budget. Allow re-scoping only when the developer note cites
+  explicit user authorization and schema and lifecycle evidence establishes that the surviving
+  entity is genuinely orthogonal.
+- Allow removal of cross-module intrusion or overdesign introduced in a prior reviewed branch
+  blueprint when the change converges on the simplest implementation at the sole owner and
+  preserves all Anchor 0 obligations, committed retirements, convergence requirements, target
+  budgets, and equivalent safety boundaries.
 - Block column-inlining mirages under those rules when a consolidation removes a child process
   or outbox table by copying its prefixed columns and secondary `*_status` or `*_state` lifecycle
   onto a parent table while the split state machine, claim loop, or dual track remains live.
@@ -376,10 +382,47 @@ def _bounded_document(body: str) -> str:
     return body[:24_000] + ("\n... [truncated]" if len(body) > 24_000 else "")
 
 
+def _render_task_blueprint_diff(
+    repo_root: Path, head_sha: str, snapshot: TaskBlueprintSnapshot,
+    prior_sha: str, prior_body: str,
+) -> str:
+    if snapshot.head_body is None:
+        return "[DELETED AT HEAD]"
+    if snapshot.follows_symlink:
+        # Git records the link itself. Compare the resolved committed bodies.
+        diff = "".join(
+            line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+            for line in difflib.unified_diff(
+                prior_body.splitlines(keepends=True),
+                snapshot.head_body.splitlines(keepends=True),
+                fromfile=f"{prior_sha}:{snapshot.path} (resolved)",
+                tofile=f"{head_sha}:{snapshot.path} (resolved)",
+            )
+        )
+    else:
+        diff = _git(
+            repo_root,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            "--text",
+            "--unified=3",
+            f"{prior_sha}..{head_sha}",
+            *_literal_pathspecs((snapshot.path,)),
+        ).stdout.decode("utf-8", errors="replace")
+    limit = 8_000
+    if len(diff) > limit:
+        suffix = "\n... [truncated, inspect the full snapshot diff]"
+        diff = diff[: limit - len(suffix)].rpartition("\n")[0] + suffix
+    return f"```diff\n{diff.rstrip()}\n```"
+
+
 def _render_task_blueprint(
     repo_root: Path, head_sha: str, snapshot: TaskBlueprintSnapshot
 ) -> str:
-    if snapshot.baseline_body is None or snapshot.baseline_body == snapshot.head_body:
+    if snapshot.baseline_body is None:
         assert snapshot.head_body is not None
         return (
             f"## Task design & architecture blueprint: {snapshot.path}\n"
@@ -388,49 +431,25 @@ def _render_task_blueprint(
 
     baseline_sha = snapshot.baseline_sha
     assert baseline_sha is not None
-    changes = "[DELETED AT HEAD]"
-    if snapshot.head_body is not None:
-        if snapshot.follows_symlink:
-            # Git records only the link text at this path. Compare the committed
-            # bodies the snapshot reader resolved on each side of the link.
-            diff = "".join(
-                line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
-                for line in difflib.unified_diff(
-                    snapshot.baseline_body.splitlines(keepends=True),
-                    snapshot.head_body.splitlines(keepends=True),
-                    fromfile=f"{baseline_sha}:{snapshot.path} (resolved)",
-                    tofile=f"{head_sha}:{snapshot.path} (resolved)",
-                )
+    sections = []
+    for revision, body in ((baseline_sha, snapshot.baseline_body), *snapshot.reviewed_revisions):
+        level = "##" if revision == baseline_sha else "###"
+        title = f"Prior reviewed branch blueprint (@ {revision[:12]})"
+        if revision == baseline_sha and snapshot.in_merge_base:
+            title = f"Baseline task blueprint (immutable Anchor 0 @ {revision[:12]})"
+        sections.append(f"{level} {title}: {snapshot.path}\n{_bounded_document(body)}")
+        if body != snapshot.head_body:
+            changes = _render_task_blueprint_diff(repo_root, head_sha, snapshot, revision, body)
+            sections.append(
+                f"### Task blueprint modifications on reviewed branch: {snapshot.path}\n{changes}"
             )
-        else:
-            diff = _git(
-                repo_root,
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-color",
-                "--no-renames",
-                "--text",
-                "--unified=3",
-                f"{baseline_sha}..{head_sha}",
-                *_literal_pathspecs((snapshot.path,)),
-            ).stdout.decode("utf-8", errors="replace")
-        limit = 8_000
-        if len(diff) > limit:
-            suffix = "\n... [truncated, inspect the full snapshot diff]"
-            diff = diff[: limit - len(suffix)].rpartition("\n")[0] + suffix
-        changes = f"```diff\n{diff.rstrip()}\n```"
-    return (
-        f"## Baseline task blueprint (immutable Anchor 0 @ {baseline_sha[:12]}): "
-        f"{snapshot.path}\n{_bounded_document(snapshot.baseline_body)}\n"
-        f"### Task blueprint modifications on reviewed branch: {snapshot.path}\n{changes}"
-    )
+    return "\n".join(sections)
 
 
 @dataclass(frozen=True)
 class _ReviewSnapshotContext:
     sections: list[str]
-    task_blueprint_anchors: dict[str, str]
+    task_blueprint_anchors: dict[str, tuple[str, ...]]
 
 
 def _snapshot_context(
@@ -441,7 +460,7 @@ def _snapshot_context(
     reviewer_note: str = "",
     initial_reviewed_sha: str = "",
     prior_reviewed_sha: str = "",
-    task_blueprint_anchors: dict[str, str] | None = None,
+    task_blueprint_anchors: Mapping[str, str | tuple[str, ...]] | None = None,
 ) -> _ReviewSnapshotContext:
     config = config or load_config(repo_root, revision=scope.head_sha)
     declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
@@ -553,8 +572,8 @@ def _snapshot_context(
                     sections.append(
                         f"## Boundary reference: {path}\n" + _bounded_document(body)
                     )
-    anchors = dict(task_blueprint_anchors or {})
-    snapshots = resolve_task_design_blueprints(
+    anchors = normalize_task_blueprint_anchors(task_blueprint_anchors)
+    selection = resolve_task_design_blueprints(
         repo_root,
         scope.changed_files,
         base_sha=scope.merge_base,
@@ -565,17 +584,26 @@ def _snapshot_context(
         reviewer_note=reviewer_note,
         excluded_paths=loaded_docs,
     )
-    for snapshot in snapshots:
-        anchors.setdefault(snapshot.path, snapshot.baseline_sha or scope.head_sha)
-        if snapshot.path not in loaded_docs or snapshot.baseline_body != snapshot.head_body:
+    for snapshot in selection.anchor_snapshots:
+        revisions = (snapshot.baseline_sha,) if snapshot.baseline_sha is not None else ()
+        revisions += tuple(revision for revision, _ in snapshot.reviewed_revisions)
+        prior_bodies = {snapshot.baseline_body, *(body for _, body in snapshot.reviewed_revisions)}
+        if snapshot.head_body is not None and snapshot.head_body not in prior_bodies:
+            revisions += (scope.head_sha,)
+        anchors[snapshot.path] = revisions
+    previewed_paths = set()
+    for snapshot in selection.previews:
+        if snapshot.path not in loaded_docs or snapshot.has_modifications:
             sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
-    omitted = anchors.keys() - {snapshot.path for snapshot in snapshots}
+            previewed_paths.add(snapshot.path)
+    omitted = anchors.keys() - previewed_paths
     if omitted:
         sections.append(
             "## Additional previously reviewed task blueprints\n"
-            "Compare each listed path at HEAD against the merge base if present there, "
-            "otherwise against the recorded revision below. Review changes and referenced "
-            "Anchor-0 evidence even when the blueprint has no inline preview.\n"
+            "Each path lists its distinct revisions in review order. A revision equal to the merge base "
+            "is immutable Anchor 0. Other revisions record branch drafts. Apply the binding acceptance "
+            "scope above, including commitments established in prior reviewed branch blueprints. "
+            "Compare the recorded bodies with HEAD and inspect changes to references and linked evidence.\n"
             + json.dumps({path: anchors[path] for path in sorted(omitted)}, indent=2)
         )
     # Missing declarations are not evidence of a contract at the reviewed snapshot.

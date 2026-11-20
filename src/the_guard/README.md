@@ -47,24 +47,29 @@ coupling never authorizes introducing or deepening a declared core boundary viol
 reviewed commit. Full, batched and incremental reviews map changes to these contracts
 before examining hunks. Missing boundary declarations do not count as loaded evidence.
 
-Full and incremental prompts preview up to four task blueprints. Changed Markdown documents take
-priority, followed by direct repository-relative Markdown references from baseline and reviewed
-bodies or `--note`. For each path, the merge base takes precedence over its recorded binding
-revision. Unrecorded paths also consult the first and previous reviewed heads. When a branch
-changes or deletes a blueprint, the prompt includes the binding baseline followed by a bounded
-diff of the committed bodies or a deletion marker. Symlink-backed blueprints compare the
-resolved bodies. Previously reviewed paths retain their binding revisions after reclassification
-and are listed separately when the inline preview is full. Anchors survive provider restarts and
-verified rebases. Operational ledgers are excluded.
+Full and incremental prompts preview up to four task blueprints. Discovery scans changed
+Markdown at the merge base, reviewed revisions, and HEAD, plus `--note`. Links beginning with
+`./` or `../` resolve against the source document directory. Other links try the repository root
+first and then the source directory, using the tree where the link appears. Previews prioritize
+unchanged referenced merge-base evidence, then changed merge-base blueprints, then branch
+blueprints. The merge base supplies immutable Anchor 0. Each changed blueprint and referenced
+merge-base document retains ordered
+revisions for every distinct reviewed body. Inline previews include each historical body and a
+bounded diff or deletion marker when it differs from HEAD. Symlink-backed blueprints compare
+resolved bodies. The prompt indexes revision lists for paths outside the inline preview.
+Anchor histories survive provider restarts and verified rebases. Operational ledgers are excluded.
 Changes limited to non-contract reports or plans remain review-exempt.
 
 Reviewers derive the minimal target architecture from the business goal and loaded blueprints,
 then compare it with the committed schema, writers, lifecycle transitions, and readers across
 the touched subsystem. New capabilities belong on the authoritative entity lifecycle or read
 projection. Consolidation and root-cause repairs must remove the redundant persistence and
-state transitions targeted by the change. Reviewers use baseline blueprints, referenced Anchor-0
-reports and complexity budgets to detect unauthorized scope reductions. They block consolidations
-that move a secondary lifecycle into parent-table columns while its state machine remains live.
+state transitions targeted by the change. Reviewers check binding scope against merge-base
+Anchor 0 and prior reviewed branch blueprints, including referenced audit evidence, root-cause
+repairs, retirement and convergence commitments, and target complexity budgets. Branch-introduced
+overdesign can be simplified at the sole owner when the change preserves those obligations and
+equivalent safety boundaries. Reviewers block consolidations that move a secondary lifecycle into
+parent-table columns while its state machine remains live.
 
 `guard check`, branch-wide `guard topology check`, and protected-push hooks reject
 new missing declared documents and newly stale dependency edges. An edited production
