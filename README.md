@@ -242,7 +242,7 @@ Reproduce Track 1 with python3 benchmarks/guardbench.py; the command uses no mod
 3. Preserve real safety boundaries: Simplification keeps authentication, tenant isolation, concurrency locks, idempotency, and transactional integrity at the write boundary.
 4. Evidence over ceremony: Reviewers must cite concrete file paths and contract violations. When the code is already right, a factual rebuttal (`guard review --note`) resolves the finding without cosmetic edits.
 
-See the [core rule definitions](docs/standards/rules/architecture-simplicity.md) and the full 14-rule [preset catalog](skills/the-guard-setup/references/preset-catalog.md).
+See the [core rule definitions](src/the_guard/presets/rules/architecture-simplicity.md) and the full 14-rule [preset catalog](skills/the-guard-setup/references/preset-catalog.md).
 
 ## Independent review
 

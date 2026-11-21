@@ -47,29 +47,25 @@ coupling never authorizes introducing or deepening a declared core boundary viol
 reviewed commit. Full, batched and incremental reviews map changes to these contracts
 before examining hunks. Missing boundary declarations do not count as loaded evidence.
 
-Full and incremental prompts preview up to four task blueprints. Discovery scans changed
-Markdown at the merge base, reviewed revisions, and HEAD, plus `--note`. Links beginning with
-`./` or `../` resolve against the source document directory. Other links try the repository root
-first and then the source directory, using the tree where the link appears. Previews prioritize
-unchanged referenced merge-base evidence, then changed merge-base blueprints, then branch
-blueprints. The merge base supplies immutable Anchor 0. Each changed blueprint and referenced
-merge-base document retains ordered
-revisions for every distinct reviewed body. Inline previews include each historical body and a
-bounded diff or deletion marker when it differs from HEAD. Symlink-backed blueprints compare
-resolved bodies. The prompt indexes revision lists for paths outside the inline preview.
-Anchor histories survive provider restarts and verified rebases. Operational ledgers are excluded.
-Changes limited to non-contract reports or plans remain review-exempt.
+`review/documents` discovers one-hop references from Markdown changed in the branch, reading
+its bodies at the merge base, reviewed revisions, and HEAD, and from `--note`. Persisted anchors
+without branch changes are retained as evidence and their outgoing links are skipped. Links
+beginning with `./` or `../` resolve against the source document directory. Other links try the
+repository root first and then the source directory, using the tree where the link appears.
+Selection excludes unchanged, already loaded contracts before allocating up to four inline
+preview slots. Previews prioritize unchanged referenced merge-base evidence, then changed
+merge-base blueprints, then branch blueprints. The merge base supplies immutable Anchor 0.
+Each changed blueprint and referenced merge-base document retains ordered revisions for every
+distinct reviewed body. Inline previews include each historical body and a bounded diff or
+deletion marker when it differs from HEAD. Symlink-backed blueprints compare resolved bodies.
+The prompt indexes revision lists for paths outside the inline preview. Anchor histories
+survive provider restarts and verified rebases. Operational ledgers are excluded. Changes
+limited to non-contract reports or plans remain review-exempt.
 
-Reviewers derive the minimal target architecture from the business goal and loaded blueprints,
-then compare it with the committed schema, writers, lifecycle transitions, and readers across
-the touched subsystem. New capabilities belong on the authoritative entity lifecycle or read
-projection. Consolidation and root-cause repairs must remove the redundant persistence and
-state transitions targeted by the change. Reviewers check binding scope against merge-base
-Anchor 0 and prior reviewed branch blueprints, including referenced audit evidence, root-cause
-repairs, retirement and convergence commitments, and target complexity budgets. Branch-introduced
-overdesign can be simplified at the sole owner when the change preserves those obligations and
-equivalent safety boundaries. Reviewers block consolidations that move a secondary lifecycle into
-parent-table columns while its state machine remains live.
+Full and incremental prompts direct reviewers to inspect the complete touched subsystem at the
+target snapshot and compare it with the immutable merge-base Anchor 0, prior reviewed branch
+blueprints, and referenced evidence. Rule Markdown supplies the blocking criteria, including
+binding scope and authorized simplification in [Architecture Simplicity](presets/rules/architecture-simplicity.md).
 
 `guard check`, branch-wide `guard topology check`, and protected-push hooks reject
 new missing declared documents and newly stale dependency edges. An edited production

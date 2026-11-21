@@ -219,5 +219,5 @@
   "review": {
     "integration_mode": "github-pr"
   },
-  "detail_dir": "docs/standards/rules"
+  "detail_dir": "src/the_guard/presets/rules"
 }
