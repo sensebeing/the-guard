@@ -239,7 +239,7 @@ Martian 的 50 个 PR 汇总结果如下：
 3. 守住真实安全边界：简化代码时保留跨信任边界与写入落点上的鉴权、租户隔离、并发锁、幂等与事务完整性保护。
 4. 重证据而非形式：审查必须给出具体代码路径与合同依据；当实现本身正确时，可通过 `guard review --note` 提交证据消除误报，无需做表面修改。
 
-详见[核心规则定义](docs/standards/rules/architecture-simplicity.md)与完整 14 条规则的[预设目录](skills/the-guard-setup/references/preset-catalog.md)。
+详见[核心规则定义](src/the_guard/presets/rules/architecture-simplicity.md)与完整 14 条规则的[预设目录](skills/the-guard-setup/references/preset-catalog.md)。
 
 ## 独立架构审查
 

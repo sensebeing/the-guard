@@ -318,7 +318,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                         self.assertNotIn("DIRTY PLAN", prompt)
                         self.assertNotIn("DIRTY ANCHOR", prompt)
                         self.assertIn(
-                            "## Zero-Based Target Architecture & Whole-Module Reconciliation", prompt
+                            "## Whole-Module & Blueprint Snapshot Inspection", prompt
                         )
 
     def test_task_blueprint_discovery_prioritizes_and_caps_snapshot_paths(self):
@@ -653,6 +653,71 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     retained_anchors={plan: (base, before_plan)},
                 )
 
+    def test_persisted_blueprint_references_stay_one_hop_across_review_rounds(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            plan = "docs/plan.md"
+            audit = "docs/audit.md"
+            note_audit = "docs/note-audit.md"
+            documents = {
+                audit: "Plan audit. See [supporting audit](./supporting-audit.md).\n",
+                note_audit: "Note audit. See [supporting audit](./supporting-audit.md).\n",
+                "docs/supporting-audit.md": "Supporting audit. See [appendix](./appendix.md).\n",
+                "docs/appendix.md": "Audit appendix.\n",
+            }
+            for path, body in documents.items():
+                (repo / path).write_text(body)
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "Publish the audit chain upstream")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", base)
+
+            def reviewer(_):
+                return {"verdict": "GO", "summary": "reviewed", "blocking_findings": []}
+
+            (repo / plan).write_text("Consolidate the owner. See [audit](./audit.md).\n")
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", plan, "app.py")
+            _git(repo, "commit", "-m", "Start the consolidation")
+            first = run_architecture_review(repo, reviewer_fn=reviewer, reviewer_note=f"See {note_audit}")
+            expected = {plan: (first.head_sha,), audit: (base,), note_audit: (base,)}
+            self.assertEqual(load_review_session(repo).task_blueprint_anchors, expected)
+
+            for round_number in (2, 3):
+                with self.subTest(round_number=round_number):
+                    (repo / "app.py").write_text(f"value = {round_number}\n")
+                    _git(repo, "commit", "-am", f"Refine the implementation in round {round_number}")
+                    run_architecture_review(repo, reviewer_fn=reviewer)
+                    self.assertEqual(load_review_session(repo).task_blueprint_anchors, expected)
+
+    def test_unchanged_retained_contracts_leave_four_inline_blueprint_slots(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            architecture = "docs/architecture.md"
+            (repo / architecture).write_text("Loaded architecture contract\n")
+            _git(repo, "add", architecture)
+            _git(repo, "commit", "-m", "Publish the architecture contract upstream")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", base)
+
+            plans = [f"docs/plan-{index}.md" for index in range(4)]
+            for path in plans:
+                (repo / path).write_text(f"Task blueprint in {path}\n")
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "docs", "app.py")
+            _git(repo, "commit", "-m", "Write four branch blueprints")
+
+            retained = {"AGENTS.md": (base,), architecture: (base,)}
+            context = _snapshot_context(repo, collect_review_scope(repo), task_blueprint_anchors=retained)
+            prompt = "\n".join(context.sections)
+            for path in plans:
+                self.assertIn(f"## Task design & architecture blueprint: {path}\n", prompt)
+            for path, revisions in retained.items():
+                self.assertNotIn(f"immutable Anchor 0 @ {base[:12]}): {path}\n", prompt)
+                self.assertEqual(context.task_blueprint_anchors[path], revisions)
+            self.assertIn("## Root architecture & agent instructions: AGENTS.md", prompt)
+            self.assertIn(f"## Architecture blueprint: {architecture}", prompt)
+
     def test_relative_audits_from_reviewed_snapshots_take_priority_and_survive_overflow(self):
         plan = "docs/superpowers/specs/consolidation.md"
         for audit_count in (1, 5):
@@ -702,7 +767,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                         "## Additional previously reviewed task blueprints\n", 1
                     )[1]
                     guidance, index_json = index_text.split("\n", 1)
-                    self.assertIn("Apply the binding acceptance scope", guidance)
+                    self.assertIn("immutable Anchor 0", guidance)
+                    self.assertIn("Other revisions record previously reviewed branch blueprints", guidance)
+                    self.assertIn("Compare the recorded bodies with HEAD", guidance)
+                    self.assertIn("apply the Blocking policy below", guidance)
                     index, _ = json.JSONDecoder().raw_decode(index_json)
                     self.assertEqual(
                         context.task_blueprint_anchors,
@@ -797,51 +865,92 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("-Retire the outbox.\n+Defer outbox retirement.", prompt)
 
     def test_methodology_requires_zero_based_whole_module_reconciliation(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
-            (repo / "app.py").write_text("value = 1\n")
-            _git(repo, "add", "app.py")
-            _git(repo, "commit", "-m", "Start implementation")
-            run_architecture_review(repo, reviewer_fn=lambda _: {
-                "verdict": "GO", "summary": "reviewed", "blocking_findings": [],
-            })
-            session = load_review_session(repo)
-            (repo / "app.py").write_text("value = 2\n")
-            _git(repo, "commit", "-am", "Revise implementation")
-            scope = collect_review_scope(repo)
-            incremental_scope = collect_incremental_scope(repo, scope, session)
-            prompts = {
-                "full": build_review_prompt(repo, scope),
-                "incremental": build_incremental_review_prompt(
-                    repo, scope, session, incremental_scope,
-                ),
-            }
-
         obligations = (
-            "Immutable Anchor 0 blueprints, referenced audit evidence, and baseline complexity budgets",
+            "Immutable Anchor-0 blueprints, referenced audit evidence, and baseline complexity budgets",
             "retirement commitments, convergence requirements, and target complexity budgets "
             "established in prior reviewed branch blueprints define binding acceptance scope",
-            "Block under guard.architecture-simplicity or guard.single-source-of-truth",
+            "Block under `guard.architecture-simplicity` or `guard.single-source-of-truth`",
             "editing or deleting a merge-base contract or prior reviewed branch blueprint, "
             "or removing a reference",
-            "abandon or defer an Anchor 0 root-cause repair",
+            "abandon or defer an Anchor-0 root-cause repair",
             "drop a named table, trigger, or state-machine retirement",
             "defer committed convergence to a later wave",
             "relax a merge-base or reviewed target complexity budget",
             "Allow re-scoping only when the developer note cites explicit user authorization",
             "schema and lifecycle evidence establishes that the surviving entity is genuinely orthogonal",
-            "Allow removal of cross-module intrusion or overdesign",
+            "Allow removal of cross-module intrusion or overdesign introduced in a prior reviewed branch blueprint",
             "the simplest implementation at the sole owner",
-            "preserves all Anchor 0 obligations, committed retirements, convergence requirements, "
+            "preserves all Anchor-0 obligations, committed retirements, convergence requirements, "
             "target budgets, and equivalent safety boundaries",
+            "Block column-inlining mirages",
         )
-        heading = "## Zero-Based Target Architecture & Whole-Module Reconciliation"
-        for mode, prompt in prompts.items():
-            self.assertIn(heading, prompt)
-            section = prompt.split(heading, 1)[1].split("\n## ", 1)[0]
-            for obligation in obligations:
-                with self.subTest(mode=mode, obligation=obligation):
-                    self.assertIn(obligation, " ".join(section.split()))
+        preset = (REPO_ROOT / "src/the_guard/presets/rules/architecture-simplicity.md").read_text()
+        for configured in (False, True):
+            with self.subTest(configured=configured), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td))
+                if configured:
+                    details = "docs/standards/rules/architecture-simplicity.md"
+                    (repo / details).write_text(preset)
+                    manifest = repo / "AGENTS.md"
+                    manifest.write_text(manifest.read_text().replace(
+                        "```\n<!-- the-guard-policy:end -->",
+                        "  - id: guard.architecture-simplicity\n"
+                        "    severity: block\n"
+                        "    scope: [backend]\n"
+                        "    summary: Each lifecycle has one owner.\n"
+                        f"    details: {details}\n"
+                        "    checker: static-plus-review\n"
+                        "```\n<!-- the-guard-policy:end -->",
+                    ))
+                    _git(repo, "add", "AGENTS.md", details)
+                    _git(repo, "commit", "-m", "Install the architecture simplicity preset upstream")
+                    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "Start implementation")
+                run_architecture_review(repo, reviewer_fn=lambda _: {
+                    "verdict": "GO", "summary": "reviewed", "blocking_findings": [],
+                })
+                session = load_review_session(repo)
+                (repo / "app.py").write_text("value = 2\n")
+                _git(repo, "commit", "-am", "Revise implementation")
+                scope = collect_review_scope(repo)
+                incremental_scope = collect_incremental_scope(repo, scope, session)
+                prompts = {
+                    "full": build_review_prompt(repo, scope),
+                    "incremental": build_incremental_review_prompt(
+                        repo, scope, session, incremental_scope,
+                    ),
+                }
+
+                for mode, prompt in prompts.items():
+                    with self.subTest(mode=mode):
+                        heading = "## Whole-Module & Blueprint Snapshot Inspection\n"
+                        self.assertIn(heading, prompt)
+                        section = prompt.split(heading, 1)[1].split("\n## ", 1)[0]
+                        for evidence in (
+                            "`git show <target-sha>:<path>`", "`git grep <pattern> <target-sha> -- <module>`",
+                            "schema and migrations", "writers", "lifecycle transitions", "readers",
+                            "outside the changed lines", "immutable Anchor 0", "prior reviewed branch blueprints",
+                            "Blocking policy below",
+                        ):
+                            self.assertIn(evidence, section)
+                        policy_heading = "### guard.architecture-simplicity [backend]\n"
+                        before_rule, separator, rule_and_rest = prompt.partition(policy_heading)
+                        if configured:
+                            self.assertEqual(separator, policy_heading)
+                            self.assertIn("## Blocking policy", before_rule)
+                            rule_body = preset.split("\n---\n", 1)[1].strip()
+                            self.assertIn(rule_body, rule_and_rest)
+                            for obligation in obligations:
+                                self.assertIn(obligation, rule_body)
+                        else:
+                            self.assertFalse(separator)
+                        outside_rule = " ".join(before_rule.split()).replace("Anchor-0", "Anchor 0").replace("`", "")
+                        for obligation in (*obligations, "block surviving dual persistence"):
+                            self.assertNotIn(
+                                obligation.replace("Anchor-0", "Anchor 0").replace("`", ""), outside_rule,
+                            )
 
     def test_declared_contracts_override_extension_and_test_tiers(self):
         config = GuardConfig(topology={"architecture_docs": ["docs/root.json"], "modules": [

@@ -165,7 +165,8 @@ def resolve_task_design_blueprints(
     )
     initial_commit = verified_revisions.get(initial_reviewed_sha)
 
-    excluded = _OPERATIONAL_LEDGERS | (set(excluded_paths) - anchors.keys())
+    excluded_set = set(excluded_paths)
+    excluded = _OPERATIONAL_LEDGERS | (excluded_set - anchors.keys())
     # A plan introduced in a reviewed round and later removed is absent from the
     # current branch diff. Use each reviewed branch's change list so an upstream
     # deletion during a rebase is not attributed to the reviewed branch.
@@ -184,9 +185,12 @@ def resolve_task_design_blueprints(
             raise ValueError(f"Cannot inspect task blueprint changes at {base_sha}...{revision}")
         historical_changes.extend(changed.split("\0"))
     head_changes = dict.fromkeys(changed_files)
-    changed_candidates = dict.fromkeys(
-        path for path in (*head_changes, *historical_changes, *anchors)
+    git_changed_candidates = dict.fromkeys(
+        path for path in (*head_changes, *historical_changes)
         if path.endswith(".md") and path not in excluded
+    )
+    changed_candidates = git_changed_candidates | dict.fromkeys(
+        path for path in anchors if path.endswith(".md") and path not in excluded
     )
 
     modes_by_revision: dict[str, dict[str, str]] = {
@@ -249,7 +253,7 @@ def resolve_task_design_blueprints(
                 raise ValueError(f"Recorded task blueprint missing at {revision}: {path}")
     changed_docs = resolve_candidates(changed_candidates)
     reference_candidates = {}
-    for path in changed_candidates:
+    for path in git_changed_candidates:
         for revision in modes_by_revision:
             body = read_body(path, revision)
             if body is not None:
@@ -288,7 +292,10 @@ def resolve_task_design_blueprints(
         return 1
 
     ordered = sorted((*changed_docs, *referenced_docs), key=preview_priority)
-    previews = ordered[:MAX_TASK_DESIGN_DOCS]
+    previews = [
+        snapshot for snapshot in ordered
+        if snapshot.path not in excluded_set or snapshot.has_modifications
+    ][:MAX_TASK_DESIGN_DOCS]
     preview_paths = {snapshot.path for snapshot in previews}
     return TaskBlueprintSelection(
         previews,

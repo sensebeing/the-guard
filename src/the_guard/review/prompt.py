@@ -40,41 +40,15 @@ from .documents import (
 )
 from .session import ReviewSessionState
 
-_ZERO_BASED_RECONCILIATION = """## Zero-Based Target Architecture & Whole-Module Reconciliation
-First derive the minimal domain model from the business goal, Root Architecture Blueprint,
-module boundary docs, and loaded Task design & architecture blueprints. Identify the sole
-owner, authoritative entity tables, single lifecycle state machine, atomic write convergence,
-and direct read projections.
+_ZERO_BASED_RECONCILIATION = """## Whole-Module & Blueprint Snapshot Inspection
+Inspect the whole module for each touched subsystem at the target Git snapshot. Use
+`git show <target-sha>:<path>` and `git grep <pattern> <target-sha> -- <module>` to trace
+schema and migrations, writers, lifecycle transitions, and readers, including code outside the changed lines.
 
-Audit the whole post-change module around each touched subsystem. Trace schema and migrations,
-writers, lifecycle transitions, and readers with `git show <target-sha>:<path>` and
-`git grep <pattern> <target-sha> -- <module>`. Ground blockers in the live snapshot evidence.
-
-- For a feature extension or new capability, block under guard.architecture-simplicity or
-  guard.single-source-of-truth when the change adds a parallel state machine, sidecar or
-  shadow process table, redundant outbox, or adapter-specific branch for behavior that
-  belongs on the authoritative entity lifecycle or read projection.
-- For simplification, refactoring, or bug repair, block under those rules when the change or task
-  blueprint calls for consolidation or root-cause repair and the live module retains dual
-  persistence, split state machines, cross-table business-writing triggers, or substitutes
-  Python wrappers or formatting compaction for removing redundant paths.
-- Immutable Anchor 0 blueprints, referenced audit evidence, and baseline complexity budgets from
-  the merge base together with retirement commitments, convergence requirements, and target
-  complexity budgets established in prior reviewed branch blueprints define binding acceptance
-  scope. Block under guard.architecture-simplicity or guard.single-source-of-truth when editing
-  or deleting a merge-base contract or prior reviewed branch blueprint, or removing a reference,
-  serves to abandon or defer an Anchor 0 root-cause repair, drop a named table, trigger, or
-  state-machine retirement, defer committed convergence to a later wave, or relax a merge-base
-  or reviewed target complexity budget. Allow re-scoping only when the developer note cites
-  explicit user authorization and schema and lifecycle evidence establishes that the surviving
-  entity is genuinely orthogonal.
-- Allow removal of cross-module intrusion or overdesign introduced in a prior reviewed branch
-  blueprint when the change converges on the simplest implementation at the sole owner and
-  preserves all Anchor 0 obligations, committed retirements, convergence requirements, target
-  budgets, and equivalent safety boundaries.
-- Block column-inlining mirages under those rules when a consolidation removes a child process
-  or outbox table by copying its prefixed columns and secondary `*_status` or `*_state` lifecycle
-  onto a parent table while the split state machine, claim loop, or dual track remains live.
+Compare the target snapshot with the immutable Anchor 0 blueprints and their referenced evidence
+at the merge base and with prior reviewed branch blueprints. Inspect the recorded bodies, edits,
+deletions, and changes to references and linked evidence. Evaluate this evidence against each
+applicable rule in the Blocking policy below.
 """
 
 METHODOLOGY = """You are an independent Adversarial Architecture & Engineering Quality Reviewer.
@@ -591,19 +565,17 @@ def _snapshot_context(
         if snapshot.head_body is not None and snapshot.head_body not in prior_bodies:
             revisions += (scope.head_sha,)
         anchors[snapshot.path] = revisions
-    previewed_paths = set()
     for snapshot in selection.previews:
-        if snapshot.path not in loaded_docs or snapshot.has_modifications:
-            sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
-            previewed_paths.add(snapshot.path)
+        sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
+    previewed_paths = {snapshot.path for snapshot in selection.previews}
     omitted = anchors.keys() - previewed_paths
     if omitted:
         sections.append(
             "## Additional previously reviewed task blueprints\n"
             "Each path lists its distinct revisions in review order. A revision equal to the merge base "
-            "is immutable Anchor 0. Other revisions record branch drafts. Apply the binding acceptance "
-            "scope above, including commitments established in prior reviewed branch blueprints. "
-            "Compare the recorded bodies with HEAD and inspect changes to references and linked evidence.\n"
+            "is immutable Anchor 0. Other revisions record previously reviewed branch blueprints. "
+            "Compare the recorded bodies with HEAD, inspect changes to commitments, references, and "
+            "linked evidence, and apply the Blocking policy below.\n"
             + json.dumps({path: anchors[path] for path in sorted(omitted)}, indent=2)
         )
     # Missing declarations are not evidence of a contract at the reviewed snapshot.
@@ -630,10 +602,7 @@ def _snapshot_context(
             f"No declared module boundary documents or declarative topology constraints apply to these unbound paths: {', '.join(unbound) or 'touched scope'}. Other governed modules retain their contracts.\n"
             "1. Focus blocking findings on concrete runtime, logic, state, security, concurrency, data/ORM, API contract, broken test assertion, or docstring/signature mismatch defects introduced or exposed by the diff.\n"
             "2. Do NOT invent internal module-layering rules (e.g., demanding that a helper, metric, or model call be wrapped in another internal module) unless an explicit boundary contract in the repository requires it.\n"
-            "3. Leave unrelated untouched legacy cleanup outside the findings. When a loaded task blueprint, "
-            "commit intent, or touched subsystem contract requires consolidating dual tracks or evolving an entity in place, "
-            "block surviving dual persistence or half-merged state machines under guard.architecture-simplicity "
-            "or guard.single-source-of-truth.\n"
+            "3. Leave unrelated untouched legacy cleanup outside the findings.\n"
             '4. Flag test issues under `guard.test-case-quality` when an existing or modified test has a wrong assertion, tests the wrong variable, or fails to exercise the query/code path it claims to test; do NOT block a PR solely with a generic "missing new unit tests" complaint.\n'
             "5. Report each distinct root-cause defect once at its primary location instead of splitting one defect into multiple cascading findings."
         )
