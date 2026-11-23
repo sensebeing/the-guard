@@ -14,12 +14,15 @@ from pathlib import Path
 from typing import IO, Any
 from ..config import GuardConfig
 from ..policy import Policy
-from .contract import BlockingFinding
+from .contract import BlockingFinding, ReviewScope
 from .documents import (
+    architecture_document_paths,
+    boundary_document_paths,
     contract_document_paths,
     existing_document_paths,
     normalize_task_blueprint_anchors,
     read_document,
+    resolve_scope_modules,
 )
 
 RECEIPT_SCHEMA = "the-guard-receipt/v1"
@@ -33,14 +36,107 @@ MAX_RETAINED_RECEIPTS = 200
 _LOGGER = logging.getLogger(__name__)
 
 
+def _snapshot_document_bodies(
+    repo_root: Path | None,
+    paths: set[str],
+    revision: str | None,
+    *,
+    snapshot_modes: dict[str, str] | None = None,
+) -> dict[str, str]:
+    documents: dict[str, str] = {}
+    if repo_root is None:
+        return documents
+    if snapshot_modes is None:
+        modes: dict[str, str] = {}
+        existing = existing_document_paths(
+            repo_root, paths, revision, snapshot_modes=modes
+        )
+    else:
+        modes = snapshot_modes
+        existing = {path for path in paths if path in modes}
+    for path in sorted(existing):
+        body = read_document(repo_root, path, revision, snapshot_modes=modes)
+        if body is not None:
+            documents[path] = body
+    return documents
+
+
+def _scoped_config_payload(
+    config: GuardConfig,
+    scope: ReviewScope,
+    touched: set[str],
+    upstream: set[str],
+    downstream: set[str],
+) -> dict[str, Any]:
+    """Keep the reviewed module contract while dropping unrelated module declarations."""
+    payload = asdict(config)
+    topology = payload.get("topology", {})
+    modules = topology.pop("modules", [])
+    declared_modules = {module["path"]: module for module in modules}
+    if ".guard/config.json" in scope.changed_files:
+        topology["modules"] = [
+            {key: value for key, value in module.items() if key != "boundary_docs"}
+            if module["path"] not in touched
+            else module
+            for module in modules
+        ]
+        return payload
+
+    def neighbour_projection(module_path: str) -> dict[str, Any]:
+        declared = declared_modules[module_path]
+        return {
+            "path": module_path,
+            "layer": declared.get("layer"),
+            "role": declared.get("role"),
+            "dependencies": list(declared.get("dependencies", [])),
+            "retired": declared.get("retired", False),
+        }
+
+    topology["modules"] = {
+        "touched": [
+            declared_modules.get(module, {"path": module}) for module in sorted(touched)
+        ],
+        "upstream": [neighbour_projection(module) for module in sorted(upstream)],
+        "downstream": [neighbour_projection(module) for module in sorted(downstream)],
+    }
+    return payload
+
+
+def _scoped_contract_payload(
+    repo_root: Path, config: GuardConfig, scope: ReviewScope, revision: str | None
+) -> tuple[dict[str, str], dict[str, Any]]:
+    eff_rev = revision or scope.head_sha
+    modes: dict[str, str] = {}
+    touched, upstream, downstream = resolve_scope_modules(
+        repo_root, scope, config, revision=eff_rev, snapshot_modes=modes
+    )
+    declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
+    paths = architecture_document_paths(config)
+    for module in touched:
+        paths.update(
+            boundary_document_paths(declared_modules.get(module, {"path": module}))
+        )
+    return (
+        _snapshot_document_bodies(
+            repo_root, paths, eff_rev, snapshot_modes=modes
+        ),
+        _scoped_config_payload(config, scope, touched, upstream, downstream),
+    )
+
+
 def compute_review_contract_digest(
     policy: Policy,
     config: GuardConfig,
     *,
     repo_root: Path | None = None,
     revision: str | None = None,
+    scope: ReviewScope | None = None,
 ) -> str:
-    """Hash the complete reviewer contract and its policy/config dependencies."""
+    """Hash the complete reviewer contract and its policy/config dependencies.
+
+    With a review scope, the configuration and document contract is limited to the touched
+    modules and their one-hop dependency neighbours so unrelated changes cannot invalidate it.
+    """
     digest = hashlib.sha256()
     source_dir = Path(__file__).parent
     for path in sorted(source_dir.glob("*.py")):
@@ -53,19 +149,18 @@ def compute_review_contract_digest(
     ):
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
-    documents = {}
-    if repo_root is not None:
-        paths = contract_document_paths(config)
-        modes: dict[str, str] = {}
-        for path in sorted(
-            existing_document_paths(repo_root, paths, revision, snapshot_modes=modes)
-        ):
-            body = read_document(repo_root, path, revision, snapshot_modes=modes)
-            if body is not None:
-                documents[path] = body
+    if repo_root is not None and scope is not None:
+        documents, config_payload = _scoped_contract_payload(
+            repo_root, config, scope, revision
+        )
+    else:
+        documents = _snapshot_document_bodies(
+            repo_root, contract_document_paths(config), revision
+        )
+        config_payload = asdict(config)
     payload = {
         "documents": documents,
-        "config": asdict(config),
+        "config": config_payload,
         "policy": {
             "manifest_schema": policy.schema,
             "rules": [
@@ -94,10 +189,11 @@ def contract_digest_matches(
     *,
     repo_root: Path | None = None,
     revision: str | None = None,
+    scope: ReviewScope | None = None,
 ) -> bool:
     """Return whether persisted session evidence belongs to the current contract."""
     return bool(stored_digest) and stored_digest == compute_review_contract_digest(
-        policy, config, repo_root=repo_root, revision=revision
+        policy, config, repo_root=repo_root, revision=revision, scope=scope
     )
 
 

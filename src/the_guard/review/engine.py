@@ -94,7 +94,7 @@ def run_architecture_review(
         else load_policy(repo_root, revision=scope.head_sha, config=contract_config)
     )
     current_contract_digest = compute_review_contract_digest(
-        policy, contract_config, repo_root=repo_root, revision=scope.head_sha
+        policy, contract_config, repo_root=repo_root, revision=scope.head_sha, scope=scope
     )
     branch = current_branch_name(repo_root)
     stored_session = load_review_session(repo_root, branch)

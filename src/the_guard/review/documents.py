@@ -13,7 +13,8 @@ from pathlib import Path, PurePosixPath
 from ..config import GuardConfig, repository_path
 from ..git_helpers import git_stdout
 from ..git_helpers import read_repository_file
-from .contract import CODE_EXTENSIONS
+from ..topology.imports import owner_module
+from .contract import CODE_EXTENSIONS, ReviewScope
 
 MAX_TASK_DESIGN_DOCS = 4
 _TASK_DESIGN_REFERENCE = re.compile(
@@ -52,6 +53,83 @@ def contract_document_paths(config: GuardConfig) -> set[str]:
 
 def is_architecture_contract(path: str, config: GuardConfig) -> bool:
     return path in contract_document_paths(config)
+
+
+def _declared_module_owners(
+    paths: Iterable[str], declared_paths: list[str], config: GuardConfig
+) -> set[str]:
+    owners: set[str] = set()
+    for path in paths:
+        owner = owner_module(path, declared_paths)
+        if owner is not None:
+            owners.add(owner)
+            continue
+        parts = PurePosixPath(path).parts
+        if len(parts) >= 2 and parts[0] in config.module_doc_roots:
+            owners.add("/".join(parts[:2]))
+    return owners
+
+
+def _boundary_alias_owners(
+    repo_root: Path,
+    revision: str,
+    declared_modules: Mapping[str, dict],
+    changed_paths: set[str],
+    modes: dict[str, str],
+) -> set[str]:
+    """Bind modules whose boundary documents or symlink targets are reviewed paths."""
+    owners: set[str] = set()
+    for module, declaration in declared_modules.items():
+        boundary_paths = boundary_document_paths(declaration)
+        aliases = set(boundary_paths)
+        for path in boundary_paths:
+            if modes.get(path) == "120000":
+                read_document(
+                    repo_root, path, revision, loaded_paths=aliases, snapshot_modes=modes
+                )
+        if aliases & changed_paths:
+            owners.add(module)
+    return owners
+
+
+def resolve_scope_modules(
+    repo_root: Path,
+    scope: ReviewScope,
+    config: GuardConfig,
+    *,
+    revision: str | None = None,
+    snapshot_modes: dict[str, str] | None = None,
+) -> tuple[set[str], set[str], set[str]]:
+    """Resolve reviewed files onto the touched module set and its one-hop neighbours.
+
+    `snapshot_modes` optionally collects the batched document inventory so callers reuse it.
+    """
+    rev = revision or scope.head_sha
+    declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
+    changed_paths = set(scope.reviewable_files)
+    touched = _declared_module_owners(changed_paths, list(declared_modules), config)
+    modes = snapshot_modes if snapshot_modes is not None else {}
+    candidates = contract_document_paths(config)
+    for module in touched:
+        candidates.update(
+            boundary_document_paths(declared_modules.get(module, {"path": module}))
+        )
+    existing_document_paths(repo_root, candidates, rev, snapshot_modes=modes)
+    touched.update(
+        _boundary_alias_owners(repo_root, rev, declared_modules, changed_paths, modes)
+    )
+    upstream = {
+        dependency
+        for module in touched
+        for dependency in declared_modules.get(module, {}).get("dependencies", ())
+        if dependency not in touched and dependency in declared_modules
+    }
+    downstream = {
+        path
+        for path, declaration in declared_modules.items()
+        if path not in touched and bool(set(declaration.get("dependencies", ())) & touched)
+    }
+    return touched, upstream, downstream
 
 
 def _blueprint_filters(config: GuardConfig) -> tuple[tuple[str, ...], frozenset[str]]:
@@ -102,11 +180,57 @@ def resolved_document_paths(root: Path, revision: str, paths: Iterable[str]) -> 
     return paths
 
 
-def changed_task_blueprints(
-    root: Path, config: GuardConfig, previous: str, target: str, retained_paths: Collection[str]
+def _branch_touched_blueprints(
+    root: Path,
+    configured_paths: Collection[str],
+    previous: str,
+    target: str,
+    branch_changed_paths: Collection[str],
 ) -> set[str]:
-    """Compare resolved bodies even when branch diffs omit upstream blueprint changes."""
-    paths = _configured_blueprint_paths(root, config, previous) | _configured_blueprint_paths(root, config, target)
+    """Keep configured blueprints only when the replayed branch changed them or their targets."""
+    branch_changed = set(branch_changed_paths)
+    selected: set[str] = set()
+    for revision in (previous, target):
+        modes: dict[str, str] = {}
+        existing_document_paths(
+            root, configured_paths, revision, snapshot_modes=modes
+        )
+        for path in configured_paths:
+            aliases = {path}
+            if modes.get(path) == "120000":
+                read_document(
+                    root, path, revision, loaded_paths=aliases, snapshot_modes=modes
+                )
+            if aliases & branch_changed:
+                selected.add(path)
+    return selected
+
+
+def changed_task_blueprints(
+    root: Path,
+    config: GuardConfig,
+    previous: str,
+    target: str,
+    retained_paths: Collection[str],
+    *,
+    branch_changed_paths: Collection[str] | None = None,
+) -> set[str]:
+    """Compare resolved bodies even when branch diffs omit upstream blueprint changes.
+
+    Across a rebase (`branch_changed_paths` supplied) upstream blueprint additions that the
+    replayed branch never touched are outside the branch contract; retained blueprints stay
+    fail-closed.
+    """
+    configured_paths = _configured_blueprint_paths(
+        root, config, previous
+    ) | _configured_blueprint_paths(root, config, target)
+    paths = (
+        configured_paths
+        if branch_changed_paths is None
+        else _branch_touched_blueprints(
+            root, configured_paths, previous, target, branch_changed_paths
+        )
+    )
     paths.update(retained_paths)
     before: dict[str, str] = {}
     after: dict[str, str] = {}

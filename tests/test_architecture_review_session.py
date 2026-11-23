@@ -26,6 +26,8 @@ from the_guard.review.engine import (
     save_review_session,
 )
 from the_guard.review import session
+from the_guard.review.contract import ReviewOutput, ReviewScope
+from the_guard.review.documents import resolve_scope_modules
 from the_guard.review.session import ReviewRunLogger
 from the_guard.review.prompt import _parse_numstat_entries, build_incremental_review_prompt
 from the_guard.review.repository import (
@@ -35,7 +37,7 @@ from the_guard.review.repository import (
     review_logs_dir,
     compute_review_contract_digest,
 )
-from the_guard.config import load_config
+from the_guard.config import GuardConfig, load_config
 from the_guard.hooks import main_push_gate
 from the_guard.policy import load_policy
 from architecture_review_support import (
@@ -240,6 +242,58 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 self.assertIn("Keep one persistence owner", prompts[0])
                 self.assertIn("Permit a second persistence owner", prompts[0])
 
+    def test_rebase_ignores_unrelated_blueprint_additions_but_not_retained_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            plan = "docs/plans/task.md"
+            repo, _ = self._init_repo(
+                Path(td), review={"blueprint_globs": ["docs/plans/*.md"]}
+            )
+            _git(repo, "switch", "main")
+            (repo / "docs/plans").mkdir(parents=True)
+            (repo / plan).write_text("Keep one owner.\n")
+            _git(repo, "add", "docs/plans")
+            _git(repo, "commit", "-m", "baseline plan")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "app.py")
+            _git(repo, "commit", "-m", "reviewed patch")
+            reviewer = lambda _: {
+                "verdict": "GO", "summary": "Reviewed", "blocking_findings": [],
+            }
+            reviewed = run_architecture_review(
+                repo, reviewer_fn=reviewer, reviewer_note=f"See {plan}"
+            )
+            self.assertIn(plan, load_review_session(repo).task_blueprint_anchors)
+
+            # An unrelated blueprint added on main is outside the replayed branch contract.
+            _git(repo, "switch", "main")
+            (repo / "docs/plans/unrelated.md").write_text("Unrelated plan.\n")
+            _git(repo, "add", "docs/plans/unrelated.md")
+            _git(repo, "commit", "-m", "add unrelated blueprint upstream")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            scope = collect_review_scope(repo)
+            self.assertEqual(scope.patch_digest, reviewed.patch_digest)
+            self.assertNotEqual(scope.merge_base, reviewed.merge_base)
+            carried = resolve_or_carry_forward_receipt(repo, scope)
+            self.assertIsNotNone(carried)
+            assert carried is not None
+            self.assertEqual((carried["head_sha"], carried["merge_base"]), (scope.head_sha, scope.merge_base))
+            self.assertIn(plan, load_review_session(repo).task_blueprint_anchors)
+
+            # Editing a retained blueprint upstream still fails closed across the rebase.
+            _git(repo, "switch", "main")
+            (repo / plan).write_text("Permit a second persistence owner.\n")
+            _git(repo, "commit", "-am", "edit retained blueprint upstream")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            scope = collect_review_scope(repo)
+            self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+
     def test_receipt_reuse_requires_review_of_retained_blueprint_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -364,6 +418,91 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertIsNotNone(saved)
             self.assertTrue(saved.contract_digest)
 
+    def test_unrelated_module_contract_changes_allow_incremental_rebase_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            _git(repo, "switch", "main")
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": [
+                {"path": "services/a", "layer": "domain", "role": "feature owner"},
+                {"path": "services/b", "layer": "domain", "role": "other owner"},
+            ]}}))
+            for module in ("a", "b"):
+                (repo / f"services/{module}").mkdir(parents=True)
+                (repo / f"services/{module}/main.py").write_text("value = 1\n")
+                (repo / f"services/{module}/CLAUDE.md").write_text(f"{module} boundary\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "declare modules")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            (repo / "services/a/main.py").write_text("value = 2\n")
+            _git(repo, "commit", "-am", "round 1")
+
+            fake_home = tmp / "home"
+            (fake_home / ".claude").mkdir(parents=True)
+            fake_claude = tmp / "bin/claude"
+            fake_claude.parent.mkdir()
+            fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_claude.chmod(0o755)
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
+            cfg_file.parent.mkdir(parents=True)
+            cfg_file.write_text(json.dumps({
+                "schema": "the-guard-agent-config/v1",
+                "priority_order": ["claude"],
+                "preferred_provider": "claude",
+                "available_providers": ["claude"],
+                "provider_binaries": {"claude": str(fake_claude)},
+            }), encoding="utf-8")
+            env = {
+                "PATH": f"{fake_claude.parent}:/usr/bin:/bin",
+                "HOME": str(fake_home),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+            }
+
+            with mock.patch(
+                "the_guard.review.engine._invoke_provider",
+                return_value=(ReviewOutput("GO", "round 1", (), ""), "sess-a", ""),
+            ):
+                first = run_architecture_review(repo, env=env)
+            self.assertEqual((first.mode, first.session_id), ("full", "sess-a"))
+            prior = load_review_session(repo)
+            assert prior is not None
+
+            # An unrelated module's boundary document lands on main and the branch rebases.
+            _git(repo, "switch", "main")
+            (repo / "services/b/CLAUDE.md").write_text("b boundary tightened\n")
+            _git(repo, "commit", "-am", "advance unrelated module contract")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            rebased = collect_review_scope(repo)
+            self.assertEqual(rebased.patch_digest, first.patch_digest)
+            self.assertNotEqual(rebased.merge_base, first.merge_base)
+            self.assertEqual(
+                compute_review_contract_digest(
+                    load_policy(repo, revision=rebased.head_sha),
+                    load_config(repo, revision=rebased.head_sha),
+                    repo_root=repo,
+                    revision=rebased.head_sha,
+                    scope=rebased,
+                ),
+                prior.contract_digest,
+            )
+            self.assertIsNotNone(resolve_or_carry_forward_receipt(repo, rebased))
+
+            (repo / "services/a/main.py").write_text("value = 3\n")
+            _git(repo, "commit", "-am", "round 2")
+            with mock.patch(
+                "the_guard.review.engine._invoke_provider",
+                return_value=(ReviewOutput("GO", "round 2", (), ""), "sess-a", ""),
+            ) as invoke:
+                second = run_architecture_review(repo, env=env)
+            self.assertEqual((second.mode, second.session_id), ("incremental", "sess-a"))
+            self.assertEqual(invoke.call_args.kwargs["mode"], "incremental")
+            self.assertEqual(invoke.call_args.kwargs["resume_session_id"], "sess-a")
+
     def test_contract_digest_changes_when_repository_config_changes(self) -> None:
         """A policy/config change must produce a new digest and invalidate old continuation evidence."""
         with tempfile.TemporaryDirectory() as td:
@@ -373,6 +512,192 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             (repo / ".guard/config.json").write_text('{"main_branch":"main","review":{"project_title":"changed"}}\n', encoding="utf-8")
             second = compute_review_contract_digest(load_policy(repo), load_config(repo))
             self.assertNotEqual(first, second)
+
+    def test_scoped_contract_digest_covers_only_touched_and_one_hop_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            for module in ("a", "b", "c", "d"):
+                (repo / f"services/{module}").mkdir(parents=True)
+                (repo / f"services/{module}/main.py").write_text("value = 1\n")
+                (repo / f"services/{module}/CLAUDE.md").write_text(f"{module} owner\n")
+            (repo / "docs/a-owner.md").write_text("a explicit owner\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "module baseline")
+            base = _git(repo, "rev-parse", "HEAD")
+            (repo / "services/a/main.py").write_text("value = 2\n")
+            _git(repo, "commit", "-am", "reviewed change")
+            head = _git(repo, "rev-parse", "HEAD")
+            scope = ReviewScope(
+                base_ref="main",
+                merge_base=base,
+                head_sha=head,
+                changed_files=("services/a/main.py",),
+                reviewable_files=("services/a/main.py",),
+                submodule_changes=(),
+                patch_digest="patch",
+            )
+            modules = [
+                {
+                    "path": "services/a",
+                    "dependencies": ["services/b"],
+                    "boundary_docs": ["docs/a-owner.md"],
+                },
+                {"path": "services/b", "layer": "domain", "role": "upstream owner"},
+                {"path": "services/c", "dependencies": ["services/a"], "layer": "workflow"},
+                {"path": "services/d", "layer": "surface", "role": "unrelated owner"},
+            ]
+            config = GuardConfig(topology={"modules": modules})
+            policy = load_policy(repo, revision=head)
+
+            def digest(config_value: GuardConfig = config, revision: str = head) -> str:
+                return compute_review_contract_digest(
+                    policy, config_value, repo_root=repo, revision=revision, scope=scope
+                )
+
+            def variant(overrides: dict[str, dict]) -> GuardConfig:
+                return GuardConfig(topology={"modules": [
+                    {**module, **overrides.get(module["path"], {})}
+                    for module in modules
+                ]})
+
+            touched, upstream, downstream = resolve_scope_modules(
+                repo, scope, config, revision=head
+            )
+            self.assertEqual(touched, {"services/a"})
+            self.assertEqual(upstream, {"services/b"})
+            self.assertEqual(downstream, {"services/c"})
+            baseline = digest()
+
+            # Unrelated module declarations and one-hop boundary prose stay outside the contract.
+            self.assertEqual(
+                baseline, digest(variant({"services/d": {"layer": "foundation"}}))
+            )
+            self.assertEqual(
+                baseline,
+                digest(variant({"services/d": {"dependencies": ["services/b"]}})),
+            )
+            (repo / "services/b/CLAUDE.md").write_text("b owner tightened\n")
+            _git(repo, "commit", "-am", "upstream module prose")
+            upstream_doc = _git(repo, "rev-parse", "HEAD")
+            self.assertEqual(baseline, digest(revision=upstream_doc))
+            (repo / "services/c/CLAUDE.md").write_text("c owner tightened\n")
+            _git(repo, "commit", "-am", "downstream module prose")
+            downstream_doc = _git(repo, "rev-parse", "HEAD")
+            self.assertEqual(baseline, digest(revision=downstream_doc))
+            (repo / "services/d/CLAUDE.md").write_text("d owner tightened\n")
+            _git(repo, "commit", "-am", "unrelated module prose")
+            unrelated_doc = _git(repo, "rev-parse", "HEAD")
+            self.assertEqual(baseline, digest(revision=unrelated_doc))
+
+            # Touched prose and one-hop structural contract changes invalidate.
+            (repo / "services/a/CLAUDE.md").write_text("a owner tightened\n")
+            _git(repo, "commit", "-am", "touched module prose")
+            touched_doc = _git(repo, "rev-parse", "HEAD")
+            self.assertNotEqual(baseline, digest(revision=touched_doc))
+            (repo / "docs/a-owner.md").write_text("a explicit owner tightened\n")
+            _git(repo, "commit", "-am", "touched explicit boundary document")
+            touched_explicit_doc = _git(repo, "rev-parse", "HEAD")
+            self.assertNotEqual(baseline, digest(revision=touched_explicit_doc))
+            self.assertNotEqual(
+                baseline, digest(variant({"services/a": {"dependencies": []}}))
+            )
+            for upstream_change in (
+                {"layer": "workflow"},
+                {"role": "tighter owner"},
+                {"dependencies": ["services/d"]},
+                {"retired": True},
+            ):
+                with self.subTest(upstream_change=upstream_change):
+                    self.assertNotEqual(
+                        baseline, digest(variant({"services/b": upstream_change}))
+                    )
+            for downstream_change in (
+                {"layer": "surface"},
+                {"role": "downstream owner"},
+                {"dependencies": ["services/a", "services/d"]},
+                {"retired": True},
+            ):
+                with self.subTest(downstream_change=downstream_change):
+                    self.assertNotEqual(
+                        baseline, digest(variant({"services/c": downstream_change}))
+                    )
+
+            # A scope touching no declared module keeps the empty scoped projection.
+            unbound_scope = replace(
+                scope,
+                changed_files=("tests/test_x.py",),
+                reviewable_files=("tests/test_x.py",),
+            )
+
+            def unbound_digest(config_value: GuardConfig = config) -> str:
+                return compute_review_contract_digest(
+                    policy,
+                    config_value,
+                    repo_root=repo,
+                    revision=head,
+                    scope=unbound_scope,
+                )
+
+            self.assertEqual(
+                unbound_digest(), unbound_digest(variant({"services/d": {"layer": "foundation"}}))
+            )
+            self.assertEqual(
+                unbound_digest(),
+                unbound_digest(variant({"services/d": {"dependencies": ["services/b"]}})),
+            )
+            config_scope = replace(
+                unbound_scope,
+                changed_files=(".guard/config.json", "tests/test_x.py"),
+                reviewable_files=(".guard/config.json", "tests/test_x.py"),
+            )
+            self.assertNotEqual(
+                compute_review_contract_digest(
+                    policy, config, repo_root=repo, revision=head, scope=config_scope
+                ),
+                compute_review_contract_digest(
+                    policy,
+                    variant({"services/d": {"layer": "foundation"}}),
+                    repo_root=repo,
+                    revision=head,
+                    scope=config_scope,
+                ),
+            )
+
+            # Standalone callers keep the complete-config behavior.
+            full_baseline = compute_review_contract_digest(
+                policy, config, repo_root=repo, revision=head
+            )
+            self.assertNotEqual(
+                full_baseline,
+                compute_review_contract_digest(
+                    policy, config, repo_root=repo, revision=unrelated_doc
+                ),
+            )
+
+    def test_scope_module_resolution_follows_boundary_document_symlink_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "docs/owner.md").write_text("Owner contract.\n")
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/main.py").write_text("value = 1\n")
+            (repo / "services/a/CLAUDE.md").symlink_to("../../docs/owner.md")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "symlinked boundary document")
+            head = _git(repo, "rev-parse", "HEAD")
+            scope = ReviewScope(
+                base_ref="main",
+                merge_base=head,
+                head_sha=head,
+                changed_files=("docs/owner.md",),
+                reviewable_files=("docs/owner.md",),
+                submodule_changes=(),
+                patch_digest="patch",
+            )
+            config = GuardConfig(topology={"modules": [{"path": "services/a"}]})
+            self.assertEqual(
+                resolve_scope_modules(repo, scope, config, revision=head),
+                ({"services/a"}, set(), set()),
+            )
 
     def test_conversational_incremental_review_resumes_session_and_persists_logs(
         self,
