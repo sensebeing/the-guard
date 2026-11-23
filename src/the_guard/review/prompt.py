@@ -13,7 +13,6 @@ from typing import Any
 
 from ..config import GuardConfig, load_config
 from ..policy import Policy, load_policy
-from ..topology.imports import owner_module
 from .contract import (
     DEFAULT_INCREMENTAL_DIFF_MAX_CHARS,
     MAX_REVIEWER_NOTE_CHARS,
@@ -31,11 +30,10 @@ from .documents import (
     TaskBlueprintSnapshot,
     architecture_document_paths,
     boundary_document_paths,
-    contract_document_paths,
-    existing_document_paths,
     merge_task_blueprint_anchors,
     normalize_task_blueprint_anchors,
     read_document,
+    resolve_scope_modules,
     resolve_task_design_blueprints,
     resolved_contract_paths,
 )
@@ -444,43 +442,22 @@ def _snapshot_context(
 ) -> _ReviewSnapshotContext:
     config = config or load_config(repo_root, revision=scope.head_sha)
     declared_modules = {m["path"]: m for m in config.topology.get("modules", [])}
-    touched = set()
-    for path in scope.reviewable_files:
-        owner = owner_module(path, list(declared_modules))
-        if owner is not None:
-            touched.add(owner)
-        else:
-            parts = PurePosixPath(path).parts
-            if len(parts) >= 2 and parts[0] in config.module_doc_roots:
-                touched.add("/".join(parts[:2]))
+    modes: dict[str, str] = {}
+    touched, _, _ = resolve_scope_modules(
+        repo_root, scope, config, revision=scope.head_sha, snapshot_modes=modes
+    )
     rendered_topology = dict(config.topology)
+    rendered_topology["modules"] = [
+        {key: value for key, value in declaration.items() if key != "boundary_docs"}
+        if declaration["path"] not in touched
+        else declaration
+        for declaration in config.topology.get("modules", [])
+    ]
     sections = [
         f"Project: {config.review.get('project_title', repo_root.name)}",
         "## Declared topology",
         json.dumps(rendered_topology, indent=2),
     ]
-    candidates = contract_document_paths(config)
-    for module in touched:
-        candidates.update(
-            boundary_document_paths(declared_modules.get(module, {"path": module}))
-        )
-    modes: dict[str, str] = {}
-    existing_document_paths(repo_root, candidates, scope.head_sha, snapshot_modes=modes)
-    changed_paths = set(scope.reviewable_files)
-    for module, declaration in declared_modules.items():
-        boundary_paths = boundary_document_paths(declaration)
-        aliases = set(boundary_paths)
-        for path in boundary_paths:
-            if modes.get(path) == "120000":
-                read_document(
-                    repo_root,
-                    path,
-                    scope.head_sha,
-                    loaded_paths=aliases,
-                    snapshot_modes=modes,
-                )
-        if aliases & changed_paths:
-            touched.add(module)
     loaded_boundary_modules: set[str] = set()
     loaded_docs: set[str] = set()
     manifest = read_document(

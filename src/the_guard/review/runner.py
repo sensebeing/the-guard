@@ -224,6 +224,52 @@ def _extract_session_id_from_stream(stdout_text: str) -> str:
     return found
 
 
+def _is_multi_agent_deprecation(message: str) -> bool:
+    lowered = message.lower()
+    return "[features].multi_agent" in lowered and "deprecat" in lowered
+
+
+def _structured_provider_errors(stdout_text: str) -> list[str]:
+    """Extract provider-reported failures from JSON stream lines."""
+    messages: list[str] = []
+    for line in stdout_text.splitlines():
+        s = line.strip()
+        if not s.startswith("{"):
+            continue
+        try:
+            event = json.loads(s)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "turn.failed":
+            error = event.get("error")
+            message = (
+                str(error.get("message") or "")
+                if isinstance(error, dict)
+                else str(error or "")
+            )
+        elif event.get("type") == "error":
+            message = str(event.get("message") or "")
+        else:
+            continue
+        message = message.strip()
+        if message and message not in messages:
+            messages.append(message)
+    substantive = [
+        message for message in messages if not _is_multi_agent_deprecation(message)
+    ]
+    return substantive or messages
+
+
+def _provider_failure_detail(stdout_text: str, stderr_text: str) -> str:
+    """Combine stderr with structured stdout errors so warnings cannot mask quota failures."""
+    stderr_detail = stderr_text.strip()[:300]
+    stdout_detail = " | ".join(_structured_provider_errors(stdout_text))[:600]
+    details = [detail for detail in (stderr_detail, stdout_detail) if detail]
+    return " | ".join(details) if details else stdout_text.strip()[:300]
+
+
 def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
         return
@@ -598,6 +644,9 @@ def _is_persistent_provider_failure(exc: Exception) -> bool:
     persistent_markers = (
         "quota exceeded",
         "insufficient_quota",
+        "usage limit",
+        "hit your usage limit",
+        "purchase more credits",
         "auth expired",
         "authentication failed",
         "not logged in",
@@ -676,7 +725,9 @@ def _invoke_provider(
                 provider, cmd, cwd=repo_root, env=child_env, run_logger=run_logger
             )
             if rc != 0:
-                raise RuntimeError(f"{provider} exited {rc}: {(err or out)[:300]}")
+                raise RuntimeError(
+                    f"{provider} exited {rc}: {_provider_failure_detail(out, err)}"
+                )
             verdict_payload = validate_review_output(
                 _extract_verdict_json(out), expected_head_sha=scope.head_sha, allow_implicit_origin=True
             )
@@ -729,7 +780,9 @@ def _invoke_provider(
                         run_logger=run_logger,
                     )
                     if rc != 0:
-                        raise RuntimeError(f"codex exited {rc}: {(err or out)[:300]}")
+                        raise RuntimeError(
+                            f"codex exited {rc}: {_provider_failure_detail(out, err)}"
+                        )
                     raw = out_file.read_text(encoding="utf-8") if out_file.is_file() else out
                 finally:
                     out_file.unlink(missing_ok=True)

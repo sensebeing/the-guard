@@ -261,6 +261,13 @@ def isolated_codex_home(
                     lines.append(f"{key} = {rendered}")
             lines += ["", "[features]"]
             lines.extend(f"{feature} = false" for feature in CODEX_DISABLED_FEATURES)
+            trusted_projects = [str(worktree_path.resolve())]
+            if common_dir.name == ".git" and common_dir.parent.is_dir():
+                trusted_projects.append(str(common_dir.parent.resolve()))
+            for project in dict.fromkeys(trusted_projects):
+                lines.extend(
+                    ["", f"[projects.{json.dumps(project)}]", 'trust_level = "trusted"']
+                )
             providers = parsed_cfg.get("model_providers")
             if isinstance(providers, dict):
                 for provider_name, provider_cfg in providers.items():

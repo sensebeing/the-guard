@@ -53,6 +53,8 @@ from the_guard.review.contract import CODEX_DISABLED_FEATURES, ReviewOutput, ver
 from the_guard.review.runner import (
     _build_provider_cmd,
     _build_provider_env,
+    _is_persistent_provider_failure,
+    _provider_failure_detail,
     _run_streaming_cmd,
     _summarize_stream_line,
 )
@@ -1351,7 +1353,11 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(rendered["model_catalog_json"], str((src_home / "catalog.json").resolve()))
             self.assertEqual(rendered["model_providers"]["magpie"]["experimental_bearer_token"], "secret-token-123")
             self.assertEqual(rendered["model_providers"]["magpie"]["http_headers"], {"X-Test": "1"})
-            self.assertFalse(any(key in rendered for key in ("mcp_servers", "plugins", "marketplaces", "hooks", "projects")))
+            self.assertFalse(any(key in rendered for key in ("mcp_servers", "plugins", "marketplaces", "hooks")))
+            self.assertEqual(
+                rendered["projects"],
+                {str((tmp / "worktree").resolve()): {"trust_level": "trusted"}},
+            )
             self.assertFalse(rendered["check_for_update_on_startup"])
             self.assertTrue(all(rendered["features"][feature] is False for feature in CODEX_DISABLED_FEATURES))
             self.assertIn("multi_agent", CODEX_DISABLED_FEATURES)
@@ -1413,6 +1419,37 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             scope = codex_isolation_scope_key(repo, "topic", env)
             self.assertEqual(json.loads(env_file.read_text())["CODEX_HOME"], str(git_common_dir(repo) / "the-guard-codex-homes" / scope))
             self.assertNotIn("secret-token-123", " ".join(json.loads(argv_file.read_text())))
+
+    def test_isolated_codex_home_trusts_worktree_and_common_repository_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            source_home = tmp / "source-codex"
+            source_home.mkdir()
+            (source_home / "config.toml").write_text(
+                '[projects.ambient]\ntrust_level = "trusted"\n', encoding="utf-8"
+            )
+            repo_root = tmp / "repo"
+            common_dir = repo_root / ".git"
+            common_dir.mkdir(parents=True)
+            worktree = repo_root / "feature"
+            worktree.mkdir()
+            with isolated_codex_home(
+                common_dir,
+                worktree_path=worktree,
+                branch="topic",
+                env={"CODEX_HOME": str(source_home)},
+            ) as isolated_home:
+                rendered = tomllib.loads(
+                    (isolated_home / "config.toml").read_text(encoding="utf-8")
+                )
+            self.assertEqual(
+                rendered["projects"],
+                {
+                    str(worktree.resolve()): {"trust_level": "trusted"},
+                    str(repo_root.resolve()): {"trust_level": "trusted"},
+                },
+            )
+            self.assertNotIn("ambient", rendered["projects"])
 
     def test_pure_documentation_diff_is_exempt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1713,6 +1750,92 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 stdin_text=huge_prompt,
             )
         self.assertIn("stdin", str(ctx.exception))
+
+    def test_provider_failure_detail_surfaces_stdout_quota_errors_behind_stderr_warnings(self) -> None:
+        stdout = "\n".join([
+            json.dumps({
+                "type": "error",
+                "message": "[features].multi_agent is deprecated and will be removed",
+            }),
+            json.dumps({
+                "type": "turn.failed",
+                "error": {
+                    "message": "You’ve hit your usage limit. Purchase more credits to continue."
+                },
+            }),
+        ])
+        detail = _provider_failure_detail(
+            stdout, "Untrusted project-local configuration is disabled"
+        )
+        self.assertIn("Untrusted project-local configuration is disabled", detail)
+        self.assertIn("You’ve hit your usage limit", detail)
+        self.assertNotIn("[features].multi_agent", detail)
+        self.assertTrue(
+            _is_persistent_provider_failure(RuntimeError(f"codex exited 1: {detail}"))
+        )
+        deprecation_only = _provider_failure_detail(
+            json.dumps({
+                "type": "error",
+                "message": "[features].multi_agent is deprecated",
+            }),
+            "",
+        )
+        self.assertIn("[features].multi_agent", deprecation_only)
+        self.assertFalse(_is_persistent_provider_failure(RuntimeError(deprecation_only)))
+
+    def test_codex_stdout_quota_error_records_sticky_secondary_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            (repo / "services/catalog").mkdir(parents=True)
+            (repo / "services/catalog/service.py").write_text(
+                "value = 1\n", encoding="utf-8"
+            )
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "review scope")
+
+            fake_home = tmp / "home"
+            fake_bin = fake_home / ".local/bin"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
+            (fake_home / ".codex").mkdir(parents=True)
+            (fake_home / ".codex/auth.json").write_text("{}", encoding="utf-8")
+            (fake_home / ".gemini/antigravity-cli").mkdir(parents=True)
+            _write_exec(
+                fake_bin / "codex",
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('codex test')\n"
+                "    raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
+                "print('Untrusted project-local configuration is disabled', file=sys.stderr)\n"
+                "print(json.dumps({'type': 'error', 'message': '[features].multi_agent is deprecated'}))\n"
+                "print(json.dumps({'type': 'turn.failed', 'error': {'message': 'You’ve hit your usage limit. Purchase more credits to continue.'}}))\n"
+                "raise SystemExit(1)\n",
+            )
+            _write_exec(
+                fake_bin / "agy",
+                "#!/usr/bin/env python3\n"
+                "import json, subprocess, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('1.4.2')\n"
+                "    raise SystemExit(0)\n"
+                "print(json.dumps({'event': 'init', 'conversation_id': 'agy-quota-fallback'}))\n"
+                "print(json.dumps({'event': 'result', 'result': {'structured_output': {\n"
+                "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+                "    'verdict': 'GO', 'summary': 'secondary provider', 'blocking_findings': []\n"
+                "}}}))\n",
+            )
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(fake_home),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+            }
+
+            result = run_architecture_review(repo, force=True, env=env)
+            self.assertEqual((result.verdict, result.provider), ("GO", "agy"))
+            persisted = json.loads(cfg_file.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["preferred_provider"], "agy")
 
     def test_colleague_environment_check_and_fallback_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as td:

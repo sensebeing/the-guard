@@ -648,7 +648,16 @@ def _collect_branch_delta(
                 path=sub.path, old_sha=prev_sha, new_sha=sub.new_sha
             )
 
-    changed_blueprints = changed_task_blueprints(repo_root, config, session.last_head_sha, scope.head_sha, retained)
+    changed_blueprints = changed_task_blueprints(
+        repo_root,
+        config,
+        session.last_head_sha,
+        scope.head_sha,
+        retained,
+        branch_changed_paths=(
+            scope.changed_files if session.merge_base != scope.merge_base else None
+        ),
+    )
     return IncrementalReviewScope(
         base_head_sha=session.last_head_sha,
         target_head_sha=scope.head_sha,
@@ -728,7 +737,11 @@ def resolve_or_carry_forward_receipt(
         repo_root, revision=scope.head_sha, config=current_config
     )
     current_contract_digest = contract_digest or compute_review_contract_digest(
-        current_policy, current_config, repo_root=repo_root, revision=scope.head_sha
+        current_policy,
+        current_config,
+        repo_root=repo_root,
+        revision=scope.head_sha,
+        scope=scope,
     )
     if (
         existing is not None
@@ -763,6 +776,7 @@ def resolve_or_carry_forward_receipt(
         elif changed_task_blueprints(
             repo_root, current_config, session.last_head_sha, scope.head_sha,
             session.task_blueprint_anchors.keys() | scope.task_blueprint_anchors.keys(),
+            branch_changed_paths=None if same_base else scope.changed_files,
         ):
             continue
         return _carry_forward_receipt(repo_root, scope, session, prior_receipt, persist=persist)
