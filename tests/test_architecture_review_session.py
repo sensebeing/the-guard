@@ -197,6 +197,171 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     self.assertIn("missing review receipt", stderr.getvalue())
             self.assertIsNone(load_review_session(repo))
 
+    def test_landed_upstream_blueprints_do_not_pollute_sibling_worktree_reviews(self) -> None:
+        upstream_plan = "docs/plans/upstream.md"
+        sibling_plan = "docs/plans/sibling.md"
+
+        def go(_):
+            return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+        for landing in ("fast-forward", "tree-replay"):
+            with self.subTest(landing=landing), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                repo, _ = self._init_repo(root, review={"blueprint_globs": ["docs/plans/*.md"]})
+                _git(repo, "switch", "main")
+                baseline = _git(repo, "rev-parse", "HEAD")
+                upstream = root / "upstream"
+                sibling = root / "sibling"
+                _git(repo, "worktree", "add", "-b", "upstream", str(upstream), "main")
+                _git(repo, "worktree", "add", "-b", "sibling", str(sibling), "main")
+
+                (sibling / "docs/plans").mkdir(parents=True)
+                (sibling / sibling_plan).write_text("Sibling binding plan.\n", encoding="utf-8")
+                (sibling / "sibling.py").write_text("SIBLING = 1\n", encoding="utf-8")
+                _git(sibling, "add", "docs/plans/sibling.md", "sibling.py")
+                _git(sibling, "commit", "-m", "Record sibling blueprint")
+                reviewed_sibling = run_architecture_review(sibling, reviewer_fn=go)
+                self.assertEqual(
+                    load_review_session(sibling).task_blueprint_anchors,
+                    {sibling_plan: (reviewed_sibling.head_sha,)},
+                )
+
+                (upstream / "docs/plans").mkdir(parents=True)
+                (upstream / upstream_plan).write_text("Upstream binding plan.\n", encoding="utf-8")
+                (upstream / "upstream.py").write_text("UPSTREAM = 1\n", encoding="utf-8")
+                _git(upstream, "add", "docs/plans/upstream.md", "upstream.py")
+                _git(upstream, "commit", "-m", "Record upstream blueprint")
+                reviewed_upstream = run_architecture_review(upstream, reviewer_fn=go)
+                upstream_head = reviewed_upstream.head_sha
+                if landing == "fast-forward":
+                    _git(repo, "merge", "--ff-only", "upstream")
+                else:
+                    tree = _git(repo, "rev-parse", f"{upstream_head}^{{tree}}")
+                    replay = _git(
+                        repo, "commit-tree", tree, "-p", baseline, "-m", "Replay upstream blueprint"
+                    )
+                    _git(repo, "merge", "--ff-only", replay)
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                landed = _git(repo, "rev-parse", "HEAD")
+
+                _git(sibling, "rebase", "main")
+                scope = collect_review_scope(sibling)
+                self.assertEqual(scope.merge_base, landed)
+                self.assertEqual(
+                    scope.task_blueprint_anchors, {sibling_plan: (reviewed_sibling.head_sha,)}
+                )
+                carried = resolve_or_carry_forward_receipt(sibling, scope)
+                self.assertIsNotNone(carried)
+                assert carried is not None
+                self.assertEqual(
+                    (carried["head_sha"], carried["merge_base"], carried["mode"]),
+                    (scope.head_sha, landed, "carried-forward"),
+                )
+                reused = run_architecture_review(
+                    sibling, reviewer_fn=lambda _: self.fail("reviewer ran after the upstream landing")
+                )
+                self.assertEqual((reused.verdict, reused.mode), ("GO", "carried-forward"))
+
+                (sibling / ".guard/config.json").write_text("{}\n", encoding="utf-8")
+                _git(sibling, "commit", "-am", "Disable new blueprint discovery")
+                self.assertEqual(run_architecture_review(sibling, reviewer_fn=go).verdict, "GO")
+                disabled = _git(sibling, "rev-parse", "HEAD")
+
+                for variant in ("delete", "edit"):
+                    with self.subTest(landing=landing, variant=variant):
+                        if variant == "delete":
+                            _git(sibling, "rm", upstream_plan)
+                            _git(sibling, "commit", "-m", "Delete the upstream-retained blueprint")
+                        else:
+                            (sibling / upstream_plan).write_text(
+                                "Upstream binding plan, edited by the sibling.\n",
+                                encoding="utf-8",
+                            )
+                            _git(sibling, "commit", "-am", "Edit the upstream-retained blueprint")
+                        scope = collect_review_scope(sibling)
+                        self.assertEqual(
+                            scope.task_blueprint_anchors,
+                            {
+                                sibling_plan: (reviewed_sibling.head_sha,),
+                                upstream_plan: (upstream_head,),
+                            },
+                        )
+                        self.assertIn(upstream_plan, scope.reviewable_files)
+                        self.assertIsNone(resolve_or_carry_forward_receipt(sibling, scope))
+                        prompt = build_review_prompt(sibling, scope)
+                        self.assertIn("Upstream binding plan.", prompt)
+                        if variant == "delete":
+                            self.assertIn("[deleted", prompt.lower())
+                        _git(sibling, "reset", "--hard", disabled)
+
+    def test_cross_worktree_symlink_blueprint_overlap_keeps_sibling_history(self) -> None:
+        plan_link = "docs/plan.md"
+        plan_target = "docs/plan-source.md"
+        plan_retarget = "docs/plan-v2.md"
+
+        def go(_):
+            return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+        def disable_discovery(tree: Path, message: str) -> None:
+            (tree / ".guard/config.json").write_text("{}\n", encoding="utf-8")
+            _git(tree, "commit", "-am", message)
+
+        def retarget(tree: Path, body: str) -> None:
+            (tree / plan_retarget).write_text(body, encoding="utf-8")
+            (tree / plan_link).unlink()
+            (tree / plan_link).symlink_to("plan-v2.md")
+
+        for direction in ("target-body", "symlink-retarget"):
+            with self.subTest(direction=direction), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                repo, _ = self._init_repo(root, review={"blueprint_globs": [plan_link]})
+                _git(repo, "switch", "main")
+                (repo / plan_target).write_text("Plan body one.\n", encoding="utf-8")
+                (repo / plan_link).symlink_to("plan-source.md")
+                _git(repo, "add", "docs")
+                _git(repo, "commit", "-m", "Record symlinked blueprint")
+                baseline = _git(repo, "rev-parse", "HEAD")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                upstream = root / "upstream"
+                sibling = root / "sibling"
+                _git(repo, "worktree", "add", "-b", "upstream", str(upstream), "main")
+
+                if direction == "target-body":
+                    (upstream / plan_target).write_text("Plan body two.\n", encoding="utf-8")
+                else:
+                    retarget(upstream, "Plan body two.\n")
+                _git(upstream, "add", "docs")
+                _git(upstream, "commit", "-m", "Review the symlinked blueprint")
+                reviewed = run_architecture_review(upstream, reviewer_fn=go)
+                self.assertIn(plan_link, load_review_session(upstream).task_blueprint_anchors)
+                disable_discovery(upstream, "Disable new blueprint discovery")
+                self.assertEqual(run_architecture_review(upstream, reviewer_fn=go).verdict, "GO")
+                self.assertEqual(
+                    load_review_session(upstream).task_blueprint_anchors,
+                    {plan_link: (baseline, reviewed.head_sha)},
+                )
+
+                # Discovery is disabled repo-wide before the sibling branches off main.
+                disable_discovery(repo, "Disable new blueprint discovery")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "worktree", "add", "-b", "sibling", str(sibling), "main")
+                if direction == "target-body":
+                    retarget(sibling, "Sibling retarget.\n")
+                else:
+                    (sibling / plan_target).write_text("Sibling body.\n", encoding="utf-8")
+                _git(sibling, "add", "docs")
+                _git(sibling, "commit", "-m", "Change the blueprint through the other alias")
+
+                scope = collect_review_scope(sibling)
+                self.assertEqual(
+                    scope.task_blueprint_anchors, {plan_link: (baseline, reviewed.head_sha)}
+                )
+                changed_alias = plan_link if direction == "target-body" else plan_target
+                self.assertIn(changed_alias, scope.reviewable_files)
+                self.assertFalse(scope.is_exempt)
+                self.assertIn("Plan body two", build_review_prompt(sibling, scope))
+                self.assertIsNone(resolve_or_carry_forward_receipt(sibling, scope))
+
     def test_advanced_baseline_cannot_carry_receipt_across_changed_blueprint(self) -> None:
         plan = "docs/plan.md"
         for retain_only in (False, True):

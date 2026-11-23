@@ -478,8 +478,7 @@ def _include_retained_blueprints(repo_root: Path, scope: ReviewScope, config: Gu
     checked_out = _git_text(repo_root, "rev-parse", "--verify", "HEAD", check=False) == scope.head_sha
     owner_key = (str(repo_root.resolve()), current_branch_name(repo_root)) if checked_out else None
     anchors = merge_task_blueprint_anchors(*(
-        s.task_blueprint_anchors for s in sessions
-        if _blueprint_history_applies(repo_root, scope, config, s, owner_key)
+        _applicable_session_anchors(repo_root, scope, config, s, owner_key) for s in sessions
     ))
     if not anchors:
         return scope
@@ -490,6 +489,96 @@ def _include_retained_blueprints(repo_root: Path, scope: ReviewScope, config: Gu
         task_blueprint_anchors=anchors,
         reviewable_files=tuple(sorted(set(scope.reviewable_files) | paths.intersection(scope.changed_files))),
     )
+
+
+def _applicable_session_anchors(
+    repo_root: Path, scope: ReviewScope, config: GuardConfig, session: ReviewSessionState,
+    owner_key: tuple[str, str] | None,
+) -> dict[str, tuple[str, ...]]:
+    """Select the anchor history one persisted session may contribute to this scope.
+
+    A session already landed in the merge base keeps only the anchors the candidate branch
+    changes, so merged unrelated branches cannot pollute later scopes or their receipts.
+    """
+    if _session_landed_in_merge_base(repo_root, scope, session, owner_key):
+        return _changed_anchor_entries(repo_root, scope, session.task_blueprint_anchors)
+    if _blueprint_history_applies(repo_root, scope, config, session, owner_key):
+        return dict(session.task_blueprint_anchors)
+    return {}
+
+
+def _session_landed_in_merge_base(
+    repo_root: Path, scope: ReviewScope, session: ReviewSessionState,
+    owner_key: tuple[str, str] | None,
+) -> bool:
+    """Return True when the session's reviewed branch already landed in the target merge base."""
+    if scope.merge_base == scope.head_sha and (session.worktree_path, session.branch) == owner_key:
+        return False
+    if _is_ancestor(repo_root, session.last_head_sha, scope.merge_base):
+        return True
+    if (
+        session.merge_base == scope.merge_base
+        or not _is_ancestor(repo_root, session.merge_base, scope.merge_base)
+        or session.last_patch_digest == scope.patch_digest
+        or session.last_submodule_shas
+    ):
+        return False
+    # An object-only replay lands the same blobs under a commit the session never saw.
+    old_blobs = _parse_raw_file_blobs(_git_text(
+        repo_root, "diff", "--raw", "--no-renames", "--no-abbrev",
+        f"{session.merge_base}..{session.last_head_sha}", check=False,
+    ))
+    return bool(old_blobs) and all(
+        _tree_entry_matches(repo_root, scope.merge_base, path, mode, sha)
+        for path, (mode, sha) in old_blobs.items()
+    )
+
+
+def _changed_anchor_entries(
+    repo_root: Path, scope: ReviewScope, anchors: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Keep only anchors whose resolved documents this candidate branch changes."""
+    changed = set(scope.changed_files)
+    retained: dict[str, tuple[str, ...]] = {}
+    for path, revisions in anchors.items():
+        aliases: set[str] = set()
+        for revision in dict.fromkeys((scope.merge_base, scope.head_sha)):
+            aliases.update(resolved_document_paths(repo_root, revision, (path,)))
+        if aliases & changed:
+            retained[path] = revisions
+    return retained
+
+
+def _branch_change_overlaps_scope(
+    repo_root: Path, scope: ReviewScope, session: ReviewSessionState,
+) -> bool:
+    """Require a sibling branch to touch this scope's resolved paths before its delta can apply."""
+    branch_changed = _parse_raw_file_blobs(_git_text(
+        repo_root, "diff", "--raw", "--no-renames", "--no-abbrev",
+        f"{session.merge_base}..{session.last_head_sha}", check=False,
+    ))
+    if not branch_changed:
+        return False
+    if set(branch_changed).intersection(scope.changed_files):
+        return True
+    branch_aliases = _resolved_change_aliases(
+        repo_root, (session.merge_base, session.last_head_sha), set(branch_changed)
+    )
+    scope_aliases = _resolved_change_aliases(
+        repo_root, (scope.merge_base, scope.head_sha), set(scope.changed_files)
+    )
+    return bool(branch_aliases.intersection(scope_aliases))
+
+
+def _resolved_change_aliases(
+    repo_root: Path, revisions: tuple[str, ...], changed_paths: set[str],
+) -> set[str]:
+    """Expand changed paths onto the snapshot symlink targets that make them the same document."""
+    aliases = set(changed_paths)
+    for revision in dict.fromkeys(revisions):
+        if git_ok(repo_root, ["git", "cat-file", "-e", f"{revision}^{{commit}}"]):
+            aliases.update(resolved_document_paths(repo_root, revision, changed_paths))
+    return aliases
 
 
 def _blueprint_history_applies(
@@ -504,6 +593,8 @@ def _blueprint_history_applies(
         return False
     if session.last_patch_digest == scope.patch_digest:
         return True
+    if not _branch_change_overlaps_scope(repo_root, scope, session):
+        return False
     delta = _collect_branch_delta(repo_root, scope, session, config=config)
     if delta is None or delta.submodule_changes:
         return False
