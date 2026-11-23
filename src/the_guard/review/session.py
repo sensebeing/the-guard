@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,10 +161,11 @@ def load_valid_receipt(common_dir: Path, patch_digest: str) -> dict[str, Any] | 
     return None
 
 
-def save_receipt(common_dir: Path, result: ReviewResult) -> Path:
-    path = common_dir / "the-guard-receipts" / f"{result.patch_digest}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+def receipt_payload(
+    result: ReviewResult, *, contract_digest: str,
+    task_blueprint_anchors: Mapping[str, tuple[str, ...]],
+) -> dict[str, Any]:
+    return {
         "schema": RECEIPT_SCHEMA,
         "verdict": result.verdict,
         "summary": result.summary,
@@ -174,8 +176,21 @@ def save_receipt(common_dir: Path, result: ReviewResult) -> Path:
         "mode": result.mode,
         "session_id": result.session_id,
         "log_path": result.log_path,
+        "contract_digest": contract_digest,
+        "task_blueprint_anchors": dict(task_blueprint_anchors),
         "reviewed_at": datetime.now(UTC).isoformat(),
     }
+
+
+def save_receipt(
+    common_dir: Path, result: ReviewResult, *, contract_digest: str,
+    task_blueprint_anchors: Mapping[str, tuple[str, ...]],
+) -> Path:
+    path = common_dir / "the-guard-receipts" / f"{result.patch_digest}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = receipt_payload(
+        result, contract_digest=contract_digest, task_blueprint_anchors=task_blueprint_anchors,
+    )
     path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

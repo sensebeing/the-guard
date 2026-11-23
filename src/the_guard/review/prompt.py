@@ -567,25 +567,37 @@ def _snapshot_context(
         reviewer_note=reviewer_note,
         excluded_paths=loaded_docs,
     )
+    reviewed_anchors = {}
     for snapshot in selection.anchor_snapshots:
         revisions = (snapshot.baseline_sha,) if snapshot.baseline_sha is not None else ()
         revisions += tuple(revision for revision, _ in snapshot.reviewed_revisions)
         prior_bodies = {snapshot.baseline_body, *(body for _, body in snapshot.reviewed_revisions)}
         if snapshot.head_body is not None and snapshot.head_body not in prior_bodies:
             revisions += (scope.head_sha,)
-        anchors[snapshot.path] = revisions
+        reviewed_anchors[snapshot.path] = revisions
+    anchors = merge_task_blueprint_anchors(reviewed_anchors, anchors)
     for snapshot in selection.previews:
         sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
-    previewed_paths = {snapshot.path for snapshot in selection.previews}
-    omitted = anchors.keys() - previewed_paths
+    previewed_revisions = {
+        snapshot.path: {
+            snapshot.baseline_sha, scope.head_sha,
+            *(revision for revision, _ in snapshot.reviewed_revisions),
+        }
+        for snapshot in selection.previews
+    }
+    omitted = {
+        path: tuple(revision for revision in revisions if revision not in previewed_revisions.get(path, ()))
+        for path, revisions in sorted(anchors.items())
+    }
+    omitted = {path: revisions for path, revisions in omitted.items() if revisions}
     if omitted:
         sections.append(
             "## Additional previously reviewed task blueprints\n"
-            "Each path lists its distinct revisions in review order. A revision equal to the merge base "
+            "Each path lists additional revisions in review order. A revision equal to the merge base "
             "is immutable Anchor 0. Other revisions record previously reviewed branch blueprints. "
             "Compare the recorded bodies with HEAD, inspect changes to commitments, references, and "
             "linked evidence, and apply the Blocking policy below.\n"
-            + json.dumps({path: anchors[path] for path in sorted(omitted)}, indent=2)
+            + json.dumps(omitted, indent=2)
         )
     # Missing declarations are not evidence of a contract at the reviewed snapshot.
     effective_topology = {

@@ -338,5 +338,8 @@ def run_architecture_review(
         ),
     )
     if result.verdict == "GO":
-        save_receipt(repo_root, result)
+        save_receipt(
+            repo_root, result, contract_digest=current_contract_digest,
+            task_blueprint_anchors=snapshot_context.task_blueprint_anchors,
+        )
     return result

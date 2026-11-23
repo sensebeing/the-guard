@@ -819,7 +819,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
                 head = scope.head_sha
 
-                def assert_context(context):
+                def assert_context(context, *, retained_revisions=()):
                     prompt = "\n".join(context.sections)
                     evidence = f"Authoritative audit evidence in {audits[0]}"
                     self.assertIn(evidence, prompt)
@@ -836,12 +836,19 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                         context.task_blueprint_anchors,
                         dict.fromkeys(audits, (base,))
                         | dict.fromkeys(drafts, (initial,))
-                        | {plan: (base, intermediate, head), merged_plan: (base, initial)},
+                        | {plan: (base, intermediate, head), merged_plan: (base, initial)}
+                        | {drafts[0]: (initial, *retained_revisions)},
                     )
+                    if retained_revisions:
+                        self.assertTrue(set(retained_revisions).issubset(index[drafts[0]]))
                     if audit_count == 1:
                         self.assertLess(prompt.index(evidence), prompt.index("Baseline budget"))
                         self.assertLess(prompt.index("Baseline budget"), prompt.index("Branch draft"))
-                        self.assertEqual(len(set(drafts) & index.keys()), 3)
+                        self.assertEqual(set(drafts) & index.keys(), set(drafts[1:]) | (
+                            {drafts[0]} if retained_revisions else set()
+                        ))
+                        if retained_revisions:
+                            self.assertEqual(index[drafts[0]], list(retained_revisions))
                     else:
                         self.assertEqual(index[audits[-1]], [base])
                         self.assertEqual(index[plan], [base, intermediate, head])
@@ -854,7 +861,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 assert_context(_snapshot_context(
                     repo, scope, initial_reviewed_sha=initial,
                     task_blueprint_anchors={drafts[0]: intermediate},
-                ))
+                ), retained_revisions=(intermediate,))
                 assert_context(_snapshot_context(
                     repo, scope, initial_reviewed_sha=initial,
                     task_blueprint_anchors=context.task_blueprint_anchors,

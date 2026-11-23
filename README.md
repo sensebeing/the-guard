@@ -309,8 +309,8 @@ selects the integration boundary that `guard init` records and the `pre-push` ga
 The default empty array skips discovery. `review.operational_ledgers` lists repository-relative
 files to exclude from discovery and defaults to `["CHANGELOG.md"]`. Previously reviewed
 blueprints retain their revision history after discovery settings change.
-Changes to a configured blueprint require review and changes to a retained blueprint prevent
-carrying an earlier review across an updated baseline.
+Changes to a configured blueprint require review. Receipt reuse requires coverage of the
+applicable retained revisions and equivalent blueprint bodies across replayed snapshots.
 
 The policy manifest lives between `<!-- the-guard-policy:start -->` and `<!-- the-guard-policy:end -->` in `AGENTS.md`:
 

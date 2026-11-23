@@ -32,16 +32,17 @@ from .documents import (
     is_architecture_contract,
     is_configured_blueprint_path,
     merge_task_blueprint_anchors,
+    normalize_task_blueprint_anchors,
     resolved_contract_paths,
     resolved_document_paths,
 )
 from .session import (
-    RECEIPT_SCHEMA,
     UTC,
     ReviewResult,
     ReviewSessionState,
     compute_review_contract_digest,
     list_review_sessions,
+    receipt_payload,
 )
 from .session import (
     load_review_session as _load_session_record,
@@ -95,8 +96,14 @@ def load_valid_receipt(repo_root: Path, patch_digest: str) -> dict[str, Any] | N
     return _load_receipt_record(git_common_dir(repo_root), patch_digest)
 
 
-def save_receipt(repo_root: Path, result: ReviewResult) -> Path:
-    return _save_receipt_record(git_common_dir(repo_root), result)
+def save_receipt(
+    repo_root: Path, result: ReviewResult, *, contract_digest: str,
+    task_blueprint_anchors: dict[str, tuple[str, ...]],
+) -> Path:
+    return _save_receipt_record(
+        git_common_dir(repo_root), result, contract_digest=contract_digest,
+        task_blueprint_anchors=task_blueprint_anchors,
+    )
 
 
 def load_review_session(
@@ -689,6 +696,20 @@ def review_anchor_session(
     return session if valid_rebase else None
 
 
+def _anchors_cover(
+    reviewed: dict[str, tuple[str, ...]], required: dict[str, tuple[str, ...]],
+) -> bool:
+    return all(set(revisions).issubset(reviewed.get(path, ())) for path, revisions in required.items())
+
+
+def _receipt_covers(
+    receipt: dict[str, Any], contract_digest: str, anchors: dict[str, tuple[str, ...]],
+) -> bool:
+    return receipt.get("contract_digest") == contract_digest and _anchors_cover(
+        normalize_task_blueprint_anchors(receipt.get("task_blueprint_anchors")), anchors,
+    )
+
+
 def resolve_or_carry_forward_receipt(
     repo_root: Path,
     scope: ReviewScope,
@@ -699,14 +720,8 @@ def resolve_or_carry_forward_receipt(
     contract_digest: str | None = None,
 ) -> dict[str, Any] | None:
     existing = load_valid_receipt(repo_root, scope.patch_digest)
-    if (
-        existing is not None
-        and existing.get("head_sha") == scope.head_sha
-        and existing.get("merge_base") == scope.merge_base
-    ):
-        return existing
     sessions = [s for s in _ordered_review_sessions(repo_root) if s.last_verdict == "GO"]
-    if not sessions:
+    if existing is None and not sessions:
         return None
     current_config = config or load_config(repo_root, revision=scope.head_sha)
     current_policy = policy or load_policy(
@@ -715,11 +730,23 @@ def resolve_or_carry_forward_receipt(
     current_contract_digest = contract_digest or compute_review_contract_digest(
         current_policy, current_config, repo_root=repo_root, revision=scope.head_sha
     )
+    if (
+        existing is not None
+        and existing.get("head_sha") == scope.head_sha
+        and existing.get("merge_base") == scope.merge_base
+        and _receipt_covers(existing, current_contract_digest, scope.task_blueprint_anchors)
+    ):
+        return existing
     for session in sessions:
-        if not session.contract_digest or session.contract_digest != current_contract_digest:
+        if (
+            session.contract_digest != current_contract_digest
+            or not _anchors_cover(session.task_blueprint_anchors, scope.task_blueprint_anchors)
+        ):
             continue
         prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
-        if prior_receipt is None:
+        if prior_receipt is None or not _receipt_covers(
+            prior_receipt, current_contract_digest, session.task_blueprint_anchors,
+        ):
             continue
         same_base = session.merge_base == scope.merge_base
         if not same_base and not _is_ancestor(repo_root, session.merge_base, scope.merge_base):
@@ -762,20 +789,14 @@ def _carry_forward_receipt(
         session_id=str(prior_receipt.get("session_id") or session.session_id),
         log_path=str(prior_receipt.get("log_path") or ""),
     )
+    anchors = session.task_blueprint_anchors
     if not persist:
-        return {
-            "schema": RECEIPT_SCHEMA,
-            "verdict": "GO",
-            "provider": carried.provider,
-            "mode": carried.mode,
-            "session_id": carried.session_id,
-            "log_path": carried.log_path,
-            "patch_digest": carried.patch_digest,
-            "head_sha": carried.head_sha,
-            "merge_base": carried.merge_base,
-            "summary": carried.summary,
-        }
-    save_receipt(repo_root, carried)
+        return receipt_payload(
+            carried, contract_digest=session.contract_digest, task_blueprint_anchors=anchors,
+        )
+    save_receipt(
+        repo_root, carried, contract_digest=session.contract_digest, task_blueprint_anchors=anchors,
+    )
     if _git_text(repo_root, "rev-parse", "--verify", "HEAD", check=False) == scope.head_sha:
         save_review_session(
             repo_root,
@@ -794,9 +815,6 @@ def _carry_forward_receipt(
                 last_submodule_shas={
                     sub.path: sub.new_sha for sub in scope.submodule_changes
                 },
-                task_blueprint_anchors=merge_task_blueprint_anchors(
-                    session.task_blueprint_anchors, scope.task_blueprint_anchors,
-                ),
                 updated_at=datetime.now(UTC).isoformat(),
             ),
         )

@@ -61,11 +61,13 @@ merge-base blueprints, then branch blueprints. The merge base supplies immutable
 Each changed blueprint and referenced merge-base document retains ordered revisions for every
 distinct reviewed body. Inline previews include each historical body and a bounded diff or
 deletion marker when it differs from HEAD. Symlink-backed blueprints compare resolved bodies.
-The prompt indexes revision lists for paths outside the inline preview. Anchor histories
+The prompt indexes revisions outside the inline previews. Anchor histories
 survive provider restarts, verified rebases, and changes to discovery settings.
 `review.operational_ledgers` excludes explicit repository-relative paths from discovery and
-defaults to `["CHANGELOG.md"]`. The receipt gate compares configured and retained blueprint
-bodies across snapshots before reusing a review. Scope, exemptions and prompts share applicable
+defaults to `["CHANGELOG.md"]`. A `GO` receipt records the review contract digest and the
+blueprint revisions it covered. Reuse requires coverage of the applicable retained revisions
+and equivalent configured and retained blueprint bodies across replayed snapshots. Scope,
+exemptions and prompts share applicable
 retained history across linked worktrees, including when new discovery is disabled. Changes
 limited to non-contract reports or plans remain review-exempt.
 

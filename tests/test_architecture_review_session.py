@@ -240,6 +240,53 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 self.assertIn("Keep one persistence owner", prompts[0])
                 self.assertIn("Permit a second persistence owner", prompts[0])
 
+    def test_receipt_reuse_requires_review_of_retained_blueprint_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = "docs/plan.md"
+            repo, _ = self._init_repo(root, review={"blueprint_globs": [plan]})
+            base = _git(repo, "rev-parse", "main")
+            (repo / "app.py").write_text("value = 1\n")
+            (repo / plan).write_text("Keep one owner.\n")
+            _git(repo, "add", "app.py", plan)
+            _git(repo, "commit", "-m", "Record initial blueprint")
+
+            def go(_):
+                return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+            original = run_architecture_review(repo, reviewer_fn=go)
+            linked = root / "linked"
+            _git(repo, "worktree", "add", "-b", "linked", str(linked), original.head_sha)
+            (linked / plan).write_text("Keep one owner and retire the old write path.\n")
+            _git(linked, "commit", "-am", "Tighten blueprint")
+            tightened = run_architecture_review(linked, reviewer_fn=lambda _: {
+                "verdict": "NO-GO", "summary": "Retirement missing", "blocking_findings": [{
+                    "rule_id": "guard.service-boundaries", "file": "app.py", "line": 1,
+                    "issue": "The old write path remains", "required_fix": "Remove it",
+                }],
+            })
+            self.assertEqual(tightened.verdict, "NO-GO")
+
+            _git(linked, "revert", "--no-edit", tightened.head_sha)
+            scope = collect_review_scope(linked)
+            self.assertEqual(scope.patch_digest, original.patch_digest)
+            self.assertIn(tightened.head_sha, scope.task_blueprint_anchors[plan])
+            self.assertIn("retire the old write path", build_review_prompt(linked, scope))
+            self.assertIsNone(resolve_or_carry_forward_receipt(linked, scope))
+            self.assertEqual(load_review_session(linked).last_verdict, "NO-GO")
+
+            _git(linked, "reset", "--hard", original.head_sha)
+            scope = collect_review_scope(linked)
+            self.assertIn(tightened.head_sha, scope.task_blueprint_anchors[plan])
+            with redirect_stderr(StringIO()) as stderr:
+                update = f"{original.head_sha} {original.head_sha} refs/heads/main {base}\n"
+                self.assertEqual(main_push_gate(linked, update), 2)
+            self.assertIn("missing review receipt", stderr.getvalue())
+
+            fresh = run_architecture_review(linked, reviewer_fn=go)
+            self.assertEqual(fresh.verdict, "GO")
+            self.assertEqual(main_push_gate(linked, update), 0)
+
     def test_configured_blueprint_change_is_reviewable_on_its_own(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td), review={"blueprint_globs": ["docs/plan.md"]})
