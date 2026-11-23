@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import tomllib
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,8 @@ from .contract import (
 )
 from .repository import git_common_dir
 from .session import MAX_RETAINED_SESSIONS, UTC, worktree_session_key
+
+ISOLATED_CODEX_HOME_MAX_AGE_SECONDS = 24 * 3600
 
 
 def _config_file_path(repo_root: Path, env: dict[str, str] | None = None) -> Path:
@@ -121,7 +124,13 @@ def codex_isolation_scope_key(
     return hashlib.sha256(f"{session_key}:{source_key}".encode("utf-8")).hexdigest()[:16]
 
 
-def _prune_isolated_codex_homes(homes_root: Path, keep_name: str, gc_fd: int | None = None) -> None:
+def _prune_isolated_codex_homes(
+    homes_root: Path,
+    keep_name: str,
+    gc_fd: int | None = None,
+    *,
+    now: float | None = None,
+) -> None:
     owns_gc_fd = gc_fd is None
     if owns_gc_fd:
         gc_path = homes_root / ".gc.lock"
@@ -130,12 +139,22 @@ def _prune_isolated_codex_homes(homes_root: Path, keep_name: str, gc_fd: int | N
     try:
         if owns_gc_fd:
             fcntl.flock(gc_fd, fcntl.LOCK_EX)
+        current_time = time.time() if now is None else now
         dirs = sorted(
-            (item for item in homes_root.iterdir() if item.is_dir() and item.name != keep_name),
-            key=lambda item: item.stat().st_mtime,
+            (
+                (item.stat().st_mtime, item)
+                for item in homes_root.iterdir()
+                if item.is_dir() and item.name != keep_name
+            ),
+            key=lambda entry: entry[0],
             reverse=True,
         )
-        for item in dirs[MAX_RETAINED_SESSIONS - 1 :]:
+        for index, (mtime, item) in enumerate(dirs):
+            if (
+                index < MAX_RETAINED_SESSIONS - 1
+                and current_time - mtime <= ISOLATED_CODEX_HOME_MAX_AGE_SECONDS
+            ):
+                continue
             lock_path = item / ".review.lock"
             try:
                 lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)

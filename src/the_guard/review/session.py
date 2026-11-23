@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
@@ -24,10 +25,11 @@ RECEIPT_SCHEMA = "the-guard-receipt/v1"
 SESSION_SCHEMA = "the-guard-session/v1"
 LOG_META_SCHEMA = "the-guard-log-meta/v1"
 UTC = timezone.utc
-MAX_RETAINED_RUN_LOGS = 90
+MAX_RETAINED_RUN_LOGS = 30
 MAX_RETAINED_LOGS_PER_WORKTREE = 8
-MAX_RETAINED_SESSIONS = 30
+MAX_RETAINED_SESSIONS = 12
 MAX_RETAINED_RECEIPTS = 200
+_LOGGER = logging.getLogger(__name__)
 
 
 def compute_review_contract_digest(
@@ -232,15 +234,39 @@ def load_review_session(
     )
 
 
-def _prune_directory_files(directory: Path, pattern: str, max_keep: int) -> None:
+def _prune_directory_files(
+    directory: Path, pattern: str, max_keep: int, *, keep: Path | None = None
+) -> None:
+    if keep is not None:
+        max_keep -= 1
     try:
         files = sorted(
-            directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True
+            (path for path in directory.glob(pattern) if path != keep),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
         )
         for old_file in files[max_keep:]:
             old_file.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _prune_orphaned_review_sessions(sessions_dir: Path, keep: Path) -> None:
+    for session_path in sessions_dir.glob("*.json"):
+        if session_path == keep:
+            continue
+        try:
+            raw = json.loads(session_path.read_text(encoding="utf-8"))
+            worktree_path = raw.get("worktree_path") if isinstance(raw, dict) else None
+            if not isinstance(worktree_path, str):
+                continue
+            worktree = Path(worktree_path)
+            if worktree.is_absolute() and worktree.parent.is_dir() and not worktree.exists():
+                session_path.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _LOGGER.warning("Could not inspect or prune review session %s: %s", session_path, exc)
 
 
 def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
@@ -271,7 +297,8 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
         path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        _prune_directory_files(sessions_dir, "*.json", MAX_RETAINED_SESSIONS)
+        _prune_orphaned_review_sessions(sessions_dir, keep=path)
+        _prune_directory_files(sessions_dir, "*.json", MAX_RETAINED_SESSIONS, keep=path)
     except OSError:
         pass
     return path

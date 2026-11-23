@@ -5,6 +5,7 @@ Contract: incremental sessions bind reviewed scope and patch IDs; invalid contin
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ from the_guard.review.engine import (
     run_architecture_review,
     save_review_session,
 )
+from the_guard.review import session
 from the_guard.review.session import ReviewRunLogger
 from the_guard.review.prompt import _parse_numstat_entries
 from the_guard.review.repository import (
@@ -44,6 +46,47 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
+    def test_save_review_session_prunes_deleted_worktree_records_below_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            common_dir = root / "git"
+            active_worktree = root / "active"
+            deleted_worktree = root / "deleted"
+            active_worktree.mkdir()
+            deleted_worktree.mkdir()
+            state = session.ReviewSessionState(
+                worktree_path=str(active_worktree),
+                branch="topic",
+                merge_base="base",
+                provider="codex",
+                session_id="session",
+                last_head_sha="head",
+                last_patch_digest="digest",
+                last_verdict="GO",
+                last_summary="ok",
+                last_blocking_findings=(),
+                last_submodule_shas={},
+            )
+            active = session.save_review_session(common_dir, state)
+            relative = session.save_review_session(
+                common_dir, replace(state, worktree_path="relative-worktree")
+            )
+            missing_parent = session.save_review_session(
+                common_dir, replace(state, worktree_path=str(root / "absent" / "worktree"))
+            )
+            deleted_state = replace(state, worktree_path=str(deleted_worktree))
+            deleted = session.save_review_session(common_dir, deleted_state)
+            deleted_worktree.rmdir()
+
+            current = session.save_review_session(
+                common_dir, replace(deleted_state, branch="current")
+            )
+
+            self.assertEqual(
+                set(current.parent.glob("*.json")), {current, active, relative, missing_parent}
+            )
+            self.assertFalse(deleted.exists())
+
     def test_contract_digest_change_invalidates_incremental_session_and_carry_forward(self) -> None:
         """Changing repository config prevents carry-forward and forces a full fresh review."""
         with tempfile.TemporaryDirectory() as td:
@@ -249,7 +292,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertFalse(orphan_latest.exists())
             self.assertTrue(active_latest.exists())
             self.assertEqual(list(log_dir.glob("deleted-*.meta.json")), [])
-            self.assertEqual(len(list(log_dir.glob("*.meta.json"))), 90)
+            self.assertEqual(len(list(log_dir.glob("*.meta.json"))), 30)
             for idx in range(12):
                 expected = idx >= 4
                 for suffix in (".meta.json", ".prompt.md", ".events.jsonl"):
