@@ -62,8 +62,9 @@ Each changed blueprint and referenced merge-base document retains ordered revisi
 distinct reviewed body. Inline previews include each historical body and a bounded diff or
 deletion marker when it differs from HEAD. Symlink-backed blueprints compare resolved bodies.
 The prompt indexes revision lists for paths outside the inline preview. Anchor histories
-survive provider restarts and verified rebases. `review.operational_ledgers` excludes explicit
-repository-relative paths and defaults to `["CHANGELOG.md"]`. Changes
+survive provider restarts, verified rebases, and changes to discovery settings.
+`review.operational_ledgers` excludes explicit repository-relative paths from discovery and
+defaults to `["CHANGELOG.md"]`. Changes
 limited to non-contract reports or plans remain review-exempt.
 
 Full and incremental prompts direct reviewers to inspect the complete touched subsystem at the
@@ -79,7 +80,8 @@ responsibilities require synchronized configuration and authoritative boundary d
 `guard topology sync` refreshes inventory without granting observed imports permission.
 Modules declared with `retired: true` keep their reserved paths after the last file is deleted.
 They have no declared dependency edges or active boundary documents. Changed files under retired
-paths and inbound imports trigger service-boundary checks.
+paths and inbound imports trigger service-boundary checks. A new retirement also rechecks
+unchanged inbound imports throughout the repository.
 
 Review CLI, check-push and protected-push checks read the exact target Git snapshot directly,
 without creating temporary worktrees. Exact snapshot reads use committed submodule metadata,

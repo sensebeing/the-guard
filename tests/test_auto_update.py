@@ -23,9 +23,11 @@ from the_guard.review import cli as review_cli
 
 
 class AutoUpdateTests(unittest.TestCase):
-    def test_default_state_migrates_and_rotates_one_log_backup(self) -> None:
+    def test_status_reads_legacy_metadata_without_migrating_until_self_update(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root).resolve()
+            home, package, state_metadata, _ = self._make_checkout(Path(root).resolve())
+            checkout = package.parents[1]
+            (checkout / "dirty").touch()
             legacy = home / ".guard"
             legacy.mkdir()
             metadata = '{"installed_sha":"reviewed"}\n'
@@ -38,9 +40,23 @@ class AutoUpdateTests(unittest.TestCase):
             self.assertTrue(legacy.exists())
             state = auto_update.state_dir_for(home, env={})
             self.assertEqual(state, home / ".config/the-guard")
-            self.assertEqual((state / "auto_update.json").read_text(), metadata)
+            status = auto_update.guard_status(version="test", home_dir=home, env={})
+            self.assertEqual(status["state_dir"], str(state))
+            self.assertEqual(status["auto_update"], json.loads(metadata))
+            self.assertEqual((legacy / "auto_update.json").read_text(), metadata)
+            self.assertFalse(state_metadata.exists())
+            self.assertFalse((state / "auto_update.lock").exists())
+            auto_update.self_update(checkout_dir=checkout, home_dir=home, state_dir=override, env={})
+            self.assertTrue(legacy.exists())
+            report = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+            self.assertEqual(report["status"], "skipped_dirty_checkout")
+            self.assertEqual(report["installed_sha"], "reviewed")
+            self.assertEqual(json.loads(state_metadata.read_text()), report)
             self.assertFalse(legacy.exists())
 
+    def test_auto_update_log_rotates_one_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root)
             log = state / "auto_update.log"
             backup = state / "auto_update.log.1"
             log.write_bytes(b"x" * (512 * 1024))
@@ -269,6 +285,8 @@ class AutoUpdateTests(unittest.TestCase):
                 (package / "new_module.py").touch()
                 self._commit_checkout(home / "the-guard", "advance checkout")
                 self.assertEqual(auto_update.maybe_delegate_to_checkout(["status"], home_dir=home, env=env), 2)
+                trigger.assert_not_called()
+                self.assertEqual(auto_update.maybe_delegate_to_checkout(["review"], home_dir=home, env=env), 2)
                 trigger.assert_called_once()
 
     def test_self_update_reinstalls_uv_tool_when_head_already_pulled(self) -> None:

@@ -143,7 +143,8 @@ def resolve_task_design_blueprints(
     """Resolve changed Markdown and direct references against binding Git snapshots."""
     config = config or GuardConfig()
     blueprint_globs = tuple(config.review.get("blueprint_globs", ()))
-    if not blueprint_globs:
+    anchors = normalize_task_blueprint_anchors(retained_anchors)
+    if not blueprint_globs and not anchors:
         return TaskBlueprintSelection()
     operational_ledgers = frozenset(config.review.get("operational_ledgers", ["CHANGELOG.md"]))
 
@@ -153,10 +154,6 @@ def resolve_task_design_blueprints(
             fnmatchcase(path, pattern) for pattern in blueprint_globs
         )
 
-    anchors = {
-        path: revisions for path, revisions in normalize_task_blueprint_anchors(retained_anchors).items()
-        if matches_blueprint(path)
-    }
     recorded_revisions = dict.fromkeys(rev for revisions in anchors.values() for rev in revisions)
     verified_revisions = {}
     for revision in dict.fromkeys((initial_reviewed_sha, *recorded_revisions, prior_reviewed_sha)):
@@ -186,7 +183,7 @@ def resolve_task_design_blueprints(
     # current branch diff. Use each reviewed branch's change list so an upstream
     # deletion during a rebase is not attributed to the reviewed branch.
     historical_changes = []
-    for revision in reviewed_commits:
+    for revision in reviewed_commits if blueprint_globs else ():
         if revision == head_sha:
             continue
         changed = git_stdout(
@@ -202,7 +199,7 @@ def resolve_task_design_blueprints(
     head_changes = dict.fromkeys(changed_files)
     markdown_changes = dict.fromkeys(
         path for path in (*head_changes, *historical_changes)
-        if path.endswith(".md") and path not in excluded
+        if blueprint_globs and path.endswith(".md") and path not in excluded
     )
     changed_candidates = dict.fromkeys(path for path in markdown_changes if matches_blueprint(path))
     changed_candidates.update(dict.fromkeys(anchors))
@@ -274,9 +271,10 @@ def resolve_task_design_blueprints(
                 reference_candidates.update(dict.fromkeys(
                     (revision, candidates) for candidates in _task_design_references(body, path)
                 ))
-    reference_candidates.update(dict.fromkeys(
-        (None, candidates) for candidates in _task_design_references(reviewer_note, "")
-    ))
+    if blueprint_globs:
+        reference_candidates.update(dict.fromkeys(
+            (None, candidates) for candidates in _task_design_references(reviewer_note, "")
+        ))
     inventory({
         path for _, candidates in reference_candidates for path in candidates
         if matches_blueprint(path) and path not in excluded and path not in markdown_changes and path not in anchors

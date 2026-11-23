@@ -141,6 +141,29 @@ class TopologyTests(unittest.TestCase):
         findings = check_contract_drift(self.root, changed, base="HEAD")
         self.assertEqual([(f.path, f.line) for f in findings], [(path, 1)])
 
+    def test_contract_drift_checks_unchanged_callers_outside_active_modules_on_retirement(self):
+        retired = "packages/legacy"
+        self.config({"modules": [{"path": retired}]})
+        callers = ["scripts/use.py", "tools/use.py"]
+        for path in callers:
+            self.write(path, "import legacy.api\n")
+        self.write("tests/use.py", "import legacy.api  # guard-exempt guard.service-boundaries: approved fixture\n")
+        self.write(retired + "/api.py", "def read():\n    return 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Record active module and callers")
+        base = self.git("rev-parse", "HEAD")
+
+        self.config({"modules": [{"path": retired, "retired": True}]})
+        changed = [".guard/config.json"]
+        findings = check_contract_drift(self.root, changed, base=base)
+        self.assertEqual([(f.path, f.line) for f in findings], [(path, 1) for path in callers])
+        self.git("add", ".guard/config.json")
+        self.git("commit", "-m", "Retire module")
+
+        self.write(callers[0], "pass\n")
+        findings = check_contract_drift(self.root, changed, base=base, revision="HEAD")
+        self.assertEqual([(f.path, f.line) for f in findings], [(path, 1) for path in callers])
+
     def test_governed_inventory_merge_drops_dependencies_on_retired_modules(self):
         active = "packages/api"
         retired = "packages/legacy"

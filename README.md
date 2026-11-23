@@ -305,7 +305,8 @@ selects the integration boundary that `guard init` records and the `pre-push` ga
 
 `review.blueprint_globs` opts task blueprint discovery into repository-relative glob patterns.
 The default empty array skips discovery. `review.operational_ledgers` lists repository-relative
-files to exclude from task blueprints and defaults to `["CHANGELOG.md"]`.
+files to exclude from discovery and defaults to `["CHANGELOG.md"]`. Previously reviewed
+blueprints retain their revision history after discovery settings change.
 
 The policy manifest lives between `<!-- the-guard-policy:start -->` and `<!-- the-guard-policy:end -->` in `AGENTS.md`:
 
@@ -325,7 +326,7 @@ To suppress a specific static finding inline, add a comment with at least 8 char
 
 Reviewer behavior can be configured with `THE_GUARD_REVIEW_CONFIG`, `THE_GUARD_REVIEW_PROVIDER`, `THE_GUARD_REVIEW_MODEL`, `THE_GUARD_REVIEW_EFFORT`, `THE_GUARD_REVIEW_STALL_SECONDS`, `THE_GUARD_REVIEW_HEARTBEAT_SECONDS`, `THE_GUARD_REVIEW_MAX_SECONDS`, and `THE_GUARD_REVIEW_LOG_DIR`. Provider discovery persists to `~/.config/the-guard/review-agent.json`.
 The same directory holds updater metadata and logs by default. Legacy updater metadata in
-`~/.guard` migrates on first use of the default state directory. `THE_GUARD_STATE_DIR` and
+`~/.guard` migrates during the next update using the default state directory. `THE_GUARD_STATE_DIR` and
 `--state-dir` override the updater location. The updater rotates `auto_update.log` at 512 KiB and
 keeps one backup.
 
@@ -347,6 +348,7 @@ blueprints in `topology.architecture_docs` using safe repository-relative paths.
 Use `retired: true` to reserve a module path for deletion. Retired modules may omit `layer`,
 `languages`, `boundary_docs`, and `role`. They cannot declare dependencies or receive declared
 dependencies or inbound imports. Checks block additions and modifications under the retired path.
+Retiring a module also checks unchanged callers throughout the repository.
 Set `enforce_module_dependencies: true` to reject undeclared internal imports. Declared
 edges must also obey the layer ceiling at config load; editing dependencies cannot legalize
 an upward import. Python AST and JS/TS literal imports (including relative paths, multiline

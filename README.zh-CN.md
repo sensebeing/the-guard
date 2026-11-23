@@ -316,9 +316,9 @@ rules:
 `# guard-exempt guard.architecture-simplicity: concrete reason here`
 
 审查参数可通过环境变量 `THE_GUARD_REVIEW_CONFIG`、`THE_GUARD_REVIEW_PROVIDER`、`THE_GUARD_REVIEW_MODEL`、`THE_GUARD_REVIEW_EFFORT`、`THE_GUARD_REVIEW_STALL_SECONDS`、`THE_GUARD_REVIEW_HEARTBEAT_SECONDS`、`THE_GUARD_REVIEW_MAX_SECONDS` 与 `THE_GUARD_REVIEW_LOG_DIR` 覆盖，提供者探测结果默认保存在 `~/.config/the-guard/review-agent.json`。
-自动更新的状态和日志也默认保存在 `~/.config/the-guard`。首次使用默认目录时会迁移旧状态。更新日志达到 512 KiB 时轮转，并保留一份备份。
+自动更新的状态和日志也默认保存在 `~/.config/the-guard`。更新器下次使用默认目录运行时会迁移旧状态。更新日志达到 512 KiB 时轮转，并保留一份备份。
 
-`review.blueprint_globs` 默认为空，可通过仓库相对路径模式启用任务蓝图发现。`review.operational_ledgers` 指定排除的文件，默认为 `["CHANGELOG.md"]`。标为 `retired: true` 的模块路径只允许删除文件，并禁止声明依赖与外部导入。
+`review.blueprint_globs` 默认为空，可通过仓库相对路径模式启用任务蓝图发现。`review.operational_ledgers` 指定发现时排除的文件，默认为 `["CHANGELOG.md"]`。已审阅的蓝图在发现配置变更后仍保留修订历史。标为 `retired: true` 的模块路径只允许删除文件，并禁止声明依赖与外部导入。模块退役时也会检查仓库中未变更的调用方。
 
 ## 拓扑检查与命令参考
 

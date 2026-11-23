@@ -161,13 +161,13 @@ def _missing_docs(
 def _snapshot_paths(
     root: Path,
     revision: str,
-    paths: set[str],
+    paths: set[str] | None,
     *,
     recursive: bool = False,
     files_only: bool = False,
 ) -> set[str]:
-    """Read only requested snapshot trees, once; never consult the working tree."""
-    if not paths:
+    """Inventory snapshot trees, with None denoting the whole tree."""
+    if paths is not None and not paths:
         return set()
     output = git_stdout(
         root,
@@ -178,7 +178,7 @@ def _snapshot_paths(
             "-z",
             revision,
             "--",
-            *[f":(literal){p}" for p in sorted(paths)],
+            *[f":(literal){p}" for p in sorted(paths or ())],
         ],
     )
     if output is None:
@@ -188,7 +188,7 @@ def _snapshot_paths(
         metadata, separator, path = entry.partition("\t")
         if separator and (not files_only or not metadata.startswith("040000 ")):
             result.add(path)
-            if not recursive and not files_only:
+            if paths is not None and not recursive and not files_only:
                 # With nested pathspecs, ls-tree can emit children in place of a tree.
                 parent = path.rpartition("/")[0]
                 while parent:
@@ -198,25 +198,29 @@ def _snapshot_paths(
     return result
 
 
-def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set[str]:
+def _tightened_import_scope(
+    config: GuardConfig, baseline: GuardConfig | None
+) -> tuple[set[str], bool]:
+    """Return tightened active owners and whether retirements also require a repository scan."""
     if baseline is None:
-        return set()
+        return set(), False
     current, old = config.topology, baseline.topology
     modules = {m["path"]: m for m in current.get("modules", [])}
-    if (
-        current.get("enforce_module_dependencies")
-        and not old.get("enforce_module_dependencies")
-    ) or (current.get("layers") and not old.get("layers")):
-        return set(modules)
     old_modules = {m["path"]: m for m in old.get("modules", [])}
+    resolution_changed = (
+        modules.keys() != old_modules.keys() or config.module_doc_roots != baseline.module_doc_roots
+    )
+    retired = {p for p, m in modules.items() if m.get("retired", False)}
+    new_retirement = any(not old_modules.get(p, {}).get("retired", False) for p in retired)
+    scan_all_callers = new_retirement or (bool(retired) and resolution_changed)
     if (
-        set(modules) != set(old_modules)
-        or config.module_doc_roots != baseline.module_doc_roots
-        or any(m.get("retired", False) and not old_modules[p].get("retired", False)
-               for p, m in modules.items())
+        resolution_changed
+        or new_retirement
+        or (current.get("enforce_module_dependencies") and not old.get("enforce_module_dependencies"))
+        or (current.get("layers") and not old.get("layers"))
     ):
         # Owner additions/removals change longest-prefix and alias resolution globally.
-        return set(modules)
+        return set(modules), scan_all_callers
     tightened = {
         path
         for path, module in modules.items()
@@ -241,7 +245,7 @@ def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set
             after = current.get("layers", {}).get(source.get("layer"), [])
             if previous.get("layer") in before and module.get("layer") not in after:
                 tightened.add(path)
-    return tightened
+    return tightened, False
 
 
 def check_contract_drift(
@@ -356,7 +360,7 @@ def check_contract_drift(
         or any(m.get("retired", False) for m in modules.values())
     ):
         return findings
-    tightened = _tightened_modules(config, baseline)
+    tightened, scan_all_callers = _tightened_import_scope(config, baseline)
     snapshot_reader = (
         BaseFileReader(root, revision, submodules, exact=True)
         if revision is not None
@@ -403,52 +407,48 @@ def check_contract_drift(
     if not scan_modules:
         return findings
     if revision is not None:
-        files = sorted(
-            _snapshot_paths(
-                root, revision, scan_modules, recursive=True, files_only=True
-            )
+        inventory = _snapshot_paths(
+            root, revision, None if scan_all_callers else scan_modules,
+            recursive=True, files_only=True,
         )
     else:
-        files = sorted(
-            {
-                p.relative_to(root).as_posix()
-                for module in scan_modules
-                for directory in [repository_path(root, module)]
-                for p in (
-                    [directory] if directory.is_file() else source_files(directory)
-                )
-                if not p.is_symlink()
-                and owner_module(p.relative_to(root).as_posix(), list(modules))
-                in scan_modules
-                and b"\x00" not in p.read_bytes()
-            }
-        )
+        roots = [root] if scan_all_callers else [repository_path(root, module) for module in scan_modules]
+        inventory = {
+            p.relative_to(root).as_posix()
+            for directory in roots
+            for p in ([directory] if directory.is_file() else source_files(directory))
+            if not p.is_symlink()
+        }
     files = [
         p
-        for p in files
+        for p in sorted(inventory)
         if not is_excluded_topology_path(p)
         and owner_module(p, list(modules)) in scan_modules
-        and (revision is None or "\x00" not in (read_current(p) or ""))
+        and "\x00" not in (read_current(p) or "")
+    ]
+    # Only retirement permissions apply to callers outside active owner scopes.
+    import_paths = sorted(inventory) if scan_all_callers else [
+        p for p in files if owner_module(p, list(modules)) in tightened
     ]
     baseline_has_retirements = any(m.get("retired", False) for m in old_modules.values())
-    for path in files:
-        if owner_module(path, list(modules)) in tightened:
-            text = read_current(path)
-            if text is not None:
-                prior_text = reader.read(path) if baseline_has_retirements else None
-                findings.extend(
-                    check_module_imports(
-                        path,
-                        text,
-                        None,
-                        config,
-                        check_unregistered=False,
-                        baseline_config=baseline,
-                        baseline_changed_lines=(
-                            compute_changed_lines(prior_text, text) if prior_text is not None else None
-                        ),
-                    )
-                )
+    for path in import_paths:
+        text = read_current(path)
+        if text is None or "\x00" in text:
+            continue
+        prior_text = reader.read(path) if baseline_has_retirements else None
+        findings.extend(
+            check_module_imports(
+                path,
+                text,
+                None,
+                config,
+                check_unregistered=False,
+                baseline_config=baseline,
+                baseline_changed_lines=(
+                    compute_changed_lines(prior_text, text) if prior_text is not None else None
+                ),
+            )
+        )
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []
     if baseline and candidates:

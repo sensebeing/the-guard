@@ -282,6 +282,41 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             selection = resolve_task_design_blueprints(repo, paths, base_sha=base, head_sha=head, config=config)
             self.assertEqual([doc.path for doc in selection.previews], ["docs/design.md", "docs/reference.md"])
 
+    def test_retained_blueprint_records_new_revisions_after_discovery_filters_change(self):
+        plan = "docs/plan.md"
+        for settings in ({}, {"blueprint_globs": ["docs/other.md"]},
+                         {**BLUEPRINT_REVIEW, "operational_ledgers": [plan]}):
+            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
+                prompts = []
+
+                def reviewer(prompt):
+                    prompts.append(prompt)
+                    return {"verdict": "GO", "summary": "reviewed", "blocking_findings": []}
+
+                (repo / plan).write_text("Initial owner commitment\n")
+                (repo / "app.py").write_text("owner = 1\n")
+                _git(repo, "add", plan, "app.py")
+                _git(repo, "commit", "-m", "Record initial plan")
+                first = run_architecture_review(repo, reviewer_fn=reviewer)
+                self.assertEqual(load_review_session(repo).task_blueprint_anchors[plan], (first.head_sha,))
+
+                config_path = repo / ".guard/config.json"
+                config = json.loads(config_path.read_text())
+                config["review"] = settings
+                config_path.write_text(json.dumps(config))
+                (repo / plan).write_text("Newly reviewed owner constraint\n")
+                _git(repo, "add", ".guard/config.json", plan)
+                _git(repo, "commit", "-m", "Tighten retained plan and change discovery")
+                second = run_architecture_review(repo, reviewer_fn=reviewer)
+                self.assertEqual(load_review_session(repo).task_blueprint_anchors[plan],
+                                 (first.head_sha, second.head_sha))
+
+                _git(repo, "rm", plan)
+                _git(repo, "commit", "-m", "Remove plan")
+                run_architecture_review(repo, reviewer_fn=reviewer)
+                self.assertIn("Newly reviewed owner constraint", prompts[-1])
+
     def test_task_blueprints_are_snapshot_bound_in_full_and_incremental_prompts(self):
         plan = "docs/superpowers/plans/consolidation.md"
         anchor = "docs/reports/anchor-0.md"

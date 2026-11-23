@@ -53,39 +53,45 @@ def state_dir_for(
     state_dir: str | Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
+    return _state_dirs_for(home_dir, state_dir, env)[0]
+
+
+def _state_dirs_for(
+    home_dir: str | Path | None,
+    state_dir: str | Path | None,
+    env: Mapping[str, str] | None,
+) -> tuple[Path, Path | None]:
     eff_env = os.environ if env is None else env
     if state_dir is not None:
-        return Path(state_dir).expanduser().resolve()
+        return Path(state_dir).expanduser().resolve(), None
     configured = eff_env.get("THE_GUARD_STATE_DIR", "").strip()
     if configured:
-        return Path(configured).expanduser().resolve()
+        return Path(configured).expanduser().resolve(), None
     home = home_dir or eff_env.get("HOME")
     base_home = Path(home).expanduser().resolve() if home else Path.home()
-    resolved_state = base_home / ".config" / "the-guard"
-    _migrate_auto_update_state(base_home / ".guard", resolved_state)
-    return resolved_state
+    return base_home / ".config" / "the-guard", base_home / ".guard"
 
 
-def _migrate_auto_update_state(legacy: Path, state: Path) -> None:
+def _migrate_auto_update_state(legacy: Path | None, state: Path) -> None:
+    """Migrate metadata while the updater holds the current state lock."""
+    if legacy is None:
+        return
     previous = legacy / "auto_update.json"
     current = state / previous.name
-    if current.exists() or not previous.is_file():
+    if current.exists():
         return
-    with _try_file_lock(state / "auto_update.lock") as acquired:
-        if not acquired or current.exists():
-            return
-        try:
-            metadata = previous.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return
-        atomic_write_text(current, metadata)
-        for name in (previous.name, "auto_update.log", "auto_update.lock"):
-            (legacy / name).unlink(missing_ok=True)
-        try:
-            legacy.rmdir()
-        except OSError as exc:
-            if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
-                raise
+    try:
+        metadata = previous.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    atomic_write_text(current, metadata)
+    for name in (previous.name, "auto_update.log", "auto_update.lock"):
+        (legacy / name).unlink(missing_ok=True)
+    try:
+        legacy.rmdir()
+    except OSError as exc:
+        if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+            raise
 
 
 def gemini_dir_for(
@@ -238,15 +244,22 @@ def load_auto_update_status(
     state_dir: str | Path | None = None,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    resolved_state = state_dir_for(home_dir=home_dir, state_dir=state_dir, env=env)
-    metadata_path = resolved_state / "auto_update.json"
-    if not metadata_path.is_file():
-        return None
-    try:
-        value = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return {"status": "failed", "error": str(exc)}
-    return value if isinstance(value, dict) else {"status": "failed", "error": "invalid metadata"}
+    return _read_auto_update_status(*_state_dirs_for(home_dir, state_dir, env))
+
+
+def _read_auto_update_status(state: Path, legacy: Path | None) -> dict[str, Any] | None:
+    current = state / "auto_update.json"
+    # Recheck the current file if a concurrent update moves the legacy metadata.
+    paths = (current, legacy / current.name, current) if legacy is not None else (current,)
+    for path in paths:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            return {"status": "failed", "error": str(exc)}
+        return value if isinstance(value, dict) else {"status": "failed", "error": "invalid metadata"}
+    return None
 
 
 def guard_status(
@@ -259,7 +272,7 @@ def guard_status(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=env)
+    resolved_state, legacy = _state_dirs_for(resolved_home, state_dir, env)
     resolved_gemini = gemini_dir_for(home_dir=resolved_home, gemini_dir=gemini_dir, env=env)
     checkout: Path | None = None
     try:
@@ -282,9 +295,7 @@ def guard_status(
         "checkout": str(checkout) if checkout is not None else None,
         "guard_bin": shutil.which("guard") or "",
         "skill_links": skill_links,
-        "auto_update": load_auto_update_status(
-            home_dir=resolved_home, state_dir=resolved_state, env=env
-        ),
+        "auto_update": _read_auto_update_status(resolved_state, legacy),
     }
     return report
 
@@ -298,26 +309,27 @@ def self_update(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=env)
+    resolved_state, legacy = _state_dirs_for(resolved_home, state_dir, env)
     resolved_gemini = gemini_dir_for(home_dir=resolved_home, gemini_dir=gemini_dir, env=env)
-    resolved_state.mkdir(parents=True, exist_ok=True)
     metadata_path = resolved_state / "auto_update.json"
-    existing = _load_json_dict(metadata_path)
-    report: dict[str, Any] = {
-        "last_checked_at": time.time(),
-        "last_updated_at": existing.get("last_updated_at"),
-        "status": "failed",
-        "source_status": "failed",
-        "head_sha": existing.get("head_sha"),
-        "source_sha": existing.get("source_sha"),
-        "source_tree_digest": existing.get("source_tree_digest"),
-        "installed_sha": existing.get("installed_sha"),
-        "installed_tree_digest": existing.get("installed_tree_digest"),
-        "cli_status": "skipped",
-        "synced_skills": [],
-        "error": None,
-    }
     with _try_file_lock(resolved_state / "auto_update.lock") as locked:
+        if locked:
+            _migrate_auto_update_state(legacy, resolved_state)
+        existing = _read_auto_update_status(resolved_state, legacy) or {}
+        report: dict[str, Any] = {
+            "last_checked_at": time.time(),
+            "last_updated_at": existing.get("last_updated_at"),
+            "status": "failed",
+            "source_status": "failed",
+            "head_sha": existing.get("head_sha"),
+            "source_sha": existing.get("source_sha"),
+            "source_tree_digest": existing.get("source_tree_digest"),
+            "installed_sha": existing.get("installed_sha"),
+            "installed_tree_digest": existing.get("installed_tree_digest"),
+            "cli_status": "skipped",
+            "synced_skills": [],
+            "error": None,
+        }
         if not locked:
             locked_report = {
                 **report,
@@ -480,12 +492,12 @@ def maybe_trigger_background_auto_update(
         checkout, _ = _discover_checkout(None, resolved_home)
         if checkout is not None and _is_same_git_repo(Path(active_repo_root), checkout):
             return False
-    resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=eff_env)
+    resolved_state, legacy = _state_dirs_for(resolved_home, state_dir, eff_env)
     resolved_gemini = gemini_dir_for(
         home_dir=resolved_home, gemini_dir=gemini_dir, env=eff_env
     )
     metadata_path = resolved_state / "auto_update.json"
-    metadata = _load_json_dict(metadata_path)
+    metadata = _read_auto_update_status(resolved_state, legacy) or {}
     try:
         cooldown = time.time() - float(metadata.get("last_checked_at") or 0)
     except (TypeError, ValueError):
@@ -522,6 +534,7 @@ def maybe_trigger_background_auto_update(
     with _try_file_lock(resolved_state / "auto_update.lock") as locked:
         if not locked:
             return False
+        _migrate_auto_update_state(legacy, resolved_state)
         metadata = _load_json_dict(metadata_path)
         try:
             cooldown = time.time() - float(metadata.get("last_checked_at") or 0)
@@ -612,8 +625,7 @@ def _newer_checkout_package(
         else:
             baseline = _installed_vcs_commit(PACKAGE_DIR)
             if baseline is None:
-                metadata_path = state_dir_for(home_dir=home_dir, state_dir=state_dir, env=env) / "auto_update.json"
-                metadata = _load_json_dict(metadata_path)
+                metadata = load_auto_update_status(home_dir=home_dir, state_dir=state_dir, env=env) or {}
                 installed_sha = metadata.get("installed_sha")
                 baseline = installed_sha or metadata.get("source_sha")
                 # The installed SHA describes the global tool. A project venv can still be stale.
@@ -672,5 +684,9 @@ def maybe_delegate_to_checkout(
         "THE_GUARD_DELEGATED": "1",
     }
     proc = subprocess.run([sys.executable, "-m", "the_guard.cli", *argv], env=child_env, check=False)
-    maybe_trigger_background_auto_update(active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir, gemini_dir=gemini_dir, env=eff_env, force_local_sync=True)
+    if argv[0] != "status":
+        maybe_trigger_background_auto_update(
+            active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir,
+            gemini_dir=gemini_dir, env=eff_env, force_local_sync=True,
+        )
     return proc.returncode
