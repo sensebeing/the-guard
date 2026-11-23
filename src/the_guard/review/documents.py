@@ -219,7 +219,7 @@ def changed_task_blueprints(
 
     Across a rebase (`branch_changed_paths` supplied) upstream blueprint additions that the
     replayed branch never touched are outside the branch contract; retained blueprints stay
-    fail-closed.
+    fail-closed. Identical regular-file entries skip snapshot reads entirely.
     """
     configured_paths = _configured_blueprint_paths(
         root, config, previous
@@ -232,15 +232,27 @@ def changed_task_blueprints(
         )
     )
     paths.update(retained_paths)
-    before: dict[str, str] = {}
-    after: dict[str, str] = {}
-    existing_document_paths(root, paths, previous, snapshot_modes=before)
-    existing_document_paths(root, paths, target, snapshot_modes=after)
-    return {
-        path for path in paths
-        if read_document(root, path, previous, snapshot_modes=before)
-        != read_document(root, path, target, snapshot_modes=after)
-    }
+    retained = set(retained_paths)
+    before = _tree_entries(root, paths, previous)
+    after = _tree_entries(root, paths, target)
+    before_modes = {path: mode for path, (mode, _) in before.items()}
+    after_modes = {path: mode for path, (mode, _) in after.items()}
+    changed: set[str] = set()
+    for path in paths:
+        previous_entry = before.get(path)
+        target_entry = after.get(path)
+        if (
+            path not in retained
+            and target_entry == previous_entry
+            and (target_entry is None or target_entry[0] != "120000")
+        ):
+            continue
+        if (
+            read_document(root, path, previous, snapshot_modes=before_modes)
+            != read_document(root, path, target, snapshot_modes=after_modes)
+        ):
+            changed.add(path)
+    return changed
 
 
 @dataclass(frozen=True)
@@ -503,19 +515,40 @@ def resolve_task_design_blueprints(
     )
 
 
-def existing_document_paths(
-    root: Path,
-    paths: Iterable[str],
-    revision: str | None,
-    *,
-    snapshot_modes: dict[str, str] | None = None,
-) -> set[str]:
-    """Inspect candidates in one tree query; retain modes for safe snapshot reads."""
+def _parse_tree_entries(
+    output: str, *, restrict: set[str] | None = None
+) -> dict[str, tuple[str, str]]:
+    entries: dict[str, tuple[str, str]] = {}
+    for entry in output.split("\0"):
+        metadata, separator, path = entry.partition("\t")
+        if not separator or metadata.startswith("040000 "):
+            continue
+        if restrict is not None and path not in restrict:
+            continue
+        fields = metadata.split()
+        entries[path] = (fields[0], fields[2] if len(fields) > 2 else "")
+    return entries
+
+
+def _tree_entries(
+    root: Path, paths: Iterable[str], revision: str | None
+) -> dict[str, tuple[str, str]]:
+    """Map candidate paths to their snapshot mode and blob object id in one tree query."""
     candidates = sorted(set(paths))
     if revision is None:
-        return {path for path in candidates if repository_path(root, path).is_file()}
+        entries: dict[str, tuple[str, str]] = {}
+        for path in candidates:
+            candidate = repository_path(root, path)
+            if candidate.is_file():
+                entries[path] = ("120000" if candidate.is_symlink() else "100644", "")
+        return entries
     if not candidates:
-        return set()
+        return {}
+    if len(candidates) > 128:
+        output = git_stdout(root, ["git", "ls-tree", "-r", "-z", revision])
+        if output is None:
+            raise ValueError(f"Cannot inspect architecture documents at {revision}")
+        return _parse_tree_entries(output, restrict=set(candidates))
     output = git_stdout(
         root,
         [
@@ -529,14 +562,23 @@ def existing_document_paths(
     )
     if output is None:
         raise ValueError(f"Cannot inspect architecture documents at {revision}")
-    existing = set()
-    for entry in output.split("\0"):
-        metadata, separator, path = entry.partition("\t")
-        if separator and not metadata.startswith("040000 "):
-            existing.add(path)
-            if snapshot_modes is not None:
-                snapshot_modes[path] = metadata.split()[0]
-    return existing
+    return _parse_tree_entries(output)
+
+
+def existing_document_paths(
+    root: Path,
+    paths: Iterable[str],
+    revision: str | None,
+    *,
+    snapshot_modes: dict[str, str] | None = None,
+) -> set[str]:
+    """Inspect candidates in one tree query; retain modes for safe snapshot reads."""
+    entries = _tree_entries(root, paths, revision)
+    if snapshot_modes is not None:
+        snapshot_modes.update(
+            {path: mode for path, (mode, _) in entries.items()}
+        )
+    return set(entries)
 
 
 def read_document(
