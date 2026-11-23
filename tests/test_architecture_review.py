@@ -59,8 +59,10 @@ from the_guard.review.runner import (
     _summarize_stream_line,
 )
 from the_guard.config import load_config, GuardConfig
+from the_guard.git_helpers import git_stdout
 from the_guard.review.documents import (
     boundary_document_paths,
+    changed_task_blueprints,
     existing_document_paths,
     read_document,
     resolve_task_design_blueprints,
@@ -189,6 +191,54 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 self.assertIn("-z", tree_calls[0])
                 self.assertFalse(any("config.py/" in arg for arg in tree_calls[0]))
             self.assertEqual(existing_document_paths(repo, ["packages", "AGENTS.md"], scope.head_sha), {"AGENTS.md"})
+
+    def test_unchanged_blueprints_skip_snapshot_reads_at_scale(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
+            blueprint_dir = repo / "docs/blueprints"
+            blueprint_dir.mkdir(parents=True)
+            stable = [f"docs/blueprints/plan-{index:03d}.md" for index in range(300)]
+            for path in stable:
+                (repo / path).write_text("Stable owner commitment\n")
+            (blueprint_dir / "plan-source.md").write_text("Original shared commitment\n")
+            (blueprint_dir / "linked.md").symlink_to("plan-source.md")
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "land hundreds of stable blueprints")
+            previous = _git(repo, "rev-parse", "HEAD")
+
+            modified = stable[0]
+            (repo / modified).write_text("Changed owner commitment\n")
+            (blueprint_dir / "plan-source.md").write_text("Changed shared commitment\n")
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "change a blueprint and the shared symlink target")
+            target = _git(repo, "rev-parse", "HEAD")
+            config = load_config(repo)
+
+            reads: list[tuple[str, str | None]] = []
+
+            def record_read(root, path, revision=None, **kwargs):
+                reads.append((path, revision))
+                return read_document(root, path, revision, **kwargs)
+
+            with patch("the_guard.review.documents.read_document", side_effect=record_read):
+                changed = changed_task_blueprints(repo, config, previous, target, ())
+
+            detected = {
+                modified,
+                "docs/blueprints/linked.md",
+                "docs/blueprints/plan-source.md",
+            }
+            self.assertEqual(changed, detected)
+            self.assertEqual(
+                set(reads),
+                {(path, revision) for path in detected for revision in (previous, target)},
+            )
+            self.assertFalse({path for path, _ in reads} & set(stable[1:]))
+
+            with patch("the_guard.review.documents.git_stdout", wraps=git_stdout) as tree:
+                self.assertEqual(existing_document_paths(repo, stable, target), set(stable))
+            tree_calls = [call.args[1] for call in tree.call_args_list]
+            self.assertEqual(tree_calls, [["git", "ls-tree", "-r", "-z", target]])
 
     def test_implicit_readme_and_symlink_targets_are_reviewable_contract_changes(self):
         with tempfile.TemporaryDirectory() as td:
