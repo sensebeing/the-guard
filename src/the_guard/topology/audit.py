@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..finding import Finding
-from ..git_helpers import BaseFileReader, git_ok, git_stdout, submodule_paths
+from ..git_helpers import BaseFileReader, compute_changed_lines, git_ok, git_stdout, submodule_paths
 from ..config import GuardConfig, load_config, repository_path
 from .configured import check_module_imports
 from .discovery import discover_topology, source_files
@@ -430,10 +430,12 @@ def check_contract_drift(
         and owner_module(p, list(modules)) in scan_modules
         and (revision is None or "\x00" not in (read_current(p) or ""))
     ]
+    baseline_has_retirements = any(m.get("retired", False) for m in old_modules.values())
     for path in files:
         if owner_module(path, list(modules)) in tightened:
             text = read_current(path)
             if text is not None:
+                prior_text = reader.read(path) if baseline_has_retirements else None
                 findings.extend(
                     check_module_imports(
                         path,
@@ -442,6 +444,9 @@ def check_contract_drift(
                         config,
                         check_unregistered=False,
                         baseline_config=baseline,
+                        baseline_changed_lines=(
+                            compute_changed_lines(prior_text, text) if prior_text is not None else None
+                        ),
                     )
                 )
     old_observed: dict[str, set[str]] = {}

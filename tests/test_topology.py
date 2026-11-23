@@ -27,6 +27,7 @@ from the_guard.topology.imports import (
 )
 from the_guard.topology.python import _check_python_file
 from the_guard.topology.swift import _check_swift_file
+from the_guard.topology.sync import merge_topology
 
 
 class TopologyTests(unittest.TestCase):
@@ -93,6 +94,65 @@ class TopologyTests(unittest.TestCase):
         (self.root / retired).mkdir(exist_ok=True)
         (self.root / paths[0]).symlink_to("../../packages/api/api.py")
         self.assertEqual([f.path for f in run_topology_guard(self.root, [paths[0]])], [paths[0]])
+
+    def test_retired_imports_use_changed_spans_and_boundary_exemptions(self):
+        self.config({"modules": [{"path": "packages/legacy", "retired": True}]})
+        path = "packages/api/use.ts"
+        existing_import = 'import { old } from "../legacy/old.js";'
+        exemption = " // guard-exempt guard.service-boundaries: approved migration window"
+        self.write(path, existing_import + "\nconst value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Legacy inbound import")
+        self.write(path, existing_import + "\nconst value = 2;\n")
+        self.assertEqual(run_topology_guard(self.root, [path], base="HEAD"), [])
+
+        import_text = 'import {\n  read,\n} from "../legacy/new.js";'
+        self.write(path, import_text + exemption + "\nconst value = 2;\n")
+        self.assertEqual(run_topology_guard(self.root, [path], base="HEAD"), [])
+        self.write(path, import_text + "\nconst value = 2;\n")
+        findings = run_topology_guard(self.root, [path], base="HEAD")
+        self.assertEqual([(f.line, f.rule_id) for f in findings], [(1, "guard.service-boundaries")])
+
+        retired_file = "packages/legacy/old.ts"
+        self.write(retired_file, exemption.strip() + "\nexport const old = 1;\n")
+        self.assertEqual(run_topology_guard(self.root, [retired_file], base="HEAD"), [])
+
+    def test_contract_drift_grandfathers_untouched_retired_imports_only(self):
+        path = "packages/api/use.ts"
+        topology = {"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/api", "dependencies": ["packages/helper"]},
+            {"path": "packages/helper"},
+            {"path": "packages/legacy", "retired": True},
+        ]}
+        self.config(topology)
+        old_import = 'import { old } from "../legacy/old.js";'
+        self.write(path, old_import + "\nconst value = 1;\n")
+        self.write("packages/helper/index.ts", "export const helper = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Baseline with retired import and unused permission")
+        topology["modules"][0]["dependencies"] = []
+        self.config(topology)
+        self.write(path, "// Shift the existing import\n" + old_import + "\nconst value = 2;\n")
+        changed = [".guard/config.json", path]
+        self.assertEqual(check_contract_drift(self.root, changed, base="HEAD"), [])
+
+        new_import = 'import { read } from "../legacy/new.js";'
+        self.write(path, new_import + "\n" + old_import + "\nconst value = 2;\n")
+        findings = check_contract_drift(self.root, changed, base="HEAD")
+        self.assertEqual([(f.path, f.line) for f in findings], [(path, 1)])
+
+    def test_governed_inventory_merge_drops_dependencies_on_retired_modules(self):
+        active = "packages/api"
+        retired = "packages/legacy"
+        topology = {"enforce_module_dependencies": True, "modules": [
+            {"path": active, "dependencies": [retired]},
+            {"path": retired, "retired": True},
+        ]}
+        discovered = [{"path": active, "boundary_docs": [], "dependencies": [retired]},
+                      {"path": retired, "retired": True}]
+        merged, _ = merge_topology(topology, discovered)
+        self.assertEqual(merged["modules"][0]["dependencies"], [])
+        self.assertTrue(merged["modules"][1]["retired"])
 
     def test_file_module_resolution_and_root_disambiguation(self):
         modules = ["src/the_guard/config.py", "src/the_guard/review", "packages/core/config.ts"]

@@ -71,9 +71,12 @@ def check_configured(
         retired_module = owner_module(path, [
             m["path"] for m in topology.get("modules", []) if m.get("retired", False)
         ])
-        if retired_module is not None:
+        rule_id = prefix + "service-boundaries"
+        if retired_module is not None and not _line_exempts_rule(
+            lines[0] if lines else "", rule_id, exempt_tag=config.exempt_tag
+        ):
             findings.append(Finding(
-                prefix + "service-boundaries", path, 1,
+                rule_id, path, 1,
                 f"Retired module '{retired_module}' is delete-only.",
             ))
 
@@ -214,6 +217,7 @@ def check_module_imports(
     *,
     check_unregistered: bool = True,
     baseline_config: GuardConfig | None = None,
+    baseline_changed_lines: set[int] | None = None,
 ) -> list[Finding]:
     """Check module permissions without rechecking unrelated configured rules."""
     return _check_module_imports(
@@ -224,6 +228,7 @@ def check_module_imports(
         config,
         check_unregistered=check_unregistered,
         baseline_config=baseline_config,
+        baseline_changed_lines=baseline_changed_lines,
     )
 
 
@@ -236,6 +241,7 @@ def _check_module_imports(
     *,
     check_unregistered: bool = True,
     baseline_config: GuardConfig | None = None,
+    baseline_changed_lines: set[int] | None = None,
 ) -> list[Finding]:
     topology = config.topology
     modules = {m["path"]: m for m in topology.get("modules", [])}
@@ -276,6 +282,7 @@ def _check_module_imports(
     )
     old_paths = list(old_modules)
     old_source = owner_module(path, old_paths)
+    # Evaluate current import resolution under the old contract as well.
     old_targets = (
         {
             (
@@ -297,30 +304,35 @@ def _check_module_imports(
         if target_path is None:
             continue
         target = modules[target_path]
+        number = _import_finding_line(start, end, lines, changed_lines, rule_id, config)
+        if number is None:
+            continue
+        old_edge = (
+            baseline_config is not None
+            and old_source == source_path
+            and (start, end, target_path) in old_targets
+        )
         if target.get("retired", False):
-            if (
-                owner_module(path, [target_path]) is None
-                and not old_modules.get(target_path, {}).get("retired", False)
-            ):
+            # A matching old permission outcome only covers an unchanged import span.
+            grandfathered = (
+                old_edge
+                and old_modules[target_path].get("retired", False)
+                and not _is_range_touched(baseline_changed_lines, start, end)
+            )
+            if owner_module(path, [target_path]) is None and not grandfathered:
                 findings.append(Finding(
-                    rule_id, path, start, f"Import of retired module '{target_path}' is forbidden.",
+                    rule_id, path, number, f"Import of retired module '{target_path}' is forbidden.",
                 ))
             continue
         if source is None or excluded:
             continue
-        number = _import_finding_line(start, end, lines, changed_lines, rule_id, config)
-        if number is None:
-            continue
         violation = _module_import_violation(source, target, topology)
         if violation is None:
             continue
-        if baseline_config is not None and old_source == source_path:
-            if (start, end, target_path) in old_targets and _module_import_violation(
-                old_modules[old_source],
-                old_modules[target_path],
-                baseline_config.topology,
-            ) is not None:
-                continue
+        if old_edge and _module_import_violation(
+            old_modules[source_path], old_modules[target_path], baseline_config.topology
+        ) is not None:
+            continue
         if violation == "layer":
             message = (
                 f"Layer '{source.get('layer')}' module '{source_path}' must not import "

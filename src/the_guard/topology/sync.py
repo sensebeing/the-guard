@@ -48,7 +48,8 @@ def merge_topology(
             )
         if governed:
             entry["dependencies"] = [
-                p for p in (previous or {}).get("dependencies", []) if p not in pruned
+                p for p in (previous or {}).get("dependencies", [])
+                if p not in pruned and p not in retired
             ]
         elif retired:
             entry["dependencies"] = [p for p in entry["dependencies"] if p not in retired]

@@ -51,25 +51,28 @@ def install_hooks(root: Path | str) -> Path:
 
 def main_push_gate(root: Path | str, input_text: str) -> int:
     root = Path(root).resolve()
-    config = load_config(root, revision="HEAD")
     for line in input_text.splitlines():
         fields = line.split()
         if len(fields) != 4:
             raise ValueError("Invalid git pre-push input")
         _, local_sha, remote_ref, remote_sha = fields
-        if remote_ref != "refs/heads/" + config.main_branch:
+        if not remote_ref.startswith("refs/heads/"):
             continue
-        if config.review.get("integration_mode") == "github-pr":
+        deleting = set(local_sha) == {"0"}
+        snapshot_config = load_config(root, revision="HEAD" if deleting else local_sha)
+        if remote_ref != "refs/heads/" + snapshot_config.main_branch:
+            continue
+        if snapshot_config.review.get("integration_mode") == "github-pr":
             print(
                 "NO-GO: repository uses GitHub PR mode (review.integration_mode=github-pr); "
                 "direct push to refs/heads/"
-                + config.main_branch
+                + snapshot_config.main_branch
                 + " is disabled. Push a topic branch, open a PR with gh pr create, "
                 "run guard review --github-pr <owner/repo#number>, and merge via gh pr merge.",
                 file=sys.stderr,
             )
             return 2
-        if set(local_sha) == {"0"}:
+        if deleting:
             continue
         if set(remote_sha) == {"0"}:
             raise ValueError(
@@ -82,7 +85,6 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
             )
             return 2
         try:
-            snapshot_config = load_config(root, revision=local_sha)
             snapshot_policy = load_policy(
                 root, revision=local_sha, config=snapshot_config
             )
@@ -113,7 +115,9 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
             )
         if findings:
             return 2
-        scope = collect_review_scope(root, main_branch=remote_sha, head_ref=local_sha)
+        scope = collect_review_scope(
+            root, main_branch=remote_sha, head_ref=local_sha, config=snapshot_config
+        )
         if (
             not scope.is_exempt
             and resolve_or_carry_forward_receipt(

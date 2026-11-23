@@ -366,19 +366,25 @@ def _is_unchanged_rebuttal_round(
 
 
 def collect_review_scope(
-    repo_root: Path, main_branch: str = "main", *, head_ref: str = "HEAD"
+    repo_root: Path,
+    main_branch: str = "main",
+    *,
+    head_ref: str = "HEAD",
+    config: GuardConfig | None = None,
 ) -> ReviewScope:
+    """Collect the committed review scope, reusing configuration from that head if supplied."""
     base_ref = resolve_base_ref(repo_root, main_branch)
     head_sha = _git_text(repo_root, "rev-parse", "--verify", "--end-of-options", f"{head_ref}^{{commit}}")
-    config = load_config(repo_root, revision=head_sha)
+    config = config or load_config(repo_root, revision=head_sha)
     merge_base = _git_text(repo_root, "merge-base", base_ref, head_sha)
 
     contract_paths = resolved_contract_paths(repo_root, config, head_sha)
-    contract_paths.update(
-        resolved_contract_paths(
-            repo_root, load_config(repo_root, revision=merge_base), merge_base
+    if merge_base != head_sha:
+        contract_paths.update(
+            resolved_contract_paths(
+                repo_root, load_config(repo_root, revision=merge_base), merge_base
+            )
         )
-    )
     raw_diff = _git_text(
         repo_root, "diff", "--raw", "--no-renames", f"{merge_base}..{head_sha}"
     )
