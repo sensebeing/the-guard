@@ -166,7 +166,7 @@ def _snapshot_paths(
     recursive: bool = False,
     files_only: bool = False,
 ) -> set[str]:
-    """Inventory snapshot trees, with None denoting the whole tree."""
+    """Inventory snapshot paths, or only blob paths when files_only is set."""
     if paths is not None and not paths:
         return set()
     output = git_stdout(
@@ -186,7 +186,7 @@ def _snapshot_paths(
     result = set()
     for entry in output.split("\0"):
         metadata, separator, path = entry.partition("\t")
-        if separator and (not files_only or not metadata.startswith("040000 ")):
+        if separator and (not files_only or metadata.split()[1:2] == ["blob"]):
             result.add(path)
             if paths is not None and not recursive and not files_only:
                 # With nested pathspecs, ls-tree can emit children in place of a tree.
@@ -452,23 +452,9 @@ def check_contract_drift(
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []
     if baseline and candidates:
-        output = git_stdout(
-            root,
-            [
-                "git",
-                "ls-tree",
-                "-r",
-                "--name-only",
-                "-z",
-                base,
-                "--",
-                *[f":(literal){p}" for p in sorted(candidates)],
-            ],
-        )
-        if output is None:
-            raise ValueError("Cannot inspect baseline module imports")
         baseline_files = [
-            p for p in output.split("\0") if p and "\x00" not in (reader.read(p) or "")
+            p for p in sorted(_snapshot_paths(root, base, candidates, recursive=True, files_only=True))
+            if "\x00" not in (reader.read(p) or "")
         ]
         old_observed, _ = _dependency_evidence(baseline, baseline_files, reader.read)
     _, stale = _dependency_evidence(

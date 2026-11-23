@@ -149,7 +149,12 @@ class TopologyTests(unittest.TestCase):
             self.write(path, "import legacy.api\n")
         self.write("tests/use.py", "import legacy.api  # guard-exempt guard.service-boundaries: approved fixture\n")
         self.write(retired + "/api.py", "def read():\n    return 1\n")
+        # A gitlink has no root-repository source blob, even when its submodule is declared.
+        gitlink = "vendor/uninitialized.py"
+        self.write(".gitmodules", f'[submodule "vendor"]\npath = {gitlink}\nurl = ../vendor\n')
         self.git("add", ".")
+        commit = self.git("commit-tree", self.git("write-tree"), "-m", "Submodule snapshot")
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{commit},{gitlink}")
         self.git("commit", "-m", "Record active module and callers")
         base = self.git("rev-parse", "HEAD")
 
@@ -161,6 +166,8 @@ class TopologyTests(unittest.TestCase):
         self.git("commit", "-m", "Retire module")
 
         self.write(callers[0], "pass\n")
+        self.assertTrue(self.git("ls-tree", "-r", "HEAD", "--", gitlink).startswith("160000 commit "))
+        self.assertFalse((self.root / gitlink / ".git").exists())
         findings = check_contract_drift(self.root, changed, base=base, revision="HEAD")
         self.assertEqual([(f.path, f.line) for f in findings], [(path, 1) for path in callers])
 
