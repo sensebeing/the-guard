@@ -40,15 +40,48 @@ class GuardConfig:
     topology: dict[str, Any] = field(default_factory=dict)
 
 
-def load_config(root: Path | str, *, revision: str | None = None) -> GuardConfig:
+def load_config(
+    root: Path | str, *, revision: str | None = None, allow_historical: bool = False
+) -> GuardConfig:
+    if allow_historical and revision is None:
+        raise ValueError("Historical configuration requires a Git revision")
     root = Path(root)
     path = ".guard/config.json"
     raw = (
-        read_repository_file(root, path, revision=revision)
+        read_repository_file(root, path, revision=revision, require_regular=True)
         if repository_path_exists(root, path, revision)
         else "{}"
     )
-    return validate_config(json.loads(raw))
+    data = json.loads(raw)
+    if allow_historical:
+        _normalize_historical_import_rules(data)
+    return validate_config(data)
+
+
+def _normalize_historical_import_rules(data: Any) -> None:
+    """Decode previously supported import rules at an immutable baseline."""
+    topology = data.get("topology") if isinstance(data, dict) else None
+    if not isinstance(topology, dict):
+        return
+    groups = ("forbidden_imports", "module_boundaries")
+    if not any(key in topology for key in groups):
+        return
+    rules = []
+    for key in groups:
+        entries = topology.pop(key, [])
+        if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+            raise ValueError(f"topology.{key} must be an array of objects")
+        for rule in entries:
+            if "from" in rule:
+                source = rule.pop("from")
+                if not isinstance(source, str):
+                    raise ValueError(f"{key}.from must be a string")
+                rule.setdefault("scope_prefixes", [source])
+            target = rule.pop("to", None)
+            imports = rule.pop("forbidden_imports", [target])
+            rule.setdefault("imports", imports)
+            rules.append(rule)
+    topology["forbidden_imports"] = rules
 
 
 def validate_config(data: dict[str, Any]) -> GuardConfig:

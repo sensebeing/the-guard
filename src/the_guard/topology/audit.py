@@ -276,7 +276,7 @@ def check_contract_drift(
     baseline = None
     if available:
         try:
-            baseline = load_config(root, revision=base)
+            baseline = load_config(root, revision=base, allow_historical=True)
         except ValueError:
             # Missing/invalid historical declarations cannot grandfather new permissions.
             baseline = None

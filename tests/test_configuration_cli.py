@@ -74,6 +74,43 @@ class ConfigurationTests(unittest.TestCase):
                         load_policy(self.root, revision=revision, config=GuardConfig(manifest_file=path))
                     self.assertEqual(str(reader_error.exception), str(policy_error.exception))
 
+    def test_symlinked_configuration_cannot_supply_active_policy(self):
+        self.write("settings/guard.json", '{"main_branch": "unreviewed"}')
+        config = self.root / ".guard/config.json"
+        config.unlink()
+        config.symlink_to("../settings/guard.json")
+        self.commit()
+        for revision in (None, "HEAD"):
+            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "regular file"):
+                load_config(self.root, revision=revision)
+        with self.assertRaisesRegex(ValueError, "regular file"):
+            collect_review_scope(self.root)
+
+    def test_review_reads_legacy_import_rules_only_from_historical_config(self):
+        historical = {
+            "forbidden_imports": [{"from": "src/", "to": "storage"}],
+            "module_boundaries": [{"scope_prefixes": ["tools/"], "forbidden_imports": ["private"],
+                                    "message": "Keep the boundary"}],
+        }
+        canonical = {"forbidden_imports": [
+            {"scope_prefixes": ["src/"], "imports": ["storage"]},
+            {"scope_prefixes": ["tools/"], "imports": ["private"], "message": "Keep the boundary"},
+        ]}
+        self.write(".guard/config.json", json.dumps({"topology": historical}))
+        self.commit()
+        baseline = self.git("rev-parse", "HEAD")
+        for revision in (None, baseline):
+            with self.subTest(revision=revision), self.assertRaises(ValueError):
+                load_config(self.root, revision=revision)
+        self.assertEqual(load_config(self.root, revision=baseline, allow_historical=True).topology, canonical)
+
+        self.write(".guard/config.json", json.dumps({"topology": canonical}))
+        self.write("src/example.py", "value = 1\n")
+        self.commit()
+        scope = collect_review_scope(self.root, main_branch=baseline)
+        self.assertIn(".guard/config.json", scope.reviewable_files)
+        self.assertIn("src/example.py", build_review_prompt(self.root, scope))
+
     def test_edit_guard_external_paths_and_invalid_contract_edits(self):
         with contextlib.redirect_stderr(io.StringIO()) as errors:
             self.assertEqual(

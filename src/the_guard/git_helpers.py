@@ -397,6 +397,7 @@ def read_repository_file(
     rel_path: str,
     *,
     revision: str | None,
+    require_regular: bool = False,
     _seen: frozenset[str] = frozenset(),
     loaded_paths: set[str] | None = None,
     snapshot_modes: dict[str, str] | None = None,
@@ -419,6 +420,8 @@ def read_repository_file(
                     timeout=15,
                 )
                 mode = entry.stdout.split(b" ", 1)[0].decode("ascii")
+            if require_regular and mode not in {"100644", "100755"}:
+                raise ValueError(f"Expected a regular file at revision {revision}: {rel_path}")
             if mode == "120000":
                 link = subprocess.run(
                     ["git", "show", f"{revision}:{rel_path}"],
@@ -465,7 +468,11 @@ def read_repository_file(
 
     try:
         target = repo_root / rel_path
-        if not target.resolve().is_relative_to(repo_root.resolve()):
+        resolved = target.resolve()
+        root = repo_root.resolve()
+        if require_regular and (resolved != root / rel_path or not target.is_file()):
+            raise ValueError(f"Expected a regular file: {rel_path}")
+        if not resolved.is_relative_to(root):
             raise ValueError(f"Path escapes repository: {rel_path}")
     except (ValueError, RuntimeError) as exc:
         raise ValueError(str(exc)) from exc

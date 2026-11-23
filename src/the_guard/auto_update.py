@@ -72,26 +72,30 @@ def _state_dirs_for(
     return base_home / ".config" / "the-guard", base_home / ".guard"
 
 
-def _migrate_auto_update_state(legacy: Path | None, state: Path) -> None:
-    """Migrate metadata while the updater holds the current state lock."""
-    if legacy is None:
-        return
+def _migrate_auto_update_state(legacy: Path | None, state: Path) -> bool:
+    """Migrate with both state locks or defer to a running legacy updater."""
+    if legacy is None or not legacy.is_dir():
+        return True
     previous = legacy / "auto_update.json"
     current = state / previous.name
-    if current.exists():
-        return
-    try:
-        metadata = previous.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return
-    atomic_write_text(current, metadata)
-    for name in (previous.name, "auto_update.log", "auto_update.lock"):
-        (legacy / name).unlink(missing_ok=True)
+    with _try_file_lock(legacy / "auto_update.lock") as legacy_locked:
+        if not legacy_locked:
+            return False
+        if not current.exists():
+            try:
+                metadata = previous.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                pass
+            else:
+                atomic_write_text(current, metadata)
+        for name in (previous.name, "auto_update.log", "auto_update.lock"):
+            (legacy / name).unlink(missing_ok=True)
     try:
         legacy.rmdir()
     except OSError as exc:
         if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
             raise
+    return True
 
 
 def gemini_dir_for(
@@ -313,8 +317,7 @@ def self_update(
     resolved_gemini = gemini_dir_for(home_dir=resolved_home, gemini_dir=gemini_dir, env=env)
     metadata_path = resolved_state / "auto_update.json"
     with _try_file_lock(resolved_state / "auto_update.lock") as locked:
-        if locked:
-            _migrate_auto_update_state(legacy, resolved_state)
+        ready = locked and _migrate_auto_update_state(legacy, resolved_state)
         existing = _read_auto_update_status(resolved_state, legacy) or {}
         report: dict[str, Any] = {
             "last_checked_at": time.time(),
@@ -330,7 +333,7 @@ def self_update(
             "synced_skills": [],
             "error": None,
         }
-        if not locked:
+        if not ready:
             locked_report = {
                 **report,
                 "status": "skipped_locked",
@@ -534,8 +537,7 @@ def maybe_trigger_background_auto_update(
     with _try_file_lock(resolved_state / "auto_update.lock") as locked:
         if not locked:
             return False
-        _migrate_auto_update_state(legacy, resolved_state)
-        metadata = _load_json_dict(metadata_path)
+        metadata = _read_auto_update_status(resolved_state, legacy) or {}
         try:
             cooldown = time.time() - float(metadata.get("last_checked_at") or 0)
         except (TypeError, ValueError):
@@ -550,11 +552,12 @@ def maybe_trigger_background_auto_update(
             "--quiet",
             "--home-dir",
             str(resolved_home),
-            "--state-dir",
-            str(resolved_state),
             "--gemini-dir",
             str(resolved_gemini),
         ]
+        if legacy is None:
+            cmd.extend(["--state-dir", str(resolved_state)])
+        migration_pending = legacy is not None and legacy.is_dir() and not metadata_path.exists()
         try:
             subprocess.Popen(
                 cmd,
@@ -567,9 +570,10 @@ def maybe_trigger_background_auto_update(
             metadata["status"] = "failed"
             metadata["error"] = str(exc)
             metadata["last_failed_at"] = time.time()
-            atomic_write_text(
-                metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
-            )
+            if not migration_pending:
+                atomic_write_text(
+                    metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+                )
             _append_log(
                 resolved_state,
                 "auto_update_spawn_failed",
@@ -578,9 +582,11 @@ def maybe_trigger_background_auto_update(
             )
             return False
         metadata["last_checked_at"] = time.time()
-        atomic_write_text(
-            metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
-        )
+        if not migration_pending:
+            # The child owns the first canonical write while legacy metadata is authoritative.
+            atomic_write_text(
+                metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+            )
         _append_log(resolved_state, "auto_update_spawned", command=cmd)
         return True
 

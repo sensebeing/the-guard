@@ -48,11 +48,34 @@ class AutoUpdateTests(unittest.TestCase):
             self.assertFalse((state / "auto_update.lock").exists())
             auto_update.self_update(checkout_dir=checkout, home_dir=home, state_dir=override, env={})
             self.assertTrue(legacy.exists())
+            with (legacy / "auto_update.lock").open("a+") as old_updater:
+                fcntl.flock(old_updater.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+                self.assertEqual((locked["status"], locked["source_status"]), ("skipped_locked", "skipped_locked"))
+                self.assertEqual((legacy / "auto_update.json").read_text(), metadata)
+                self.assertTrue((legacy / "auto_update.lock").exists())
+                self.assertFalse(state_metadata.exists())
             report = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
             self.assertEqual(report["status"], "skipped_dirty_checkout")
             self.assertEqual(report["installed_sha"], "reviewed")
             self.assertEqual(json.loads(state_metadata.read_text()), report)
             self.assertFalse(legacy.exists())
+            auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+            self.assertFalse(legacy.exists())
+
+    def test_background_scheduler_leaves_legacy_state_for_the_child_updater(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            legacy = home / ".guard"
+            legacy.mkdir()
+            metadata = legacy / "auto_update.json"
+            metadata.write_text('{"installed_sha":"legacy","last_checked_at":1}')
+            env = {"THE_GUARD_BIN": sys.executable, "THE_GUARD_AUTO_UPDATE": "1"}
+            with mock.patch.object(auto_update.subprocess, "Popen") as popen:
+                self.assertTrue(auto_update.maybe_trigger_background_auto_update(home_dir=home, env=env))
+            self.assertNotIn("--state-dir", popen.call_args.args[0])
+            self.assertTrue(metadata.is_file())
+            self.assertFalse((home / ".config/the-guard/auto_update.json").exists())
 
     def test_auto_update_log_rotates_one_backup(self) -> None:
         with tempfile.TemporaryDirectory() as root:

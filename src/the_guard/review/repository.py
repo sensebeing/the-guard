@@ -382,7 +382,7 @@ def collect_review_scope(
     if merge_base != head_sha:
         contract_paths.update(
             resolved_contract_paths(
-                repo_root, load_config(repo_root, revision=merge_base), merge_base
+                repo_root, load_config(repo_root, revision=merge_base, allow_historical=True), merge_base
             )
         )
     raw_diff = _git_text(
@@ -477,7 +477,7 @@ def _collect_branch_delta(
     contract_paths.update(
         resolved_contract_paths(
             repo_root,
-            load_config(repo_root, revision=session.last_head_sha),
+            load_config(repo_root, revision=session.last_head_sha, allow_historical=True),
             session.last_head_sha,
         )
     )

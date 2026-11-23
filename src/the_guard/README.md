@@ -89,6 +89,8 @@ reject unavailable blobs and disable working-tree rename inference for both base
 findings block provider execution and receipt acceptance; the Python review engine remains the
 pure independent-review entry point. Loaded configuration, policy and contract digests pass
 directly to review consumers instead of being reloaded by each helper.
+`config.py` requires a regular configuration file and normalizes legacy import declarations only
+when a consumer explicitly loads a historical baseline.
 The protected-push hook uses Git's local and remote commit IDs, including object-only replayed
 commits. Repository review can carry forward a matching `GO` receipt from a retained session in
 another linked worktree when its contract digest and applicable merge-base and patch checks pass.

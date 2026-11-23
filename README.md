@@ -262,7 +262,9 @@ Initial reviews inspect the full changed file scope before reporting high-confid
 
 ## Configuration
 
-`.guard/config.json` is optional. By default, `guard` reads the policy block in `AGENTS.md`. Add `.guard/config.json` when you want custom paths, review scopes, or declarative topology constraints (see the full multi-service [examples/config.example.json](examples/config.example.json)):
+`.guard/config.json` is optional and must be a regular file when present. By default, `guard`
+reads the policy block in `AGENTS.md`. Configuration supports custom paths, review scopes, and
+declarative topology constraints. See the multi-service [configuration example](examples/config.example.json).
 
 ```json
 {
@@ -326,7 +328,8 @@ To suppress a specific static finding inline, add a comment with at least 8 char
 
 Reviewer behavior can be configured with `THE_GUARD_REVIEW_CONFIG`, `THE_GUARD_REVIEW_PROVIDER`, `THE_GUARD_REVIEW_MODEL`, `THE_GUARD_REVIEW_EFFORT`, `THE_GUARD_REVIEW_STALL_SECONDS`, `THE_GUARD_REVIEW_HEARTBEAT_SECONDS`, `THE_GUARD_REVIEW_MAX_SECONDS`, and `THE_GUARD_REVIEW_LOG_DIR`. Provider discovery persists to `~/.config/the-guard/review-agent.json`.
 The same directory holds updater metadata and logs by default. Legacy updater metadata in
-`~/.guard` migrates during the next update using the default state directory. `THE_GUARD_STATE_DIR` and
+`~/.guard` migrates during the next update using the default state directory after any running
+legacy updater releases its lock. `THE_GUARD_STATE_DIR` and
 `--state-dir` override the updater location. The updater rotates `auto_update.log` at 512 KiB and
 keeps one backup.
 

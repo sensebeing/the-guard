@@ -147,7 +147,7 @@ def _parse_numstat_entries(
     contract_paths = resolved_contract_paths(repo_root, config, head_sha)
     contract_paths.update(
         resolved_contract_paths(
-            repo_root, load_config(repo_root, revision=base_sha), base_sha
+            repo_root, load_config(repo_root, revision=base_sha, allow_historical=True), base_sha
         )
     )
     entries = []
@@ -272,7 +272,7 @@ def _render_bounded_diff_section(
     contract_paths = resolved_contract_paths(repo_root, config, head_sha)
     contract_paths.update(
         resolved_contract_paths(
-            repo_root, load_config(repo_root, revision=base_sha), base_sha
+            repo_root, load_config(repo_root, revision=base_sha, allow_historical=True), base_sha
         )
     )
     chunks = [c for c in re.split(r"(?m)^(?=diff --git )", diff) if c.strip()]
