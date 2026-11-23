@@ -31,6 +31,7 @@ from the_guard.review.prompt import (
 )
 from the_guard.review.provider import (
     _has_provider_credentials,
+    _prune_isolated_codex_homes,
     isolated_codex_home,
     codex_isolation_scope_key,
     _normalize_priority_order,
@@ -1184,6 +1185,55 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(provider_env.get("THE_GUARD_REVIEW_ACTIVE"), "1")
         self.assertEqual(provider_env.get("THE_GUARD_SESSION_MODE"), "readonly")
         self.assertNotIn("CLAUDECODE", provider_env)
+
+    def test_prune_isolated_codex_homes_evicts_only_unlocked_expired_homes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            homes_root = Path(td)
+            now = 1_700_000_000
+            cutoff = now - 24 * 3600
+            keep = homes_root / "current"
+            active = homes_root / "active"
+            stale = homes_root / "stale"
+            recent = homes_root / "recent"
+            for home in (keep, active, stale, recent):
+                home.mkdir()
+
+            with (active / ".review.lock").open("w") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                for home in (keep, active, stale):
+                    os.utime(home, (cutoff - 1, cutoff - 1))
+                os.utime(recent, (cutoff, cutoff))
+
+                with patch("time.time", return_value=now):
+                    _prune_isolated_codex_homes(homes_root, keep.name)
+
+                self.assertFalse(stale.exists())
+                self.assertTrue((active / ".review.lock").is_file())
+                self.assertTrue(keep.is_dir())
+                self.assertTrue(recent.is_dir())
+
+            _prune_isolated_codex_homes(homes_root, keep.name, now=now)
+            self.assertFalse(active.exists())
+
+    def test_prune_isolated_codex_homes_keeps_eleven_recent_homes_plus_current(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            homes_root = Path(td)
+            now = 1_700_000_000
+            keep = homes_root / "current"
+            keep.mkdir()
+            os.utime(keep, (now - 20, now - 20))
+            for index in range(13):
+                home = homes_root / f"home-{index}"
+                home.mkdir()
+                os.utime(home, (now - index, now - index))
+
+            with patch("time.time", return_value=now):
+                _prune_isolated_codex_homes(homes_root, keep.name)
+
+            self.assertEqual(
+                {home.name for home in homes_root.iterdir() if home.is_dir()},
+                {"current", *(f"home-{index}" for index in range(11))},
+            )
 
     def test_prepare_isolated_codex_home_and_codex_subprocess_env(self) -> None:
         with tempfile.TemporaryDirectory() as td:
