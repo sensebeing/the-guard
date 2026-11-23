@@ -162,6 +162,7 @@ class ConfigurationTests(unittest.TestCase):
             [{**retired, "retired": 1}],
             [{**retired, "dependencies": ["active"]}, {"path": "active"}],
             [retired, {"path": "active", "dependencies": ["legacy"]}],
+            [retired, {"path": "legacy/active"}],
         ):
             with self.subTest(modules=modules), self.assertRaisesRegex(ValueError, "[Rr]etired"):
                 validate_config({"topology": {"modules": modules}})

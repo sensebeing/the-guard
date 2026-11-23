@@ -27,7 +27,12 @@ from .contract import (
     ReviewScope,
     SubmoduleChange,
 )
-from .documents import is_architecture_contract, resolved_contract_paths
+from .documents import (
+    changed_task_blueprints,
+    is_architecture_contract,
+    is_configured_blueprint_path,
+    resolved_contract_paths,
+)
 from .session import (
     RECEIPT_SCHEMA,
     UTC,
@@ -140,7 +145,11 @@ def is_reviewable_path(
     if contract_paths and rel_path in contract_paths:
         return True
     settings = cfg.review
-    if rel_path == ".guard/config.json" or is_architecture_contract(rel_path, cfg):
+    if (
+        rel_path == ".guard/config.json"
+        or is_architecture_contract(rel_path, cfg)
+        or is_configured_blueprint_path(rel_path, cfg)
+    ):
         return True
     if any(
         fnmatch.fnmatchcase(rel_path, p)
@@ -378,11 +387,14 @@ def collect_review_scope(
     config = config or load_config(repo_root, revision=head_sha)
     merge_base = _git_text(repo_root, "merge-base", base_ref, head_sha)
 
-    contract_paths = resolved_contract_paths(repo_root, config, head_sha)
+    session = load_review_session(repo_root)
+    retained = session.task_blueprint_anchors.keys() if session else ()
+    contract_paths = resolved_contract_paths(repo_root, config, head_sha, retained_blueprints=retained)
     if merge_base != head_sha:
         contract_paths.update(
             resolved_contract_paths(
-                repo_root, load_config(repo_root, revision=merge_base, allow_historical=True), merge_base
+                repo_root, load_config(repo_root, revision=merge_base, allow_historical=True), merge_base,
+                retained_blueprints=retained,
             )
         )
     raw_diff = _git_text(
@@ -473,12 +485,14 @@ def _collect_branch_delta(
     ):
         return None
 
-    contract_paths = resolved_contract_paths(repo_root, config, scope.head_sha)
+    retained = session.task_blueprint_anchors.keys()
+    contract_paths = resolved_contract_paths(repo_root, config, scope.head_sha, retained_blueprints=retained)
     contract_paths.update(
         resolved_contract_paths(
             repo_root,
             load_config(repo_root, revision=session.last_head_sha, allow_historical=True),
             session.last_head_sha,
+            retained_blueprints=retained,
         )
     )
 
@@ -571,11 +585,12 @@ def _collect_branch_delta(
                 path=sub.path, old_sha=prev_sha, new_sha=sub.new_sha
             )
 
+    changed_blueprints = changed_task_blueprints(repo_root, config, session.last_head_sha, scope.head_sha, retained)
     return IncrementalReviewScope(
         base_head_sha=session.last_head_sha,
         target_head_sha=scope.head_sha,
-        changed_files=tuple(sorted(changed_files)),
-        reviewable_files=tuple(sorted(reviewable_files)),
+        changed_files=tuple(sorted(set(changed_files) | changed_blueprints)),
+        reviewable_files=tuple(sorted(set(reviewable_files) | changed_blueprints)),
         submodule_changes=tuple(sorted(inc_subs.values(), key=lambda item: item.path)),
     )
 
@@ -667,6 +682,10 @@ def resolve_or_carry_forward_receipt(
                 continue
             if delta is None or delta.reviewable_files or delta.submodule_changes:
                 continue
+        elif changed_task_blueprints(
+            repo_root, current_config, session.last_head_sha, scope.head_sha, session.task_blueprint_anchors.keys()
+        ):
+            continue
         return _carry_forward_receipt(repo_root, scope, session, prior_receipt, persist=persist)
     return None
 

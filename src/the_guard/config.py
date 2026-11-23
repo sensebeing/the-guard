@@ -238,7 +238,10 @@ def _validate_sections(data: dict[str, Any]) -> None:
     by_path = {module["path"]: module for module in modules}
     if len(by_path) != len(modules):
         raise ValueError("topology.modules paths must be unique")
+    retired_prefixes = tuple(path + "/" for path, m in by_path.items() if m.get("retired", False))
     for module in modules:
+        if not module.get("retired", False) and module["path"].startswith(retired_prefixes):
+            raise ValueError(f"Active module '{module['path']}' cannot be inside a retired module")
         for dependency in module.get("dependencies", []):
             target = by_path.get(dependency)
             if target is not None and target.get("retired", False):

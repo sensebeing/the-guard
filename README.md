@@ -309,6 +309,8 @@ selects the integration boundary that `guard init` records and the `pre-push` ga
 The default empty array skips discovery. `review.operational_ledgers` lists repository-relative
 files to exclude from discovery and defaults to `["CHANGELOG.md"]`. Previously reviewed
 blueprints retain their revision history after discovery settings change.
+Changes to a configured blueprint require review and changes to a retained blueprint prevent
+carrying an earlier review across an updated baseline.
 
 The policy manifest lives between `<!-- the-guard-policy:start -->` and `<!-- the-guard-policy:end -->` in `AGENTS.md`:
 
@@ -351,7 +353,8 @@ blueprints in `topology.architecture_docs` using safe repository-relative paths.
 Use `retired: true` to reserve a module path for deletion. Retired modules may omit `layer`,
 `languages`, `boundary_docs`, and `role`. They cannot declare dependencies or receive declared
 dependencies or inbound imports. Checks block additions and modifications under the retired path.
-Retiring a module also checks unchanged callers throughout the repository.
+Retiring a module also checks unchanged callers throughout the repository. Active module
+declarations cannot use paths within a retired module.
 Set `enforce_module_dependencies: true` to reject undeclared internal imports. Declared
 edges must also obey the layer ceiling at config load; editing dependencies cannot legalize
 an upward import. Python AST and JS/TS literal imports (including relative paths, multiline

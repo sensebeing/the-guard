@@ -54,9 +54,39 @@ def is_architecture_contract(path: str, config: GuardConfig) -> bool:
     return path in contract_document_paths(config)
 
 
-def resolved_contract_paths(root: Path, config: GuardConfig, revision: str) -> set[str]:
+def _blueprint_filters(config: GuardConfig) -> tuple[tuple[str, ...], frozenset[str]]:
+    return (
+        tuple(config.review.get("blueprint_globs", ())),
+        frozenset(config.review.get("operational_ledgers", ["CHANGELOG.md"])),
+    )
+
+
+def _matches_blueprint(path: str, patterns: tuple[str, ...], ledgers: frozenset[str]) -> bool:
+    return path.endswith(".md") and path not in ledgers and any(
+        fnmatchcase(path, pattern) for pattern in patterns
+    )
+
+
+def is_configured_blueprint_path(path: str, config: GuardConfig) -> bool:
+    return _matches_blueprint(path, *_blueprint_filters(config))
+
+
+def _configured_blueprint_paths(root: Path, config: GuardConfig, revision: str) -> set[str]:
+    patterns, ledgers = _blueprint_filters(config)
+    if not patterns:
+        return set()
+    entries = git_stdout(root, ["git", "ls-tree", "-r", "--name-only", "-z", revision])
+    if entries is None:
+        raise ValueError(f"Cannot inventory configured task blueprints at {revision}")
+    return {path for path in entries.split("\0") if _matches_blueprint(path, patterns, ledgers)}
+
+
+def resolved_contract_paths(
+    root: Path, config: GuardConfig, revision: str, *, retained_blueprints: Iterable[str] = ()
+) -> set[str]:
     """Declared/implicit contracts plus safe snapshot symlink targets, including absent paths."""
-    paths = contract_document_paths(config)
+    paths = contract_document_paths(config) | _configured_blueprint_paths(root, config, revision)
+    paths.update(retained_blueprints)
     modes: dict[str, str] = {}
     existing_document_paths(root, paths, revision, snapshot_modes=modes)
     for path, mode in modes.items():
@@ -65,6 +95,23 @@ def resolved_contract_paths(root: Path, config: GuardConfig, revision: str) -> s
                 root, path, revision, loaded_paths=paths, snapshot_modes=modes
             )
     return paths
+
+
+def changed_task_blueprints(
+    root: Path, config: GuardConfig, previous: str, target: str, retained_paths: Collection[str]
+) -> set[str]:
+    """Compare resolved bodies even when branch diffs omit upstream blueprint changes."""
+    paths = _configured_blueprint_paths(root, config, previous) | _configured_blueprint_paths(root, config, target)
+    paths.update(retained_paths)
+    before: dict[str, str] = {}
+    after: dict[str, str] = {}
+    existing_document_paths(root, paths, previous, snapshot_modes=before)
+    existing_document_paths(root, paths, target, snapshot_modes=after)
+    return {
+        path for path in paths
+        if read_document(root, path, previous, snapshot_modes=before)
+        != read_document(root, path, target, snapshot_modes=after)
+    }
 
 
 @dataclass(frozen=True)
@@ -142,17 +189,14 @@ def resolve_task_design_blueprints(
 ) -> TaskBlueprintSelection:
     """Resolve changed Markdown and direct references against binding Git snapshots."""
     config = config or GuardConfig()
-    blueprint_globs = tuple(config.review.get("blueprint_globs", ()))
+    blueprint_globs, operational_ledgers = _blueprint_filters(config)
     anchors = normalize_task_blueprint_anchors(retained_anchors)
     if not blueprint_globs and not anchors:
         return TaskBlueprintSelection()
-    operational_ledgers = frozenset(config.review.get("operational_ledgers", ["CHANGELOG.md"]))
 
     @cache
     def matches_blueprint(path: str) -> bool:
-        return path.endswith(".md") and path not in operational_ledgers and any(
-            fnmatchcase(path, pattern) for pattern in blueprint_globs
-        )
+        return _matches_blueprint(path, blueprint_globs, operational_ledgers)
 
     recorded_revisions = dict.fromkeys(rev for revisions in anchors.values() for rev in revisions)
     verified_revisions = {}
@@ -197,6 +241,10 @@ def resolve_task_design_blueprints(
             raise ValueError(f"Cannot inspect task blueprint changes at {base_sha}...{revision}")
         historical_changes.extend(changed.split("\0"))
     head_changes = dict.fromkeys(changed_files)
+    if blueprint_globs:
+        head_changes.update(dict.fromkeys(sorted(changed_task_blueprints(
+            repo_root, config, base_sha, head_sha, (),
+        ))))
     markdown_changes = dict.fromkeys(
         path for path in (*head_changes, *historical_changes)
         if blueprint_globs and path.endswith(".md") and path not in excluded

@@ -918,8 +918,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             _git(repo, "commit", "-m", "Change the blueprint target")
 
             scope = collect_review_scope(repo)
-            self.assertEqual(scope.reviewable_files, ("app.py",))
-            prompt = build_review_prompt(repo, scope, reviewer_note="Verify docs/task-plan.md")
+            self.assertEqual(scope.reviewable_files, ("app.py", "docs/plan-source.txt"))
+            prompt = build_review_prompt(repo, scope)
             self.assertIn(
                 f"## Baseline task blueprint (immutable Anchor 0 @ {base[:12]}): "
                 "docs/task-plan.md\nRetire the outbox.",

@@ -118,6 +118,60 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(carried["head_sha"], replay)
             self.assertEqual(load_review_session(review_tree).last_patch_digest, scope.patch_digest)
 
+    def test_advanced_baseline_cannot_carry_receipt_across_changed_blueprint(self) -> None:
+        plan = "docs/plan.md"
+        for retain_only in (False, True):
+            with self.subTest(retain_only=retain_only), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td), review={"blueprint_globs": [plan]})
+                _git(repo, "switch", "main")
+                (repo / plan).write_text("Keep one persistence owner.\n")
+                _git(repo, "add", plan)
+                _git(repo, "commit", "-m", "Set binding plan")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", "app.py")
+                _git(repo, "commit", "-m", "Implement reviewed patch")
+
+                def reviewer(_):
+                    return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+                reviewed = run_architecture_review(repo, reviewer_fn=reviewer, reviewer_note=f"See {plan}")
+                if retain_only:
+                    (repo / ".guard/config.json").write_text("{}\n")
+                    _git(repo, "commit", "-am", "Disable new blueprint discovery")
+                    reviewed = run_architecture_review(repo, reviewer_fn=reviewer)
+                self.assertIn(plan, load_review_session(repo).task_blueprint_anchors)
+
+                _git(repo, "switch", "main")
+                (repo / plan).write_text("Permit a second persistence owner.\n")
+                _git(repo, "commit", "-am", "Change upstream blueprint")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                scope = collect_review_scope(repo)
+                self.assertEqual(scope.patch_digest, reviewed.patch_digest)
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+                prompts = []
+
+                def record_review(prompt):
+                    prompts.append(prompt)
+                    return reviewer(prompt)
+
+                run_architecture_review(repo, reviewer_fn=record_review)
+                self.assertIn("Keep one persistence owner", prompts[0])
+                self.assertIn("Permit a second persistence owner", prompts[0])
+
+    def test_configured_blueprint_change_is_reviewable_on_its_own(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td), review={"blueprint_globs": ["docs/plan.md"]})
+            (repo / "docs/plan.md").write_text("Binding plan.\n")
+            (repo / "docs/notes.md").write_text("Unrelated notes.\n")
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "Record plan and notes")
+            self.assertEqual(collect_review_scope(repo).reviewable_files, ("docs/plan.md",))
+
 
     def test_save_review_session_prunes_deleted_worktree_records_below_cap(self) -> None:
         with tempfile.TemporaryDirectory() as td:
