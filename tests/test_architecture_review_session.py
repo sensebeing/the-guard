@@ -150,6 +150,51 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertIn("docs/plan.md", prompt)
             self.assertIn("docs/plan-source.txt", prompt)
 
+    def test_object_only_push_checks_retained_blueprint_from_another_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = "docs/plan.md"
+            repo, _ = self._init_repo(root, review={"blueprint_globs": [plan]})
+            _git(repo, "switch", "main")
+            (repo / "obsolete.py").write_text("enabled = False\n")
+            _git(repo, "add", "obsolete.py")
+            _git(repo, "commit", "-m", "Record obsolete owner")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            donor = root / "donor"
+            _git(repo, "worktree", "add", "-b", "review", str(donor), "main")
+            (donor / plan).write_text("Keep exactly one owner.\n")
+            _git(donor, "add", plan)
+            _git(donor, "rm", "obsolete.py")
+            _git(donor, "commit", "-m", "Review binding plan")
+
+            def reviewer(_):
+                return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+            reviewed = run_architecture_review(donor, reviewer_fn=reviewer)
+            (donor / ".guard/config.json").write_text("{}\n")
+            _git(donor, "commit", "-am", "Disable new blueprint discovery")
+            base = run_architecture_review(donor, reviewer_fn=reviewer).head_sha
+            self.assertEqual(load_review_session(donor).task_blueprint_anchors[plan], (reviewed.head_sha,))
+            self.assertIsNone(load_review_session(repo))
+
+            _git(donor, "rm", plan)
+            tree = _git(donor, "write-tree")
+            base_tree = _git(repo, "rev-parse", f"{base}^{{tree}}")
+            replayed_base = _git(repo, "commit-tree", base_tree, "-p", "main", "-m", "Replay the baseline")
+            for remote in (base, replayed_base):
+                with self.subTest(remote=remote):
+                    target = _git(repo, "commit-tree", tree, "-p", remote, "-m", "Remove retained blueprint")
+                    scope = collect_review_scope(repo, main_branch=remote, head_ref=target)
+                    self.assertEqual(scope.reviewable_files, (plan,))
+                    prompt = build_review_prompt(repo, scope)
+                    self.assertIn("Keep exactly one owner", prompt)
+                    self.assertIn("[deleted", prompt.lower())
+                    update = f"{target} {target} refs/heads/main {remote}\n"
+                    with redirect_stderr(StringIO()) as stderr:
+                        self.assertEqual(main_push_gate(repo, update), 2)
+                    self.assertIn("missing review receipt", stderr.getvalue())
+            self.assertIsNone(load_review_session(repo))
+
     def test_advanced_baseline_cannot_carry_receipt_across_changed_blueprint(self) -> None:
         plan = "docs/plan.md"
         for retain_only in (False, True):

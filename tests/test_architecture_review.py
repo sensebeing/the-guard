@@ -359,19 +359,16 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                         repo, scope, session, incremental_scope, reviewer_note=note,
                     ),
                 )
-                plan_sections = (
-                    f"## Task design & architecture blueprint: {plan}\n{plan_body}",
+                plan_section = (
                     f"## Prior reviewed branch blueprint (@ {session.initial_head_sha[:12]}): "
-                    f"{plan}\n{plan_body}",
+                    f"{plan}\n{plan_body}"
                 )
                 anchor_section = (
                     f"## Baseline task blueprint (immutable Anchor 0 @ {scope.merge_base[:12]}): "
                     f"{anchor}\n"
                     "Committed Anchor-0 audit"
                 )
-                for mode, prompt, plan_section in zip(
-                    ("full", "incremental"), prompts, plan_sections
-                ):
+                for mode, prompt in zip(("full", "incremental"), prompts):
                     with self.subTest(mode=mode):
                         self.assertIn(plan_section, prompt)
                         self.assertIn(anchor_section, prompt)

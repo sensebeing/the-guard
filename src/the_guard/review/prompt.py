@@ -33,6 +33,7 @@ from .documents import (
     boundary_document_paths,
     contract_document_paths,
     existing_document_paths,
+    merge_task_blueprint_anchors,
     normalize_task_blueprint_anchors,
     read_document,
     resolve_task_design_blueprints,
@@ -551,7 +552,9 @@ def _snapshot_context(
                     sections.append(
                         f"## Boundary reference: {path}\n" + _bounded_document(body)
                     )
-    anchors = normalize_task_blueprint_anchors(task_blueprint_anchors)
+    anchors = merge_task_blueprint_anchors(
+        normalize_task_blueprint_anchors(task_blueprint_anchors), scope.task_blueprint_anchors,
+    )
     selection = resolve_task_design_blueprints(
         repo_root,
         scope.changed_files,

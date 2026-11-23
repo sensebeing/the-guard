@@ -87,6 +87,11 @@ def resolved_contract_paths(
     """Declared/implicit contracts plus safe snapshot symlink targets, including absent paths."""
     paths = contract_document_paths(config) | _configured_blueprint_paths(root, config, revision)
     paths.update(retained_blueprints)
+    return resolved_document_paths(root, revision, paths)
+
+
+def resolved_document_paths(root: Path, revision: str, paths: Iterable[str]) -> set[str]:
+    paths = set(paths)
     modes: dict[str, str] = {}
     existing_document_paths(root, paths, revision, snapshot_modes=modes)
     for path, mode in modes.items():
@@ -156,6 +161,14 @@ def normalize_task_blueprint_anchors(value: object) -> dict[str, tuple[str, ...]
         ):
             anchors[path] = tuple(dict.fromkeys(revisions))
     return anchors
+
+
+def merge_task_blueprint_anchors(*histories: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+    merged: dict[str, tuple[str, ...]] = {}
+    for history in histories:
+        for path, revisions in history.items():
+            merged[path] = tuple(dict.fromkeys((*merged.get(path, ()), *revisions)))
+    return merged
 
 
 def _task_design_references(body: str, source: str) -> Iterable[tuple[str, ...]]:

@@ -65,7 +65,8 @@ The prompt indexes revision lists for paths outside the inline preview. Anchor h
 survive provider restarts, verified rebases, and changes to discovery settings.
 `review.operational_ledgers` excludes explicit repository-relative paths from discovery and
 defaults to `["CHANGELOG.md"]`. The receipt gate compares configured and retained blueprint
-bodies across snapshots before reusing a review. Changes
+bodies across snapshots before reusing a review. Scope, exemptions and prompts share applicable
+retained history across linked worktrees, including when new discovery is disabled. Changes
 limited to non-contract reports or plans remain review-exempt.
 
 Full and incremental prompts direct reviewers to inspect the complete touched subsystem at the

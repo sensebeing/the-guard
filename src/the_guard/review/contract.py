@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +106,7 @@ class ReviewScope:
     reviewable_files: tuple[str, ...]
     submodule_changes: tuple[SubmoduleChange, ...]
     patch_digest: str
+    task_blueprint_anchors: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def is_exempt(self) -> bool:

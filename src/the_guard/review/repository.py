@@ -31,7 +31,9 @@ from .documents import (
     changed_task_blueprints,
     is_architecture_contract,
     is_configured_blueprint_path,
+    merge_task_blueprint_anchors,
     resolved_contract_paths,
+    resolved_document_paths,
 )
 from .session import (
     RECEIPT_SCHEMA,
@@ -107,6 +109,15 @@ def load_review_session(
 
 def save_review_session(repo_root: Path, state: ReviewSessionState) -> Path:
     return _save_session_record(git_common_dir(repo_root), state)
+
+
+def _ordered_review_sessions(repo_root: Path) -> list[ReviewSessionState]:
+    current = load_review_session(repo_root)
+    retained = list_review_sessions(git_common_dir(repo_root))
+    if current is None:
+        return retained
+    current_key = (current.worktree_path, current.branch)
+    return [current, *(s for s in retained if (s.worktree_path, s.branch) != current_key)]
 
 
 def review_logs_dir(repo_root: Path, env: dict[str, str] | None = None) -> Path:
@@ -331,7 +342,7 @@ def _tree_entry_matches(
     repo_root: Path, commit_sha: str, path: str, expected_mode: str, expected_sha: str
 ) -> bool:
     """Return True only when `path` in `commit_sha` has the exact `expected_mode` and `expected_sha`."""
-    if not expected_sha or expected_sha == "0" * 40:
+    if not expected_sha:
         return False
     proc = _git(
         repo_root,
@@ -344,6 +355,8 @@ def _tree_entry_matches(
     if proc.returncode != 0:
         return False
     line = proc.stdout.decode("utf-8", errors="replace").strip()
+    if expected_mode == "000000":
+        return not line
     if not line:
         return False
     meta, _, _ = line.partition("\t")
@@ -387,18 +400,15 @@ def collect_review_scope(
     config = config or load_config(repo_root, revision=head_sha)
     merge_base = _git_text(repo_root, "merge-base", base_ref, head_sha)
 
-    session = load_review_session(repo_root)
-    retained = session.task_blueprint_anchors.keys() if session else ()
-    contract_paths = resolved_contract_paths(repo_root, config, head_sha, retained_blueprints=retained)
+    contract_paths = resolved_contract_paths(repo_root, config, head_sha)
     if merge_base != head_sha:
         contract_paths.update(
             resolved_contract_paths(
                 repo_root, load_config(repo_root, revision=merge_base, allow_historical=True), merge_base,
-                retained_blueprints=retained,
             )
         )
     raw_diff = _git_text(
-        repo_root, "diff", "--raw", "--no-renames", f"{merge_base}..{head_sha}"
+        repo_root, "diff", "--raw", "--no-renames", "--no-abbrev", f"{merge_base}..{head_sha}"
     )
     changed_files, reviewable_files, submodules = _parse_raw_diff_lines(
         raw_diff, config, contract_paths=contract_paths
@@ -442,7 +452,7 @@ def collect_review_scope(
     for entry in sub_digests:
         hasher.update(f"sub:{entry}\n".encode("utf-8"))
 
-    return ReviewScope(
+    scope = ReviewScope(
         base_ref=base_ref,
         merge_base=merge_base,
         head_sha=head_sha,
@@ -451,6 +461,49 @@ def collect_review_scope(
         submodule_changes=tuple(sorted(submodules, key=lambda item: item.path)),
         patch_digest=hasher.hexdigest(),
     )
+    return _include_retained_blueprints(repo_root, scope, config)
+
+
+def _include_retained_blueprints(repo_root: Path, scope: ReviewScope, config: GuardConfig) -> ReviewScope:
+    sessions = [s for s in _ordered_review_sessions(repo_root) if s.task_blueprint_anchors]
+    if not sessions:
+        return scope
+    checked_out = _git_text(repo_root, "rev-parse", "--verify", "HEAD", check=False) == scope.head_sha
+    owner_key = (str(repo_root.resolve()), current_branch_name(repo_root)) if checked_out else None
+    anchors = merge_task_blueprint_anchors(*(
+        s.task_blueprint_anchors for s in sessions
+        if _blueprint_history_applies(repo_root, scope, config, s, owner_key)
+    ))
+    if not anchors:
+        return scope
+    paths = resolved_document_paths(repo_root, scope.head_sha, anchors)
+    paths.update(resolved_document_paths(repo_root, scope.merge_base, anchors))
+    return replace(
+        scope,
+        task_blueprint_anchors=anchors,
+        reviewable_files=tuple(sorted(set(scope.reviewable_files) | paths.intersection(scope.changed_files))),
+    )
+
+
+def _blueprint_history_applies(
+    repo_root: Path, scope: ReviewScope, config: GuardConfig, session: ReviewSessionState,
+    owner_key: tuple[str, str] | None,
+) -> bool:
+    if _is_ancestor(repo_root, session.last_head_sha, scope.head_sha):
+        return True
+    if (session.worktree_path, session.branch) == owner_key:
+        return review_anchor_session(repo_root, scope, session, config=config) is not None
+    if not _is_ancestor(repo_root, session.merge_base, scope.merge_base):
+        return False
+    if session.last_patch_digest == scope.patch_digest:
+        return True
+    delta = _collect_branch_delta(repo_root, scope, session, config=config)
+    if delta is None or delta.submodule_changes:
+        return False
+    # Replayed code can keep the same reviewed subject while changing its blueprint.
+    paths = resolved_document_paths(repo_root, session.last_head_sha, session.task_blueprint_anchors)
+    paths.update(resolved_document_paths(repo_root, scope.head_sha, session.task_blueprint_anchors))
+    return set(delta.reviewable_files).union(delta.changed_blueprints) <= paths
 
 
 def _collect_branch_delta(
@@ -485,7 +538,7 @@ def _collect_branch_delta(
     ):
         return None
 
-    retained = session.task_blueprint_anchors.keys()
+    retained = session.task_blueprint_anchors.keys() | scope.task_blueprint_anchors.keys()
     contract_paths = resolved_contract_paths(repo_root, config, scope.head_sha, retained_blueprints=retained)
     contract_paths.update(
         resolved_contract_paths(
@@ -506,6 +559,7 @@ def _collect_branch_delta(
             "diff",
             "--raw",
             "--no-renames",
+            "--no-abbrev",
             f"{session.last_head_sha}..{scope.head_sha}",
             check=False,
         )
@@ -526,6 +580,7 @@ def _collect_branch_delta(
             "diff",
             "--raw",
             "--no-renames",
+            "--no-abbrev",
             f"{session.merge_base}..{session.last_head_sha}",
             check=False,
         )
@@ -534,6 +589,7 @@ def _collect_branch_delta(
             "diff",
             "--raw",
             "--no-renames",
+            "--no-abbrev",
             f"{scope.merge_base}..{scope.head_sha}",
             check=False,
         )
@@ -649,13 +705,7 @@ def resolve_or_carry_forward_receipt(
         and existing.get("merge_base") == scope.merge_base
     ):
         return existing
-    current_session = load_review_session(repo_root)
-    retained = list_review_sessions(git_common_dir(repo_root))
-    if current_session is not None:
-        current_key = (current_session.worktree_path, current_session.branch)
-        retained = [s for s in retained if (s.worktree_path, s.branch) != current_key]
-        retained.insert(0, current_session)
-    sessions = [s for s in retained if s.last_verdict == "GO"]
+    sessions = [s for s in _ordered_review_sessions(repo_root) if s.last_verdict == "GO"]
     if not sessions:
         return None
     current_config = config or load_config(repo_root, revision=scope.head_sha)
@@ -684,7 +734,8 @@ def resolve_or_carry_forward_receipt(
             if delta is None or delta.has_changes:
                 continue
         elif changed_task_blueprints(
-            repo_root, current_config, session.last_head_sha, scope.head_sha, session.task_blueprint_anchors.keys()
+            repo_root, current_config, session.last_head_sha, scope.head_sha,
+            session.task_blueprint_anchors.keys() | scope.task_blueprint_anchors.keys(),
         ):
             continue
         return _carry_forward_receipt(repo_root, scope, session, prior_receipt, persist=persist)
@@ -743,6 +794,9 @@ def _carry_forward_receipt(
                 last_submodule_shas={
                     sub.path: sub.new_sha for sub in scope.submodule_changes
                 },
+                task_blueprint_anchors=merge_task_blueprint_anchors(
+                    session.task_blueprint_anchors, scope.task_blueprint_anchors,
+                ),
                 updated_at=datetime.now(UTC).isoformat(),
             ),
         )
