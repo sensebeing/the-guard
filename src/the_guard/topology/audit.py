@@ -55,8 +55,9 @@ def audit_topology(
         if m["path"] not in modules
     )
     missing = _missing_docs(root, config)
+    retired = sorted(p for p, module in modules.items() if module.get("retired", False))
     missing_modules = sorted(
-        p for p in modules if not repository_path(root, p).exists()
+        p for p in modules if p not in retired and not repository_path(root, p).exists()
     )
     findings = [
         asdict(f)
@@ -67,6 +68,7 @@ def audit_topology(
     ) or config.topology.get("layers")
     return {
         "unregistered_modules": unregistered,
+        "retired_modules": retired,
         "missing_boundary_docs": missing,
         "missing_modules": missing_modules,
         "stale_dependencies": stale,
@@ -138,6 +140,7 @@ def _missing_docs(
     declarations.extend(
         (m["path"], m.get("boundary_docs", []))
         for m in config.topology.get("modules", [])
+        if not m.get("retired", False)
     )
     existing = None
     if revision is not None:
@@ -209,6 +212,8 @@ def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set
     if (
         set(modules) != set(old_modules)
         or config.module_doc_roots != baseline.module_doc_roots
+        or any(m.get("retired", False) and not old_modules[p].get("retired", False)
+               for p, m in modules.items())
     ):
         # Owner additions/removals change longest-prefix and alias resolution globally.
         return set(modules)
@@ -279,6 +284,7 @@ def check_contract_drift(
         old_declared_docs.update(
             (module["path"], doc)
             for module in baseline.topology.get("modules", [])
+            if not module.get("retired", False)
             for doc in module.get("boundary_docs", [])
         )
     rule_id = config.rule_id_prefix + "single-source-of-truth"
@@ -304,7 +310,7 @@ def check_contract_drift(
         if revision is not None
         else {p for p in modules if repository_path(root, p).exists()}
     )
-    missing_modules = set(modules) - existing
+    missing_modules = {p for p, m in modules.items() if not m.get("retired", False)} - existing
     base_existing = _snapshot_paths(root, base, missing_modules) if available else set()
     for path in sorted(missing_modules):
         if available and (
@@ -335,7 +341,7 @@ def check_contract_drift(
         )
     ):
         for path in sorted(set(modules) - set(old_modules)):
-            if not str(modules[path].get("role") or "").strip():
+            if not modules[path].get("retired", False) and not modules[path].get("role"):
                 findings.append(
                     Finding(
                         config.rule_id_prefix + "service-boundaries",
@@ -347,6 +353,7 @@ def check_contract_drift(
     if not (
         config.topology.get("enforce_module_dependencies")
         or config.topology.get("layers")
+        or any(m.get("retired", False) for m in modules.values())
     ):
         return findings
     tightened = _tightened_modules(config, baseline)

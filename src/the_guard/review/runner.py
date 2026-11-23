@@ -25,7 +25,8 @@ from .contract import (
     ReviewTimeoutError,
     build_agy_readonly_settings,
     CODEX_DISABLED_FEATURES,
-    BlockingFinding,
+    ReviewOutput,
+    validate_review_output,
 )
 from .provider import isolated_codex_home
 from .repository import current_branch_name, git_common_dir
@@ -39,7 +40,7 @@ def _extract_verdict_json(raw_output: str) -> dict[str, Any]:
 
     def _try_candidate(obj: Any) -> dict[str, Any] | None:
         if isinstance(obj, dict):
-            if "verdict" in obj and "summary" in obj and "blocking_findings" in obj:
+            if "verdict" in obj:
                 return obj
             for key in (
                 "structured_output",
@@ -608,26 +609,6 @@ def _is_persistent_provider_failure(exc: Exception) -> bool:
     return any(marker in msg for marker in persistent_markers)
 
 
-def _verify_reviewed_head_sha(
-    verdict_payload: dict[str, Any], expected_head_sha: str
-) -> None:
-    reported = verdict_payload.get("reviewed_head_sha")
-    if not isinstance(reported, str) or not reported.strip():
-        raise RuntimeError(
-            "reviewer output requires a non-empty reviewed_head_sha string"
-        )
-    reported = reported.strip().lower()
-    expected = expected_head_sha.lower()
-    if (
-        not 7 <= len(reported) <= len(expected)
-        or re.fullmatch(r"[0-9a-f]+", reported) is None
-        or not expected.startswith(reported)
-    ):
-        raise RuntimeError(
-            f"reviewer audited mismatched HEAD snapshot (expected={expected_head_sha[:12]}, reported={reported[:12]})"
-        )
-
-
 def _build_provider_env(env: dict[str, str]) -> dict[str, str]:
     child_env = {
         **env,
@@ -652,7 +633,7 @@ def _invoke_provider(
     reviewer_note: str = "",
     model: str = "",
     effort: str = "",
-) -> tuple[dict[str, Any], str, str]:
+) -> tuple[ReviewOutput, str, str]:
     schema_str = json.dumps(REVIEW_OUTPUT_SCHEMA, separators=(",", ":"))
     child_env = _build_provider_env(env)
 
@@ -696,8 +677,9 @@ def _invoke_provider(
             )
             if rc != 0:
                 raise RuntimeError(f"{provider} exited {rc}: {(err or out)[:300]}")
-            verdict_payload = _extract_verdict_json(out)
-            _verify_reviewed_head_sha(verdict_payload, scope.head_sha)
+            verdict_payload = validate_review_output(
+                _extract_verdict_json(out), expected_head_sha=scope.head_sha, allow_implicit_origin=True
+            )
             observed_session_id = _extract_session_id_from_stream(out)
             _verify_session_continuation(
                 provider, resume_session_id, observed_session_id
@@ -705,9 +687,9 @@ def _invoke_provider(
             log_path = run_logger.finish(
                 status="completed",
                 session_id=observed_session_id,
-                verdict=str(verdict_payload.get("verdict") or ""),
-                summary=str(verdict_payload.get("summary") or ""),
-                blocking_findings=_parse_findings(verdict_payload),
+                verdict=verdict_payload.verdict,
+                summary=verdict_payload.summary,
+                blocking_findings=verdict_payload.blocking_findings,
             )
             return verdict_payload, observed_session_id, str(log_path)
         except Exception as exc:
@@ -751,8 +733,9 @@ def _invoke_provider(
                     raw = out_file.read_text(encoding="utf-8") if out_file.is_file() else out
                 finally:
                     out_file.unlink(missing_ok=True)
-                verdict_payload = _extract_verdict_json(raw)
-                _verify_reviewed_head_sha(verdict_payload, scope.head_sha)
+                verdict_payload = validate_review_output(
+                    _extract_verdict_json(raw), expected_head_sha=scope.head_sha, allow_implicit_origin=True
+                )
                 observed_session_id = _extract_session_id_from_stream(out)
                 _verify_session_continuation(
                     provider, resume_session_id, observed_session_id
@@ -760,9 +743,9 @@ def _invoke_provider(
                 log_path = run_logger.finish(
                     status="completed",
                     session_id=observed_session_id,
-                    verdict=str(verdict_payload.get("verdict") or ""),
-                    summary=str(verdict_payload.get("summary") or ""),
-                    blocking_findings=_parse_findings(verdict_payload),
+                    verdict=verdict_payload.verdict,
+                    summary=verdict_payload.summary,
+                    blocking_findings=verdict_payload.blocking_findings,
                 )
                 return verdict_payload, observed_session_id, str(log_path)
         except Exception as exc:
@@ -770,37 +753,3 @@ def _invoke_provider(
             raise
 
     raise ValueError(f"Unsupported provider: {provider}")
-
-
-def _parse_findings(payload: dict[str, Any]) -> tuple[BlockingFinding, ...]:
-    raw = payload.get("blocking_findings")
-    if not isinstance(raw, list):
-        raise ValueError("Reviewer blocking_findings must be an array")
-    findings = []
-    for item in raw:
-        if not isinstance(item, dict):
-            raise ValueError("Every blocking finding must be an object")
-        for key in ("rule_id", "file", "issue", "required_fix"):
-            if not isinstance(item.get(key), str) or not item[key].strip():
-                raise ValueError(f"Blocking finding requires nonempty {key}")
-        line = item.get("line")
-        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
-            raise ValueError("Blocking finding line must be a positive integer")
-        origin = item.get("finding_origin", "initial_full_scope")
-        if origin not in {
-            "initial_full_scope",
-            "prior_unresolved",
-            "introduced_by_delta",
-        }:
-            raise ValueError("Invalid finding_origin")
-        findings.append(
-            BlockingFinding(
-                rule_id=item["rule_id"],
-                file=item["file"],
-                line=line,
-                issue=item["issue"],
-                required_fix=item["required_fix"],
-                finding_origin=origin,
-            )
-        )
-    return tuple(findings)

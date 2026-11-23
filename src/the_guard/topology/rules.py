@@ -10,15 +10,6 @@ FOR_UPDATE_SQL_RE = re.compile(
     re.IGNORECASE,
 )
 
-READ_ACTION_SUFFIXES = (
-    ":history",
-    ":batch-get",
-    ":detail",
-    ":context",
-    ":list",
-    ":search",
-)
-
 READ_FUNCTION_PREFIXES = (
     "get_",
     "read_",

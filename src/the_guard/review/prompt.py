@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..config import GuardConfig, iter_forbidden_import_rules, load_config
+from ..config import GuardConfig, load_config
 from ..policy import Policy, load_policy
 from ..topology.imports import owner_module
 from .contract import (
@@ -552,6 +552,7 @@ def _snapshot_context(
         scope.changed_files,
         base_sha=scope.merge_base,
         head_sha=scope.head_sha,
+        config=config,
         initial_reviewed_sha=initial_reviewed_sha,
         prior_reviewed_sha=prior_reviewed_sha,
         retained_anchors=anchors,
@@ -627,8 +628,6 @@ def _has_explicit_topology_contract(
         ):
             return False
         path_values = []
-        if isinstance(rule.get("from"), str):
-            path_values.append(rule["from"])
         if key != "exclusive_sql_owners":
             path_values.extend(
                 owner for owner in rule.get("owners", []) if isinstance(owner, str)
@@ -650,12 +649,8 @@ def _has_explicit_topology_contract(
                 return False
         return True
 
-    if any(
-        applies(rule, "forbidden_imports")
-        for rule in iter_forbidden_import_rules(topology)
-    ):
-        return True
     for key in (
+        "forbidden_imports",
         "exclusive_sql_owners",
         "retired_tables",
         "forbidden_patterns",
@@ -668,7 +663,8 @@ def _has_explicit_topology_contract(
     return any(
         module.get("path") == module_path
         and (
-            module.get("dependencies")
+            module.get("retired", False)
+            or module.get("dependencies")
             or topology.get("enforce_module_dependencies") is True
             or bool(topology.get("layers") and module.get("layer"))
             or bool(module.get("role"))

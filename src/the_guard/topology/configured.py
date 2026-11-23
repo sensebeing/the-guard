@@ -10,7 +10,7 @@ import re
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from ..config import GuardConfig, iter_forbidden_import_rules
+from ..config import GuardConfig
 from ..finding import Finding
 from .discovery import candidate_module_for_path
 from .imports import extract_imports, owner_module, resolve_target_module
@@ -59,12 +59,23 @@ def check_configured(
     config: GuardConfig,
     *,
     check_unregistered: bool = True,
+    check_retired_edits: bool = True,
 ) -> list[Finding]:
     findings = []
     topology = config.topology
     prefix = config.rule_id_prefix
     spans = sql_spans(text, path)
     lines = text.splitlines()
+
+    if check_retired_edits:
+        retired_module = owner_module(path, [
+            m["path"] for m in topology.get("modules", []) if m.get("retired", False)
+        ])
+        if retired_module is not None:
+            findings.append(Finding(
+                prefix + "service-boundaries", path, 1,
+                f"Retired module '{retired_module}' is delete-only.",
+            ))
 
     for rule in topology.get("exclusive_sql_owners", []):
         if path in rule["owners"]:
@@ -148,23 +159,20 @@ def check_configured(
                     )
                 )
     imports = extract_imports(path, text, config.module_doc_roots)
-    if not is_excluded_topology_path(path):
-        findings.extend(
-            _check_module_imports(
-                path,
-                imports,
-                lines,
-                changed_lines,
-                config,
-                check_unregistered=check_unregistered,
-            )
+    findings.extend(
+        _check_module_imports(
+            path,
+            imports,
+            lines,
+            changed_lines,
+            config,
+            check_unregistered=check_unregistered,
         )
-    for rule in iter_forbidden_import_rules(topology):
-        if not in_scope(path, rule.get("scope_prefixes", [rule.get("from", "")])):
+    )
+    for rule in topology.get("forbidden_imports", []):
+        if not in_scope(path, rule.get("scope_prefixes", [""])):
             continue
-        forbidden = rule.get(
-            "imports", rule.get("forbidden_imports", [rule.get("to", "")])
-        )
+        forbidden = rule["imports"]
         rule_id = rule.get("rule_id", prefix + "service-boundaries")
         reported_lines = set()
         for start, end, name in imports:
@@ -208,8 +216,6 @@ def check_module_imports(
     baseline_config: GuardConfig | None = None,
 ) -> list[Finding]:
     """Check module permissions without rechecking unrelated configured rules."""
-    if is_excluded_topology_path(path):
-        return []
     return _check_module_imports(
         path,
         extract_imports(path, text, config.module_doc_roots),
@@ -236,7 +242,9 @@ def _check_module_imports(
     paths = list(modules)
     source_path = owner_module(path, paths)
     rule_id = config.rule_id_prefix + "service-boundaries"
-    if source_path is None:
+    excluded = is_excluded_topology_path(path)
+    findings = []
+    if source_path is None and not excluded:
         candidate = candidate_module_for_path(path, config.module_doc_roots)
         if (
             check_unregistered
@@ -249,7 +257,7 @@ def _check_module_imports(
                 lines[0] if lines else "", rule_id, exempt_tag=config.exempt_tag
             )
         ):
-            return [
+            findings.append(
                 Finding(
                     rule_id,
                     path,
@@ -257,9 +265,10 @@ def _check_module_imports(
                     f"Production source belongs to unregistered module '{candidate}'; "
                     "declare its module entry in .guard/config.json.",
                 )
-            ]
-        return []
-    source = modules[source_path]
+            )
+    source = modules.get(source_path)
+    if (source is None or excluded) and not any(m.get("retired", False) for m in modules.values()):
+        return findings
     old_modules = (
         {m["path"]: m for m in baseline_config.topology.get("modules", [])}
         if baseline_config is not None
@@ -283,13 +292,25 @@ def _check_module_imports(
         if baseline_config is not None
         else set()
     )
-    findings = []
     for start, end, spec in imports:
         target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)
-        number = _import_finding_line(start, end, lines, changed_lines, rule_id, config)
-        if target_path is None or number is None:
+        if target_path is None:
             continue
         target = modules[target_path]
+        if target.get("retired", False):
+            if (
+                owner_module(path, [target_path]) is None
+                and not old_modules.get(target_path, {}).get("retired", False)
+            ):
+                findings.append(Finding(
+                    rule_id, path, start, f"Import of retired module '{target_path}' is forbidden.",
+                ))
+            continue
+        if source is None or excluded:
+            continue
+        number = _import_finding_line(start, end, lines, changed_lines, rule_id, config)
+        if number is None:
+            continue
         violation = _module_import_violation(source, target, topology)
         if violation is None:
             continue

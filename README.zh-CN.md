@@ -266,8 +266,13 @@ guard review check-push
   "manifest_file": "AGENTS.md",
   "detail_dir": "docs/standards/rules",
   "main_branch": "main",
+  "review": {
+    "blueprint_globs": ["docs/design/*.md"],
+    "operational_ledgers": ["CHANGELOG.md"]
+  },
   "topology": {
-    "forbidden_imports": [{"from": "src/ui/", "to": "internal.storage"}],
+    "modules": [{"path": "src/legacy_jobs", "retired": true}],
+    "forbidden_imports": [{"scope_prefixes": ["src/ui/"], "imports": ["internal.storage"]}],
     "exclusive_sql_owners": [
       {
         "table": "jobs",
@@ -311,6 +316,9 @@ rules:
 `# guard-exempt guard.architecture-simplicity: concrete reason here`
 
 审查参数可通过环境变量 `THE_GUARD_REVIEW_CONFIG`、`THE_GUARD_REVIEW_PROVIDER`、`THE_GUARD_REVIEW_MODEL`、`THE_GUARD_REVIEW_EFFORT`、`THE_GUARD_REVIEW_STALL_SECONDS`、`THE_GUARD_REVIEW_HEARTBEAT_SECONDS`、`THE_GUARD_REVIEW_MAX_SECONDS` 与 `THE_GUARD_REVIEW_LOG_DIR` 覆盖，提供者探测结果默认保存在 `~/.config/the-guard/review-agent.json`。
+自动更新的状态和日志也默认保存在 `~/.config/the-guard`。首次使用默认目录时会迁移旧状态。更新日志达到 512 KiB 时轮转，并保留一份备份。
+
+`review.blueprint_globs` 默认为空，可通过仓库相对路径模式启用任务蓝图发现。`review.operational_ledgers` 指定排除的文件，默认为 `["CHANGELOG.md"]`。标为 `retired: true` 的模块路径只允许删除文件，并禁止声明依赖与外部导入。
 
 ## 拓扑检查与命令参考
 
@@ -356,7 +364,7 @@ Python AST 与 JS/TS 字面量导入共用模块解析，覆盖相对路径、�
 | --- | --- |
 | Python AST 检查 | 读函数或只读端点中误加写锁；同一执行路径无中间写入的重复 `await` 读取；循环或推导式内的单实体 N+1 异步读取。 |
 | Swift 词法检查 | 同一函数作用域内的重复 `await` 读取。 |
-| 声明式拓扑约束 | 层级方向、模块声明依赖、`forbidden_imports`（或 `module_boundaries`）、`exclusive_sql_owners`、`retired_tables` 与 `forbidden_patterns`。 |
+| 声明式拓扑约束 | 层级方向、模块声明依赖、`forbidden_imports`、`exclusive_sql_owners`、`retired_tables` 与 `forbidden_patterns`。 |
 | 历史技术债棘轮 | 结合变更行号与基线函数签名比对，未触及的历史违规不误报；触及 `retired_tables` 的文件必须实现引用数净减少。 |
 
 ### 命令与退出码

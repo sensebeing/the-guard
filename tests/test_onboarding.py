@@ -56,6 +56,10 @@ class OnboardingTests(unittest.TestCase):
             "lib/api.py",
             'def get_item():\n    return "SELECT * FROM items FOR UPDATE"\n',
         )
+        self.assertEqual(run_topology_guard(self.root, ["lib/api.py"]), [])
+        with self.assertRaises(PolicyError):
+            load_policy(self.root)
+        initialize(self.root)
         findings = run_topology_guard(
             self.root, ["lib/api.py"], config=load_config(self.root)
         )
@@ -64,6 +68,7 @@ class OnboardingTests(unittest.TestCase):
         )
 
     def test_duplicate_reads_and_n_plus_one(self):
+        initialize(self.root, preset="full")
         self.write(
             "src/api.py",
             "async def handler(ids):\n    a = await db.get_item(1)\n    b = await db.get_item(1)\n    return [await db.get_item(key) for key in ids]\n",

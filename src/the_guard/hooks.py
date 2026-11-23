@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .config import load_config
-from .git_helpers import changed_files, resolve_changed_file
+from .git_helpers import changed_files, git_ok, resolve_changed_file
 from .policy import PolicyError, load_policy
 from .review.repository import collect_review_scope, resolve_or_carry_forward_receipt
 from .topology import check_contract_drift, run_topology_guard
@@ -52,13 +52,6 @@ def install_hooks(root: Path | str) -> Path:
 def main_push_gate(root: Path | str, input_text: str) -> int:
     root = Path(root).resolve()
     config = load_config(root, revision="HEAD")
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
     for line in input_text.splitlines():
         fields = line.split()
         if len(fields) != 4:
@@ -78,14 +71,16 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
             return 2
         if set(local_sha) == {"0"}:
             continue
-        if local_sha != head:
-            raise ValueError(
-                "Review the actual pushed commit as HEAD before pushing the protected branch"
-            )
         if set(remote_sha) == {"0"}:
             raise ValueError(
                 "Protected branch creation needs an explicit reviewed baseline; initialize the remote before enabling this hook"
             )
+        if not git_ok(root, ["git", "cat-file", "-e", f"{remote_sha}^{{commit}}"]):
+            print(
+                "NO-GO: remote target commit is not fetched locally; run git fetch and retry.",
+                file=sys.stderr,
+            )
+            return 2
         try:
             snapshot_config = load_config(root, revision=local_sha)
             snapshot_policy = load_policy(
@@ -118,7 +113,7 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
             )
         if findings:
             return 2
-        scope = collect_review_scope(root, main_branch=remote_sha)
+        scope = collect_review_scope(root, main_branch=remote_sha, head_ref=local_sha)
         if (
             not scope.is_exempt
             and resolve_or_carry_forward_receipt(

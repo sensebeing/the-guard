@@ -6,6 +6,8 @@ Contract: incremental sessions bind reviewed scope and patch IDs; invalid contin
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -34,6 +36,7 @@ from the_guard.review.repository import (
     compute_review_contract_digest,
 )
 from the_guard.config import load_config
+from the_guard.hooks import main_push_gate
 from the_guard.policy import load_policy
 from architecture_review_support import (
     ArchitectureReviewTestCase,
@@ -46,6 +49,76 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
+    def test_object_only_push_carries_review_from_linked_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo, _ = self._init_repo(root)
+            review_tree = root / "review"
+            _git(repo, "worktree", "add", "-b", "review", str(review_tree), "main")
+            (review_tree / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+            _git(review_tree, "add", "service.py")
+            _git(review_tree, "commit", "-m", "Reviewed change")
+            reviewed = run_architecture_review(review_tree, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "Reviewed change", "blocking_findings": [],
+            })
+            base = _git(repo, "rev-parse", "HEAD")
+            tree = _git(repo, "rev-parse", f"{reviewed.head_sha}^{{tree}}")
+            replay = _git(repo, "commit-tree", tree, "-p", base, "-m", "Replay reviewed change")
+            update = f"{replay} {replay} refs/heads/main {base}\n"
+            self.assertEqual(main_push_gate(repo, update), 0)
+            self.assertEqual(_git(repo, "rev-parse", "HEAD"), base)
+            self.assertEqual(load_review_session(review_tree).last_head_sha, reviewed.head_sha)
+            self.assertIsNone(load_review_session(repo))
+            scope = collect_review_scope(repo, main_branch=base, head_ref=replay)
+            self.assertEqual(resolve_or_carry_forward_receipt(repo, scope)["head_sha"], replay)
+            self.assertEqual(load_review_session(review_tree).last_head_sha, replay)
+            self.assertIsNone(load_review_session(repo))
+
+            (review_tree / "service.py").write_text("VALUE = 2\n", encoding="utf-8")
+            _git(review_tree, "commit", "-am", "Unreviewed change")
+            tree = _git(review_tree, "rev-parse", "HEAD^{tree}")
+            unreviewed = _git(repo, "commit-tree", tree, "-p", base, "-m", "Replay unreviewed change")
+            with redirect_stderr(StringIO()) as stderr:
+                self.assertEqual(main_push_gate(repo, update.replace(replay, unreviewed)), 2)
+            self.assertIn("missing review receipt", stderr.getvalue())
+            with redirect_stderr(StringIO()) as stderr:
+                self.assertEqual(main_push_gate(repo, update.replace(base, "a" * 40)), 2)
+            self.assertEqual(stderr.getvalue(), "NO-GO: remote target commit is not fetched locally; run git fetch and retry.\n")
+
+    def test_object_only_push_can_reuse_review_across_an_advanced_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo, _ = self._init_repo(root)
+            review_tree = root / "review"
+            _git(repo, "worktree", "add", "-b", "review", str(review_tree), "main")
+            (review_tree / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+            _git(review_tree, "add", "service.py")
+            _git(review_tree, "commit", "-m", "Reviewed change")
+            reviewed = run_architecture_review(review_tree, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "Reviewed change", "blocking_findings": [],
+            })
+
+            (repo / "other.py").write_text("UPSTREAM = True\n", encoding="utf-8")
+            _git(repo, "add", "other.py")
+            _git(repo, "commit", "-m", "Advance remote baseline")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(review_tree, "rebase", base)
+            (review_tree / "notes.md").write_text("Non-reviewable notes\n", encoding="utf-8")
+            _git(review_tree, "add", "notes.md")
+            _git(review_tree, "commit", "-m", "Document the replay")
+            tree = _git(review_tree, "rev-parse", "HEAD^{tree}")
+            replay = _git(repo, "commit-tree", tree, "-p", base, "-m", "Replay on advanced base")
+            scope = collect_review_scope(repo, main_branch=base, head_ref=replay)
+            self.assertNotEqual(scope.patch_digest, reviewed.patch_digest)
+            self.assertNotEqual(scope.merge_base, reviewed.merge_base)
+            self.assertEqual(main_push_gate(repo, f"{replay} {replay} refs/heads/main {base}\n"), 0)
+            self.assertIsNone(load_valid_receipt(repo, scope.patch_digest))
+            carried = resolve_or_carry_forward_receipt(repo, scope)
+            self.assertEqual(carried["merge_base"], base)
+            self.assertEqual(carried["head_sha"], replay)
+            self.assertEqual(load_review_session(review_tree).last_patch_digest, scope.patch_digest)
+
+
     def test_save_review_session_prunes_deleted_worktree_records_below_cap(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

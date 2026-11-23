@@ -23,6 +23,34 @@ from the_guard.review import cli as review_cli
 
 
 class AutoUpdateTests(unittest.TestCase):
+    def test_default_state_migrates_and_rotates_one_log_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root).resolve()
+            legacy = home / ".guard"
+            legacy.mkdir()
+            metadata = '{"installed_sha":"reviewed"}\n'
+            (legacy / "auto_update.json").write_text(metadata, encoding="utf-8")
+            for name in ("auto_update.log", "auto_update.lock"):
+                (legacy / name).touch()
+            override = home / "elsewhere"
+            self.assertEqual(auto_update.state_dir_for(home, override, {}), override)
+            self.assertEqual(auto_update.state_dir_for(home, env={"THE_GUARD_STATE_DIR": str(override)}), override)
+            self.assertTrue(legacy.exists())
+            state = auto_update.state_dir_for(home, env={})
+            self.assertEqual(state, home / ".config/the-guard")
+            self.assertEqual((state / "auto_update.json").read_text(), metadata)
+            self.assertFalse(legacy.exists())
+
+            log = state / "auto_update.log"
+            backup = state / "auto_update.log.1"
+            log.write_bytes(b"x" * (512 * 1024))
+            backup.write_text("old backup", encoding="utf-8")
+            auto_update._append_log(state, "new record")
+            self.assertEqual(json.loads(log.read_text())["event"], "new record")
+            self.assertEqual(backup.read_bytes(), b"x" * (512 * 1024))
+            self.assertEqual(sorted(p.name for p in state.glob("auto_update.log*")),
+                             ["auto_update.log", "auto_update.log.1"])
+
     @staticmethod
     def _commit_checkout(checkout: Path, message: str) -> str:
         subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
@@ -49,8 +77,8 @@ class AutoUpdateTests(unittest.TestCase):
         )
         subprocess.run(["git", "init", "-b", "main", str(checkout)], check=True, capture_output=True)
         sha = self._commit_checkout(checkout, "guard checkout")
-        state = home / ".guard"
-        state.mkdir()
+        state = home / ".config/the-guard"
+        state.mkdir(parents=True)
         return home, package, state / "auto_update.json", sha
 
     @staticmethod

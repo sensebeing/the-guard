@@ -14,7 +14,7 @@ from the_guard import __version__
 from benchmarks import guardbench
 from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
 from the_guard.cli import main, changed_files
-from the_guard.config import GuardConfig, load_config
+from the_guard.config import GuardConfig, load_config, validate_config
 from the_guard.git_helpers import read_repository_file
 from the_guard.hooks import edit_guard, install_hooks, main_push_gate
 from the_guard.init import initialize
@@ -28,7 +28,7 @@ from the_guard.review.repository import (
     load_valid_receipt,
 )
 from the_guard.review.session import RECEIPT_SCHEMA
-from the_guard.review.runner import _parse_findings
+from the_guard.review.contract import validate_review_output
 from the_guard.topology import run_topology_guard
 
 
@@ -110,6 +110,24 @@ class ConfigurationTests(unittest.TestCase):
                     load_config(self.root)
         self.write(".guard/config.json", json.dumps({"topology": {"architecture_docs": ["docs/a.md"]}}))
         self.assertEqual(load_config(self.root).topology["architecture_docs"], ["docs/a.md"])
+
+    def test_review_paths_and_retired_modules_validate_at_load(self):
+        for name in ("operational_ledgers", "blueprint_globs"):
+            for value in ("a.md", [""], ["/a.md"], ["C:\\a.md"], ["docs/../a.md"], [1]):
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    validate_config({"review": {name: value}})
+        review = {"operational_ledgers": ["docs/log.md"], "blueprint_globs": ["docs/**/*.md"]}
+        retired = {"path": "legacy", "retired": True}
+        config = validate_config({"review": review, "topology": {"modules": [retired]}})
+        self.assertEqual(config.review, review)
+        self.assertEqual(config.topology["modules"], [retired])
+        for modules in (
+            [{**retired, "retired": 1}],
+            [{**retired, "dependencies": ["active"]}, {"path": "active"}],
+            [retired, {"path": "active", "dependencies": ["legacy"]}],
+        ):
+            with self.subTest(modules=modules), self.assertRaisesRegex(ValueError, "[Rr]etired"):
+                validate_config({"topology": {"modules": modules}})
 
     def test_check_and_edit_guard_reject_new_unregistered_source(self):
         self.write(".guard/config.json", json.dumps({"topology": {"enforce_module_dependencies": True}}))
@@ -345,11 +363,12 @@ class ConfigurationTests(unittest.TestCase):
         for findings in (None, {}, [None], [{}], "not a list"):
             with self.subTest(findings=findings):
                 with self.assertRaises(ValueError):
-                    _parse_findings(
+                    validate_review_output(
                         {
                             "verdict": "GO",
                             "summary": "clean",
                             "blocking_findings": findings,
+                            "reviewed_head_sha": "a" * 40,
                         }
                     )
 
@@ -398,8 +417,7 @@ class ConfigurationTests(unittest.TestCase):
             },
         )
         self.assertEqual(main_push_gate(self.root, update), 0)
-        with self.assertRaises(ValueError):
-            main_push_gate(self.root, update.replace(head, self.base, 1))
+        self.assertEqual(main_push_gate(self.root, update.replace(head, self.base, 1)), 0)
         hook = install_hooks(self.root)
         hook.write_text("# existing custom hook\n")
         with self.assertRaises(ValueError):
@@ -421,7 +439,7 @@ class ConfigurationTests(unittest.TestCase):
                 {
                     "topology": {
                         "forbidden_imports": [
-                            {"from": "src/ui/", "to": "internal.storage"}
+                            {"scope_prefixes": ["src/ui/"], "imports": ["internal.storage"]}
                         ]
                     }
                 }
@@ -433,7 +451,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_cli_init_distill_sync_and_checks(self):
         self.write(
             "src/api.py",
-            "async def handler():\n    await api.get_item(1)\n    await api.get_item(1)\n",
+            'def get_item():\n    return "SELECT * FROM items FOR UPDATE"\n',
         )
         for argv, code in [
             (["check", "--policy-only"], 0),

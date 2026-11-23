@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -32,8 +33,9 @@ from .session import (
     UTC,
     ReviewResult,
     ReviewSessionState,
+    compute_review_contract_digest,
+    list_review_sessions,
 )
-from .session import compute_review_contract_digest
 from .session import (
     load_review_session as _load_session_record,
 )
@@ -107,6 +109,10 @@ def review_logs_dir(repo_root: Path, env: dict[str, str] | None = None) -> Path:
 
 
 def resolve_base_ref(repo_root: Path, main_branch: str = "main") -> str:
+    if len(main_branch) in (40, 64) and all(c in "0123456789abcdef" for c in main_branch):
+        if git_ok(repo_root, ["git", "cat-file", "-e", f"{main_branch}^{{commit}}"]):
+            return main_branch
+        raise RuntimeError(f"Cannot resolve base commit '{main_branch}'")
     for ref in (
         f"refs/remotes/origin/{main_branch}",
         f"refs/heads/{main_branch}",
@@ -194,9 +200,7 @@ def _classify_file_tier(
     if name_low.startswith("test_") or name_low.endswith(TEST_FILE_SUFFIXES):
         return 2
     as_posix = posix.as_posix()
-    if not as_posix.startswith(policy_prefixes) and (
-        posix.suffix.lower() in CONFIG_I18N_EXTENSIONS or name_low.endswith("-map.md")
-    ):
+    if not as_posix.startswith(policy_prefixes) and posix.suffix.lower() in CONFIG_I18N_EXTENSIONS:
         return 1
     return 0
 
@@ -361,10 +365,12 @@ def _is_unchanged_rebuttal_round(
     )
 
 
-def collect_review_scope(repo_root: Path, main_branch: str = "main") -> ReviewScope:
+def collect_review_scope(
+    repo_root: Path, main_branch: str = "main", *, head_ref: str = "HEAD"
+) -> ReviewScope:
     base_ref = resolve_base_ref(repo_root, main_branch)
-    config = load_config(repo_root, revision="HEAD")
-    head_sha = _git_text(repo_root, "rev-parse", "HEAD")
+    head_sha = _git_text(repo_root, "rev-parse", "--verify", "--end-of-options", f"{head_ref}^{{commit}}")
+    config = load_config(repo_root, revision=head_sha)
     merge_base = _git_text(repo_root, "merge-base", base_ref, head_sha)
 
     contract_paths = resolved_contract_paths(repo_root, config, head_sha)
@@ -621,13 +627,14 @@ def resolve_or_carry_forward_receipt(
         and existing.get("merge_base") == scope.merge_base
     ):
         return existing
-    session = load_review_session(repo_root)
-    if (
-        session is None
-        or session.last_verdict != "GO"
-        or not session.last_patch_digest
-        or not session.last_head_sha
-    ):
+    current_session = load_review_session(repo_root)
+    retained = list_review_sessions(git_common_dir(repo_root))
+    if current_session is not None:
+        current_key = (current_session.worktree_path, current_session.branch)
+        retained = [s for s in retained if (s.worktree_path, s.branch) != current_key]
+        retained.insert(0, current_session)
+    sessions = [s for s in retained if s.last_verdict == "GO"]
+    if not sessions:
         return None
     current_config = config or load_config(repo_root, revision=scope.head_sha)
     current_policy = policy or load_policy(
@@ -636,27 +643,36 @@ def resolve_or_carry_forward_receipt(
     current_contract_digest = contract_digest or compute_review_contract_digest(
         current_policy, current_config, repo_root=repo_root, revision=scope.head_sha
     )
-    if not (
-        bool(session.contract_digest)
-        and session.contract_digest == current_contract_digest
-    ):
-        return None
-    if existing is not None and session.last_patch_digest == scope.patch_digest:
-        return existing
-    prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
-    if prior_receipt is None:
-        return None
-    if session.merge_base == scope.merge_base or not _is_ancestor(
-        repo_root, session.merge_base, scope.merge_base
-    ):
-        return None
-    try:
-        delta = _collect_branch_delta(repo_root, scope, session, config=current_config)
-    except RuntimeError:
-        return None
-    if delta is None or delta.reviewable_files or delta.submodule_changes:
-        return None
+    for session in sessions:
+        if not session.contract_digest or session.contract_digest != current_contract_digest:
+            continue
+        prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
+        if prior_receipt is None:
+            continue
+        same_base = session.merge_base == scope.merge_base
+        if not same_base and not _is_ancestor(repo_root, session.merge_base, scope.merge_base):
+            continue
+        if existing is None or session.last_patch_digest != scope.patch_digest:
+            if same_base:
+                continue
+            try:
+                delta = _collect_branch_delta(repo_root, scope, session, config=current_config)
+            except RuntimeError:
+                continue
+            if delta is None or delta.reviewable_files or delta.submodule_changes:
+                continue
+        return _carry_forward_receipt(repo_root, scope, session, prior_receipt, persist=persist)
+    return None
 
+
+def _carry_forward_receipt(
+    repo_root: Path,
+    scope: ReviewScope,
+    session: ReviewSessionState,
+    prior_receipt: dict[str, Any],
+    *,
+    persist: bool,
+) -> dict[str, Any] | None:
     carried = ReviewResult(
         verdict="GO",
         summary=str(prior_receipt.get("summary") or session.last_summary),
@@ -685,9 +701,8 @@ def resolve_or_carry_forward_receipt(
     save_receipt(repo_root, carried)
     save_review_session(
         repo_root,
-        ReviewSessionState(
-            worktree_path=session.worktree_path,
-            branch=session.branch,
+        replace(
+            session,
             merge_base=scope.merge_base,
             provider=carried.provider,
             session_id=carried.session_id,
@@ -699,11 +714,7 @@ def resolve_or_carry_forward_receipt(
             last_submodule_shas={
                 sub.path: sub.new_sha for sub in scope.submodule_changes
             },
-            contract_digest=current_contract_digest,
-            round_count=session.round_count,
             updated_at=datetime.now(UTC).isoformat(),
-            initial_head_sha=session.initial_head_sha,
-            task_blueprint_anchors=session.task_blueprint_anchors,
         ),
     )
     return load_valid_receipt(repo_root, scope.patch_digest)

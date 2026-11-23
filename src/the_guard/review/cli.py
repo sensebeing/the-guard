@@ -108,8 +108,12 @@ def _run_review(args: argparse.Namespace, root: Path) -> int:
                     "blocking_findings": [],
                     "reviewed_head_sha": scope.head_sha,
                 }
-            data = validate_review_output(data)
-            receipt = publish_github_pr_review(args.pr, verdict=data["verdict"], summary=data["summary"], findings=data.get("blocking_findings", ()), commit_id=data.get("reviewed_head_sha"), dry_run=args.dry_run)
+            output = validate_review_output(data)
+            receipt = publish_github_pr_review(
+                args.pr, verdict=output.verdict, summary=output.summary,
+                findings=output.blocking_findings, commit_id=output.reviewed_head_sha,
+                dry_run=args.dry_run,
+            )
             if args.json:
                 print(json.dumps(receipt, indent=2))
             else:

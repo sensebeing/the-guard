@@ -95,19 +95,19 @@
     ],
     "forbidden_imports": [
       {
-        "from": "services/billing/",
-        "to": "orders.storage",
+        "scope_prefixes": ["services/billing/"],
+        "imports": ["orders.storage"],
         "rule_id": "guard.service-boundaries",
         "message": "Use the public orders API; storage belongs to the orders service."
       },
       {
-        "from": "services/orders/",
-        "to": "billing.storage",
+        "scope_prefixes": ["services/orders/"],
+        "imports": ["billing.storage"],
         "rule_id": "guard.service-boundaries",
         "message": "Use the public billing API; storage belongs to the billing service."
       },
       {
-        "from": "packages/contracts/",
+        "scope_prefixes": ["packages/contracts/"],
         "imports": [
           "orders",
           "billing"

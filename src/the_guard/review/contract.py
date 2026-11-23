@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,14 @@ class BlockingFinding:
     issue: str
     required_fix: str
     finding_origin: str = "initial_full_scope"
+
+
+@dataclass(frozen=True)
+class ReviewOutput:
+    verdict: str
+    summary: str
+    blocking_findings: tuple[BlockingFinding, ...]
+    reviewed_head_sha: str
 
 
 @dataclass(frozen=True)
@@ -244,30 +253,61 @@ REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
-def validate_review_output(data: object) -> dict[str, Any]:
+def validate_review_output(
+    data: object,
+    *,
+    expected_head_sha: str | None = None,
+    allow_implicit_origin: bool = False,
+) -> ReviewOutput:
     """Validate the canonical JSON payload accepted by review consumers."""
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or not {"verdict", "summary"} <= data.keys():
         raise ValueError("Input JSON must contain verdict and summary")
-    required_root = {"verdict", "summary", "blocking_findings", "reviewed_head_sha"}
-    if set(data) != required_root:
-        if "verdict" not in data or "summary" not in data:
-            raise ValueError("Input JSON must contain verdict and summary")
-        raise ValueError("Input JSON does not match the review output contract")
-    if data["verdict"] not in ("GO", "NO-GO") or not isinstance(data["summary"], str):
-        raise ValueError("Input JSON does not match the review output contract")
-    if not isinstance(data["reviewed_head_sha"], str) or not data["reviewed_head_sha"]:
+    reviewed_head_sha = verify_reviewed_head_sha(data.get("reviewed_head_sha"), expected_head_sha)
+    properties = REVIEW_OUTPUT_SCHEMA["properties"]
+    if (
+        set(data) != set(REVIEW_OUTPUT_SCHEMA["required"])
+        or data["verdict"] not in properties["verdict"]["enum"]
+        or not isinstance(data["summary"], str)
+    ):
         raise ValueError("Input JSON does not match the review output contract")
     findings = data["blocking_findings"]
     if not isinstance(findings, list):
-        raise ValueError("Input JSON does not match the review output contract")
-    allowed_origins = {"initial_full_scope", "prior_unresolved", "introduced_by_delta"}
-    finding_keys = {"rule_id", "file", "line", "issue", "required_fix", "finding_origin"}
+        raise ValueError("Reviewer blocking_findings must be an array")
+    finding_schema = properties["blocking_findings"]["items"]
+    required_keys = set(finding_schema["required"])
+    allowed_origins = finding_schema["properties"]["finding_origin"]["enum"]
+    parsed_findings = []
     for finding in findings:
-        if not isinstance(finding, dict) or set(finding) != finding_keys:
+        if not isinstance(finding, dict):
+            raise ValueError("Every blocking finding must be an object")
+        if allow_implicit_origin and "finding_origin" not in finding:
+            finding = {**finding, "finding_origin": BlockingFinding.finding_origin}
+        if set(finding) != required_keys:
             raise ValueError("Input JSON does not match the review output contract")
-        if not all(isinstance(finding[key], str) for key in ("rule_id", "file", "issue", "required_fix")):
-            raise ValueError("Input JSON does not match the review output contract")
-        origin = finding["finding_origin"]
-        if not isinstance(finding["line"], int) or isinstance(finding["line"], bool) or not isinstance(origin, str) or origin not in allowed_origins:
-            raise ValueError("Input JSON does not match the review output contract")
-    return data
+        for key in ("rule_id", "file", "issue", "required_fix"):
+            if not isinstance(finding[key], str) or not finding[key].strip():
+                raise ValueError(f"Blocking finding requires nonempty {key}")
+        line = finding["line"]
+        if type(line) is not int or line < 1:
+            raise ValueError("Blocking finding line must be a positive integer")
+        if finding["finding_origin"] not in allowed_origins:
+            raise ValueError("Invalid finding_origin")
+        parsed_findings.append(BlockingFinding(**finding))
+    verdict = "NO-GO" if parsed_findings else data["verdict"]
+    return ReviewOutput(verdict, data["summary"], tuple(parsed_findings), reviewed_head_sha)
+
+
+def verify_reviewed_head_sha(reported: object, expected: str | None) -> str:
+    if not isinstance(reported, str) or not reported.strip():
+        error = RuntimeError if expected is not None else ValueError
+        raise error("reviewer output requires a non-empty reviewed_head_sha string")
+    normalized = reported.strip().lower()
+    if expected is not None and (
+        not 7 <= len(normalized) <= len(expected)
+        or re.fullmatch(r"[0-9a-f]+", normalized) is None
+        or not expected.lower().startswith(normalized)
+    ):
+        raise RuntimeError(
+            f"reviewer audited mismatched HEAD snapshot (expected={expected[:12]}, reported={normalized[:12]})"
+        )
+    return normalized

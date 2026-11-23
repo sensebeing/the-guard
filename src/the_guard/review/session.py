@@ -187,27 +187,66 @@ def load_review_session(
     common_dir: Path, worktree_path: Path, branch: str
 ) -> ReviewSessionState | None:
     key = worktree_session_key(worktree_path, branch)
-    path = common_dir / "the-guard-sessions" / f"{key}.json"
+    return _read_review_session(common_dir / "the-guard-sessions" / f"{key}.json")
+
+
+def list_review_sessions(common_dir: Path) -> list[ReviewSessionState]:
+    """Return retained session records, most recently updated first."""
+    sessions = (
+        _read_review_session(path)
+        for path in (common_dir / "the-guard-sessions").glob("*.json")
+    )
+    return sorted(
+        (state for state in sessions if state is not None),
+        key=lambda state: (state.updated_at, state.worktree_path, state.branch),
+        reverse=True,
+    )
+
+
+def _read_review_session(path: Path) -> ReviewSessionState | None:
     if not path.is_file():
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     if not isinstance(raw, dict) or raw.get("schema") != SESSION_SCHEMA:
         return None
-    findings = tuple(
-        BlockingFinding(
-            rule_id=str(item.get("rule_id") or "guard.architecture-simplicity"),
-            file=str(item.get("file") or "<unknown>"),
-            line=int(item.get("line") or 1),
-            issue=str(item.get("issue") or ""),
-            required_fix=str(item.get("required_fix") or ""),
-            finding_origin=str(item.get("finding_origin") or "initial_full_scope"),
+    worktree_path, branch = raw.get("worktree_path"), raw.get("branch")
+    if (
+        not isinstance(worktree_path, str) or not worktree_path
+        or not isinstance(branch, str) or not branch
+        or raw.get("last_verdict") not in ("GO", "NO-GO")
+        or not all(isinstance(raw.get(key), str) and raw[key]
+                   for key in ("merge_base", "last_head_sha", "last_patch_digest"))
+    ):
+        return None
+    raw_findings = raw.get("last_blocking_findings") or []
+    if not isinstance(raw_findings, list):
+        return None
+    try:
+        if path.stem != worktree_session_key(Path(worktree_path), branch):
+            return None
+        round_count = int(raw.get("round_count") or 1)
+        updated_at = ""
+        if raw.get("updated_at"):
+            timestamp = datetime.fromisoformat(raw["updated_at"])
+            updated_at = (timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
+        findings = tuple(
+            BlockingFinding(
+                rule_id=str(item.get("rule_id") or "guard.architecture-simplicity"),
+                file=str(item.get("file") or "<unknown>"),
+                line=int(item.get("line") or 1),
+                issue=str(item.get("issue") or ""),
+                required_fix=str(item.get("required_fix") or ""),
+                finding_origin=str(item.get("finding_origin") or "initial_full_scope"),
+            )
+            for item in raw_findings
+            if isinstance(item, dict)
         )
-        for item in (raw.get("last_blocking_findings") or [])
-        if isinstance(item, dict)
-    )
+    except (OSError, RuntimeError, TypeError, ValueError, OverflowError):
+        return None
+
     def string_map(key: str) -> dict[str, str]:
         value = raw.get(key)
         if not isinstance(value, dict):
@@ -215,8 +254,8 @@ def load_review_session(
         return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
 
     return ReviewSessionState(
-        worktree_path=str(raw.get("worktree_path") or ""),
-        branch=str(raw.get("branch") or ""),
+        worktree_path=worktree_path,
+        branch=branch,
         merge_base=str(raw.get("merge_base") or ""),
         provider=str(raw.get("provider") or ""),
         session_id=str(raw.get("session_id") or ""),
@@ -227,8 +266,8 @@ def load_review_session(
         last_blocking_findings=findings,
         last_submodule_shas=string_map("last_submodule_shas"),
         contract_digest=str(raw.get("contract_digest") or ""),
-        round_count=int(raw.get("round_count") or 1),
-        updated_at=str(raw.get("updated_at") or ""),
+        round_count=round_count,
+        updated_at=updated_at,
         initial_head_sha=str(raw.get("initial_head_sha") or raw.get("last_head_sha") or ""),
         task_blueprint_anchors=normalize_task_blueprint_anchors(raw.get("task_blueprint_anchors")),
     )

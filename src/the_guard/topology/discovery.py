@@ -30,7 +30,6 @@ IGNORED = {
 }
 NON_MODULE_TOP_DIRS = {
     "docs",
-    "build_docs",
     "examples",
     "benchmarks",
     "scripts",
@@ -108,7 +107,9 @@ def discover_topology(
         for p in source_files(root)
         if not is_excluded_topology_path(p.relative_to(root).as_posix())
     ]
-    declared = [m["path"] for m in config.topology.get("modules", [])]
+    declarations = {m["path"]: m for m in config.topology.get("modules", [])}
+    declared = list(declarations)
+    retired = {path for path, module in declarations.items() if module.get("retired", False)}
     rooted_candidates = set()
     fallback_candidates = set()
     for path in files:
@@ -127,9 +128,12 @@ def discover_topology(
         fallback_candidates - {p.split("/")[0] for p in rooted_candidates}
     )
     candidates.update(path for path in declared if (root / path).exists())
+    candidates.update(retired)
     modules = []
-    module_imports = {}
     for directory in sorted(candidates):
+        if directory in retired:
+            modules.append(dict(declarations[directory]))
+            continue
         owned = [
             p
             for p in files
@@ -149,7 +153,6 @@ def discover_topology(
                 )
                 if target:
                     imports.add(target)
-        module_imports[directory] = imports
         modules.append(
             {
                 "path": directory,
@@ -162,8 +165,7 @@ def discover_topology(
                     if (root / directory).is_dir()
                     and (root / directory / name).is_file()
                 ],
+                "dependencies": sorted(imports),
             }
         )
-    for module in modules:
-        module["dependencies"] = sorted(module_imports[module["path"]])
     return {"modules": modules}

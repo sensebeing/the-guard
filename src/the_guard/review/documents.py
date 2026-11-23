@@ -5,7 +5,8 @@ from __future__ import annotations
 import posixpath
 import re
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path, PurePosixPath
 
@@ -15,12 +16,8 @@ from ..git_helpers import read_repository_file
 from .contract import CODE_EXTENSIONS
 
 MAX_TASK_DESIGN_DOCS = 4
-_OPERATIONAL_LEDGERS = {"WORKING.md", "CHANGELOG.md", "docs/pending-prod-publish.md"}
 _TASK_DESIGN_REFERENCE = re.compile(
-    r"(?<![A-Za-z0-9_./\\-])"
-    r"(?:(?:\.\.?/)+[A-Za-z0-9_./-]+|docs/[A-Za-z0-9_./-]+"
-    r"|[A-Za-z0-9_./-]*(?:plan|spec|blueprint|audit|report|design)[A-Za-z0-9_./-]*)\.md"
-    r"(?![\w/-]|\.[\w.])"
+    r"(?<![A-Za-z0-9_./\\-])[A-Za-z0-9_./-]+\.md(?![\w/-]|\.[\w.])"
 )
 
 
@@ -34,6 +31,8 @@ def architecture_document_paths(config: GuardConfig) -> set[str]:
 
 
 def boundary_document_paths(module: dict) -> set[str]:
+    if module.get("retired", False):
+        return set()
     return {
         *module.get("boundary_docs", []),
         *(
@@ -90,8 +89,8 @@ class TaskBlueprintSnapshot:
 class TaskBlueprintSelection:
     """Bounded prompt previews and the snapshots to retain across reviews."""
 
-    previews: list[TaskBlueprintSnapshot]
-    anchor_snapshots: list[TaskBlueprintSnapshot]
+    previews: list[TaskBlueprintSnapshot] = field(default_factory=list)
+    anchor_snapshots: list[TaskBlueprintSnapshot] = field(default_factory=list)
 
 
 def normalize_task_blueprint_anchors(value: object) -> dict[str, tuple[str, ...]]:
@@ -134,6 +133,7 @@ def resolve_task_design_blueprints(
     *,
     base_sha: str,
     head_sha: str,
+    config: GuardConfig | None = None,
     initial_reviewed_sha: str = "",
     prior_reviewed_sha: str = "",
     retained_anchors: Mapping[str, str | tuple[str, ...]] | None = None,
@@ -141,7 +141,22 @@ def resolve_task_design_blueprints(
     excluded_paths: Iterable[str] = (),
 ) -> TaskBlueprintSelection:
     """Resolve changed Markdown and direct references against binding Git snapshots."""
-    anchors = normalize_task_blueprint_anchors(retained_anchors)
+    config = config or GuardConfig()
+    blueprint_globs = tuple(config.review.get("blueprint_globs", ()))
+    if not blueprint_globs:
+        return TaskBlueprintSelection()
+    operational_ledgers = frozenset(config.review.get("operational_ledgers", ["CHANGELOG.md"]))
+
+    @cache
+    def matches_blueprint(path: str) -> bool:
+        return path.endswith(".md") and path not in operational_ledgers and any(
+            fnmatchcase(path, pattern) for pattern in blueprint_globs
+        )
+
+    anchors = {
+        path: revisions for path, revisions in normalize_task_blueprint_anchors(retained_anchors).items()
+        if matches_blueprint(path)
+    }
     recorded_revisions = dict.fromkeys(rev for revisions in anchors.values() for rev in revisions)
     verified_revisions = {}
     for revision in dict.fromkeys((initial_reviewed_sha, *recorded_revisions, prior_reviewed_sha)):
@@ -166,7 +181,7 @@ def resolve_task_design_blueprints(
     initial_commit = verified_revisions.get(initial_reviewed_sha)
 
     excluded_set = set(excluded_paths)
-    excluded = _OPERATIONAL_LEDGERS | (excluded_set - anchors.keys())
+    excluded = operational_ledgers | (excluded_set - anchors.keys())
     # A plan introduced in a reviewed round and later removed is absent from the
     # current branch diff. Use each reviewed branch's change list so an upstream
     # deletion during a rebase is not attributed to the reviewed branch.
@@ -185,13 +200,12 @@ def resolve_task_design_blueprints(
             raise ValueError(f"Cannot inspect task blueprint changes at {base_sha}...{revision}")
         historical_changes.extend(changed.split("\0"))
     head_changes = dict.fromkeys(changed_files)
-    git_changed_candidates = dict.fromkeys(
+    markdown_changes = dict.fromkeys(
         path for path in (*head_changes, *historical_changes)
         if path.endswith(".md") and path not in excluded
     )
-    changed_candidates = git_changed_candidates | dict.fromkeys(
-        path for path in anchors if path.endswith(".md") and path not in excluded
-    )
+    changed_candidates = dict.fromkeys(path for path in markdown_changes if matches_blueprint(path))
+    changed_candidates.update(dict.fromkeys(anchors))
 
     modes_by_revision: dict[str, dict[str, str]] = {
         revision: {} for revision in dict.fromkeys((base_sha, *reviewed_commits, head_sha))
@@ -246,14 +260,14 @@ def resolve_task_design_blueprints(
             )
         return snapshots
 
-    inventory(changed_candidates.keys() | anchors.keys())
+    inventory(markdown_changes.keys() | anchors.keys())
     for path, revisions in anchors.items():
         for revision in revisions:
             if path not in modes_by_revision[revision]:
                 raise ValueError(f"Recorded task blueprint missing at {revision}: {path}")
     changed_docs = resolve_candidates(changed_candidates)
     reference_candidates = {}
-    for path in git_changed_candidates:
+    for path in markdown_changes:
         for revision in modes_by_revision:
             body = read_body(path, revision)
             if body is not None:
@@ -265,7 +279,7 @@ def resolve_task_design_blueprints(
     ))
     inventory({
         path for _, candidates in reference_candidates for path in candidates
-        if path not in changed_candidates and path not in anchors
+        if matches_blueprint(path) and path not in excluded and path not in markdown_changes and path not in anchors
     })
     note_revisions = dict.fromkeys((head_sha, base_sha, *reviewed_commits))
     references = {}
@@ -273,9 +287,9 @@ def resolve_task_design_blueprints(
         revisions = note_revisions if source_revision is None else (source_revision,)
         reference = next((
             path for revision in revisions for path in candidates
-            if path in modes_by_revision[revision]
+            if matches_blueprint(path) and path not in excluded and path in modes_by_revision[revision]
         ), None)
-        if reference is not None and reference not in excluded:
+        if reference is not None:
             references[reference] = None
     changed_paths = {snapshot.path for snapshot in changed_docs}
     referenced_docs = resolve_candidates(path for path in references if path not in changed_paths)

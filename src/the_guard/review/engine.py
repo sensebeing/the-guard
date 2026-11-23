@@ -11,7 +11,7 @@ from typing import Any
 
 from ..config import GuardConfig, load_config
 from ..policy import Policy, load_policy
-from .contract import ReviewScope
+from .contract import ReviewScope, validate_review_output
 from .prompt import (
     _sanitize_reviewer_note,
     _snapshot_context,
@@ -39,7 +39,6 @@ from .repository import (
 from .runner import (
     _invoke_provider,
     _is_persistent_provider_failure,
-    _parse_findings,
 )
 from .session import (
     UTC,
@@ -206,16 +205,20 @@ def run_architecture_review(
             reviewer_note=eff_note,
             env=eff_env,
         )
-        payload = reviewer_fn(full_prompt)
+        payload = validate_review_output(
+            {"reviewed_head_sha": scope.head_sha, **reviewer_fn(full_prompt)},
+            expected_head_sha=scope.head_sha,
+            allow_implicit_origin=True,
+        )
         chosen_provider = "test-fn"
         log_path = str(
             run_logger.finish(
                 status="completed",
                 session_id="",
                 event_count=1,
-                verdict=str(payload.get("verdict") or ""),
-                summary=str(payload.get("summary") or ""),
-                blocking_findings=_parse_findings(payload),
+                verdict=payload.verdict,
+                summary=payload.summary,
+                blocking_findings=payload.blocking_findings,
             )
         )
     else:
@@ -297,12 +300,10 @@ def run_architecture_review(
         if payload is None:
             raise RuntimeError("All review providers failed: " + " | ".join(errors))
 
-    findings = _parse_findings(payload)
-    verdict = "NO-GO" if findings or payload.get("verdict") != "GO" else "GO"
     result = ReviewResult(
-        verdict=verdict,
-        summary=str(payload.get("summary") or ""),
-        blocking_findings=findings,
+        verdict=payload.verdict,
+        summary=payload.summary,
+        blocking_findings=payload.blocking_findings,
         provider=chosen_provider,
         patch_digest=scope.patch_digest,
         head_sha=scope.head_sha,
@@ -323,7 +324,7 @@ def run_architecture_review(
             last_patch_digest=scope.patch_digest,
             last_verdict=result.verdict,
             last_summary=result.summary,
-            last_blocking_findings=findings,
+            last_blocking_findings=result.blocking_findings,
             last_submodule_shas={
                 sub.path: sub.new_sha for sub in scope.submodule_changes
             },

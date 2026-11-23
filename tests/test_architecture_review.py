@@ -49,13 +49,12 @@ from the_guard.review.repository import (
     is_reviewable_path,
     load_valid_receipt,
 )
-from the_guard.review.contract import CODEX_DISABLED_FEATURES
+from the_guard.review.contract import CODEX_DISABLED_FEATURES, ReviewOutput, verify_reviewed_head_sha
 from the_guard.review.runner import (
     _build_provider_cmd,
     _build_provider_env,
     _run_streaming_cmd,
     _summarize_stream_line,
-    _verify_reviewed_head_sha,
 )
 from the_guard.config import load_config, GuardConfig
 from the_guard.review.documents import (
@@ -74,6 +73,7 @@ from architecture_review_support import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE_CLI = REPO_ROOT / "bin/guard"
+BLUEPRINT_REVIEW = {"blueprint_globs": ["*.md"]}
 
 
 class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
@@ -86,7 +86,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     {
                         "topology": {
                             "forbidden_imports": [
-                                {"from": "src/", "imports": ["forbidden"]}
+                                {"scope_prefixes": ["src/"], "imports": ["forbidden"]}
                             ]
                         }
                     }
@@ -178,14 +178,14 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(existing_document_paths(repo, ["packages", "AGENTS.md"], None), {"AGENTS.md"})
             for operation in (
                 lambda: compute_review_contract_digest(policy, config, repo_root=repo, revision=scope.head_sha),
-                lambda: _snapshot_context(repo, scope),
+                lambda: _snapshot_context(repo, scope, config=config),
             ):
                 with patch("subprocess.run", wraps=subprocess.run) as run:
                     operation()
-                tree_calls = [call for call in run.call_args_list if call.args[0][:2] == ["git", "ls-tree"]]
+                tree_calls = [call.args[0] for call in run.call_args_list if call.args[0][:2] == ["git", "ls-tree"]]
                 self.assertEqual(len(tree_calls), 1, tree_calls)
-                self.assertIn("-z", tree_calls[0].args[0])
-                self.assertFalse(any("config.py/" in arg for arg in tree_calls[0].args[0]))
+                self.assertIn("-z", tree_calls[0])
+                self.assertFalse(any("config.py/" in arg for arg in tree_calls[0]))
             self.assertEqual(existing_document_paths(repo, ["packages", "AGENTS.md"], scope.head_sha), {"AGENTS.md"})
 
     def test_implicit_readme_and_symlink_targets_are_reviewable_contract_changes(self):
@@ -257,12 +257,37 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("Holistic Root-Cause & Layer Boundary Integrity", prompts[1])
             self.assertIn("introduced_by_delta", prompts[1])
 
+    def test_blueprints_require_opt_in_and_filter_paths_and_ledgers(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            base = _git(repo, "rev-parse", "HEAD")
+            docs = repo / "docs"
+            docs.mkdir(exist_ok=True)
+            paths = ("docs/design.md", "docs/ledger.md", "docs/notes.md")
+            for path in (*paths, "docs/reference.md", "docs/guide.md"):
+                (repo / path).write_text("See docs/reference.md and docs/guide.md.\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Write design and other Markdown")
+            head = _git(repo, "rev-parse", "HEAD")
+            with patch("the_guard.review.documents.git_stdout") as git, patch(
+                "the_guard.review.documents._task_design_references"
+            ) as references:
+                selection = resolve_task_design_blueprints(repo, paths, base_sha=base, head_sha=head)
+                self.assertEqual(selection.previews, [])
+                self.assertEqual(selection.anchor_snapshots, [])
+                git.assert_not_called()
+                references.assert_not_called()
+            config = GuardConfig(review={"blueprint_globs": ["docs/design.md", "docs/reference.md", "docs/ledger.md"],
+                                         "operational_ledgers": ["docs/ledger.md"]})
+            selection = resolve_task_design_blueprints(repo, paths, base_sha=base, head_sha=head, config=config)
+            self.assertEqual([doc.path for doc in selection.previews], ["docs/design.md", "docs/reference.md"])
+
     def test_task_blueprints_are_snapshot_bound_in_full_and_incremental_prompts(self):
         plan = "docs/superpowers/plans/consolidation.md"
         anchor = "docs/reports/anchor-0.md"
         for source in ("plan", "note"):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as td:
-                repo, _ = self._init_repo(Path(td))
+                repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
                 (repo / anchor).parent.mkdir(parents=True)
                 (repo / anchor).write_text("Committed Anchor-0 audit\n")
                 _git(repo, "add", anchor)
@@ -324,18 +349,18 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_task_blueprint_discovery_prioritizes_and_caps_snapshot_paths(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             documents = {
                 "task-plan.md": (
                     "See ./docs/context.md, docs/contract.md, docs/missing.md, "
-                    "docs/pending-prod-publish.md and ../docs/overflow.md."
+                    "docs/publishing-ledger.md and ../docs/overflow.md."
                 ),
                 "docs/summary.md": "Task summary",
                 "docs/context.md": "See docs/overflow.md for additional detail.",
                 "docs/note.md": "Note evidence",
                 "docs/overflow.md": "Outside the document budget",
                 "docs/contract.md": "Already loaded contract",
-                "docs/pending-prod-publish.md": "Publishing ledger",
+                "docs/publishing-ledger.md": "Publishing ledger",
                 "WORKING.md": "Working ledger",
             }
             for path, body in documents.items():
@@ -349,6 +374,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 ("task-plan.md", "docs/missing.md", "WORKING.md", "docs/summary.md"),
                 base_sha=_git(repo, "rev-parse", "HEAD^"),
                 head_sha=_git(repo, "rev-parse", "HEAD"),
+                config=GuardConfig(review={**BLUEPRINT_REVIEW, "operational_ledgers": [
+                    "WORKING.md", "docs/publishing-ledger.md",
+                ]}),
                 initial_reviewed_sha="0" * 40,
                 reviewer_note="See docs/context.md, docs/note.md, then docs/overflow.md.",
                 excluded_paths=("docs/contract.md",),
@@ -367,7 +395,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         anchor = "docs/anchor-0-audit.md"
         for change in ("weaken", "delete"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
-                repo, _ = self._init_repo(Path(td))
+                repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
                 (repo / plan).write_text(
                     f"Retire the outbox.\nSee [Anchor 0]({anchor}#findings).\n"
                 )
@@ -411,10 +439,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_first_reviewed_blueprint_survives_later_rounds_and_provider_restarts(self):
         plan = "docs/consolidation-plan.md"
-        no_go = {"verdict": "NO-GO", "summary": "Outbox still live", "blocking_findings": []}
+        no_go = ReviewOutput("NO-GO", "Outbox still live", (), "")
         for change in ("incremental", "force", "provider", "contract", "delete"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
-                repo, _ = self._init_repo(Path(td))
+                repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
                 (repo / plan).write_text("Retire the outbox.\n")
                 (repo / "app.py").write_text("value = 1\n")
                 _git(repo, "add", ".")
@@ -440,9 +468,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     if change == "provider":
                         providers.return_value = ([("claude", "/mock/claude")], {})
                     if change == "contract":
-                        (repo / ".guard").mkdir()
                         (repo / ".guard/config.json").write_text(
-                            '{"review": {"project_title": "Renamed project"}}\n'
+                            json.dumps({"review": {**BLUEPRINT_REVIEW, "project_title": "Renamed project"}})
                         )
                     (repo / "app.py").write_text("value = 2\n")
                     _git(repo, "add", "-A")
@@ -486,7 +513,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         anchor = "docs/referenced-audit.md"
         for change in ("promote", "unlink", "delete"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
-                repo, _ = self._init_repo(Path(td))
+                repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
                 (repo / anchor).write_text("Authoritative audit evidence\n")
                 _git(repo, "add", anchor)
                 _git(repo, "commit", "-m", "Record the audit upstream")
@@ -510,8 +537,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 second = run_architecture_review(repo, reviewer_fn=reviewer)
 
                 if change == "promote":
-                    (repo / ".guard").mkdir()
                     (repo / ".guard/config.json").write_text(json.dumps({
+                        "review": BLUEPRINT_REVIEW,
                         "topology": {"architecture_docs": [plan]},
                     }))
                 if change == "delete":
@@ -541,7 +568,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_reviewed_blueprint_tightening_survives_reversion_and_forced_review(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             merged_plan = "docs/merged-plan.md"
             branch_plan = "docs/branch-plan.md"
             original = "Keep one owner.\n"
@@ -608,7 +635,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_blueprint_references_resolve_in_the_source_revision(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             plan = "docs/specs/plan.md"
             audit = "docs/specs/audit.md"
             (repo / plan).parent.mkdir()
@@ -635,13 +662,13 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(context.task_blueprint_anchors[audit], (base,))
             self.assertEqual(context.task_blueprint_anchors["audit.md"], (scope.head_sha,))
             selection = resolve_task_design_blueprints(
-                repo, (plan,), base_sha=base, head_sha=scope.head_sha,
+                repo, (plan,), base_sha=base, head_sha=scope.head_sha, config=GuardConfig(review=BLUEPRINT_REVIEW),
             )
             self.assertEqual([snapshot.path for snapshot in selection.previews], [audit, plan, "audit.md"])
 
     def test_recorded_blueprint_revision_requires_the_anchored_path(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             before_plan = _git(repo, "rev-parse", "HEAD")
             plan = "docs/plan.md"
             (repo / plan).write_text("Merge-base plan\n")
@@ -650,13 +677,13 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             base = _git(repo, "rev-parse", "HEAD")
             with self.assertRaisesRegex(ValueError, f"Recorded task blueprint missing at {before_plan}"):
                 resolve_task_design_blueprints(
-                    repo, (plan,), base_sha=base, head_sha=base,
+                    repo, (plan,), base_sha=base, head_sha=base, config=GuardConfig(review=BLUEPRINT_REVIEW),
                     retained_anchors={plan: (base, before_plan)},
                 )
 
     def test_persisted_blueprint_references_stay_one_hop_across_review_rounds(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             plan = "docs/plan.md"
             audit = "docs/audit.md"
             note_audit = "docs/note-audit.md"
@@ -693,7 +720,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_unchanged_retained_contracts_leave_four_inline_blueprint_slots(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             architecture = "docs/architecture.md"
             (repo / architecture).write_text("Loaded architecture contract\n")
             _git(repo, "add", architecture)
@@ -723,7 +750,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         plan = "docs/superpowers/specs/consolidation.md"
         for audit_count in (1, 5):
             with self.subTest(audit_count=audit_count), tempfile.TemporaryDirectory() as td:
-                repo, _ = self._init_repo(Path(td))
+                repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
                 (repo / plan).parent.mkdir(parents=True)
                 (repo / plan).write_text("Retire the outbox.\n")
                 merged_plan = "docs/budget.md"
@@ -803,7 +830,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_blueprint_reference_resolution_uses_committed_repository_paths(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             plan = "docs/specs/plan.md"
             (repo / plan).parent.mkdir()
             documents = {
@@ -842,7 +869,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_blueprint_symlink_diff_compares_the_committed_target_bodies(self):
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
             (repo / "docs/task-plan.md").symlink_to("plan-source.txt")
             source = repo / "docs/plan-source.txt"
             source.write_text("Retire the outbox.\n")
@@ -867,23 +894,13 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_methodology_requires_zero_based_whole_module_reconciliation(self):
         obligations = (
-            "Immutable Anchor-0 blueprints, referenced audit evidence, and baseline complexity budgets",
-            "retirement commitments, convergence requirements, and target complexity budgets "
-            "established in prior reviewed branch blueprints define binding acceptance scope",
-            "Block under `guard.architecture-simplicity` or `guard.single-source-of-truth`",
-            "editing or deleting a merge-base contract or prior reviewed branch blueprint, "
-            "or removing a reference",
-            "abandon or defer an Anchor-0 root-cause repair",
-            "drop a named table, trigger, or state-machine retirement",
-            "defer committed convergence to a later wave",
-            "relax a merge-base or reviewed target complexity budget",
-            "Allow re-scoping only when the developer note cites explicit user authorization",
-            "schema and lifecycle evidence establishes that the surviving entity is genuinely orthogonal",
-            "Allow removal of cross-module intrusion or overdesign introduced in a prior reviewed branch blueprint",
-            "the simplest implementation at the sole owner",
-            "preserves all Anchor-0 obligations, committed retirements, convergence requirements, "
-            "target budgets, and equivalent safety boundaries",
-            "Block column-inlining mirages",
+            "Derive the post-change minimal model from first principles",
+            "copy child-table fields and secondary status columns onto a parent",
+            "preserving separate state machines or control loops",
+            "Approved repairs, retirements, constraints, and complexity budgets remain binding",
+            "Require explicit user approval",
+            "evidence of an independent lifecycle for any retained entity",
+            "preserves the approved commitments and equivalent protection at the sole owner",
         )
         preset = (REPO_ROOT / "src/the_guard/presets/rules/architecture-simplicity.md").read_text()
         for configured in (False, True):
@@ -1780,7 +1797,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 invoke.side_effect = [
                     RuntimeError("quota exceeded"),
                     (
-                        {"verdict": "GO", "summary": "ok", "blocking_findings": []},
+                        ReviewOutput("GO", "ok", (), ""),
                         "thread-1",
                         "",
                     ),
@@ -1797,7 +1814,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 )
             with patch("the_guard.review.engine._invoke_provider") as invoke:
                 invoke.return_value = (
-                    {"verdict": "GO", "summary": "ok", "blocking_findings": []},
+                    ReviewOutput("GO", "ok", (), ""),
                     "thread-2",
                     "",
                 )
@@ -1893,7 +1910,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         expected = "abcdef0123456789" * 2 + "abcdef01"
         previous = "1234567890abcdef" * 2 + "12345678"
         for reported in (expected, expected[:7], "  " + expected[:12].upper() + "  "):
-            _verify_reviewed_head_sha({"reviewed_head_sha": reported}, expected)
+            verify_reviewed_head_sha(reported, expected)
         for reported in (
             previous,
             expected[:6],
@@ -1905,20 +1922,11 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             42,
         ):
             with self.assertRaises(RuntimeError):
-                _verify_reviewed_head_sha({"reviewed_head_sha": reported}, expected)
+                verify_reviewed_head_sha(reported, expected)
         with self.assertRaisesRegex(RuntimeError, "requires a non-empty"):
-            _verify_reviewed_head_sha({}, expected)
-        _verify_reviewed_head_sha(
-            {
-                "reviewed_head_sha": expected,
-                "summary": previous[:10] + " problems fixed",
-            },
-            expected,
-        )
+            verify_reviewed_head_sha(None, expected)
         with self.assertRaisesRegex(RuntimeError, "mismatched HEAD"):
-            _verify_reviewed_head_sha(
-                {"reviewed_head_sha": previous, "summary": expected}, expected
-            )
+            verify_reviewed_head_sha(previous, expected)
 
     def test_prompt_resolves_nested_leaf_and_top_level_contracts(self) -> None:
         for contract in (
@@ -2028,7 +2036,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             repo, _ = self._init_repo(Path(td))
             (repo / ".guard").mkdir()
             (repo / ".guard/config.json").write_text(
-                '{"topology": {"forbidden_imports": [{"from": "services/a", "to": "internal.storage"}]}}\n',
+                '{"topology": {"forbidden_imports": [{"scope_prefixes": ["services/a"], "imports": ["internal.storage"]}]}}\n',
                 encoding="utf-8",
             )
             (repo / "services/a").mkdir(parents=True)
@@ -2066,7 +2074,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             repo, _ = self._init_repo(Path(td))
             (repo / ".guard").mkdir()
             (repo / ".guard/config.json").write_text(
-                '{"topology": {"forbidden_imports": [{"from": "services/other", "to": "internal.storage", "scope_prefixes": ["services/other"]}]}}\n',
+                '{"topology": {"forbidden_imports": [{"scope_prefixes": ["services/other"], "imports": ["internal.storage"]}]}}\n',
                 encoding="utf-8",
             )
             (repo / "services/b").mkdir(parents=True)

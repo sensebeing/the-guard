@@ -53,6 +53,9 @@ def resolve_changed_file(root: Path, changed_file: str) -> tuple[str, Path] | No
         rel_path = absolute_path.relative_to(root)
     except ValueError:
         return None
+    lexical_path = Path(os.path.abspath(candidate))
+    if lexical_path.is_relative_to(root):
+        rel_path = lexical_path.relative_to(root)
     return rel_path.as_posix(), absolute_path
 
 
@@ -82,6 +85,19 @@ def git(cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str] | Non
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def repository_path_exists(root: Path, rel_path: str, revision: str | None) -> bool:
+    """Check for a repository entry, distinguishing absence from an unreadable revision."""
+    if revision is None:
+        path = root / rel_path
+        return path.exists() or path.is_symlink()
+    entries = git_stdout(root, [
+        "git", "ls-tree", "-z", f"{revision}^{{commit}}", "--", f":(literal){rel_path}",
+    ])
+    if entries is None:
+        raise ValueError(f"Cannot inspect {rel_path} at revision {revision}")
+    return bool(entries)
 
 
 def imported_submodule_trees(root: Path, base: str) -> dict[str, str]:

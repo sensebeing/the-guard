@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+
+from .git_helpers import read_repository_file, repository_path_exists
 
 VERSION = "0.1.0"
 
@@ -42,26 +42,12 @@ class GuardConfig:
 
 def load_config(root: Path | str, *, revision: str | None = None) -> GuardConfig:
     root = Path(root)
-    if revision is None:
-        path = root / ".guard/config.json"
-        raw = path.read_text() if path.exists() else "{}"
-    else:
-        proc = subprocess.run(
-            ["git", "show", f"{revision}:.guard/config.json"],
-            cwd=root,
-            capture_output=True,
-        )
-        if proc.returncode:
-            exists = subprocess.run(
-                ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
-                cwd=root,
-                capture_output=True,
-            )
-            if exists.returncode:
-                raise ValueError(f"Cannot read configuration revision {revision}")
-            raw = "{}"
-        else:
-            raw = proc.stdout.decode("utf-8")
+    path = ".guard/config.json"
+    raw = (
+        read_repository_file(root, path, revision=revision)
+        if repository_path_exists(root, path, revision)
+        else "{}"
+    )
     return validate_config(json.loads(raw))
 
 
@@ -137,7 +123,24 @@ def _validate_sections(data: dict[str, Any]) -> None:
             _string_list(review[key], "review." + key)
     if "project_title" in review and not isinstance(review["project_title"], str):
         raise ValueError("review.project_title must be a string")
+    for key, is_valid, label in (
+        ("operational_ledgers", _safe_relative_path, "paths"),
+        ("blueprint_globs", _relative_glob, "globs"),
+    ):
+        if key in review and (
+            not isinstance(review[key], list) or not all(map(is_valid, review[key]))
+        ):
+            raise ValueError(f"review.{key} must be an array of safe repository-relative {label}")
     topology = data.get("topology", {})
+    production_scopes = ("python_prod_prefixes", "swift_prod_prefixes")
+    rule_groups = (
+        "exclusive_sql_owners", "retired_tables", "forbidden_patterns", "forbidden_imports", "modules",
+    )
+    unknown = topology.keys() - {
+        "enforce_module_dependencies", "architecture_docs", "layers", *production_scopes, *rule_groups,
+    }
+    if unknown:
+        raise ValueError(f"Unknown topology keys: {sorted(unknown)}")
     if "enforce_module_dependencies" in topology and not isinstance(
         topology["enforce_module_dependencies"], bool
     ):
@@ -155,17 +158,10 @@ def _validate_sections(data: dict[str, Any]) -> None:
         _string_list(targets, f"topology.layers.{layer}")
         if any(target not in layers for target in targets):
             raise ValueError(f"topology.layers.{layer} references an unknown layer")
-    for key in ("python_prod_prefixes", "swift_prod_prefixes"):
+    for key in production_scopes:
         if key in topology:
             _string_list(topology[key], "topology." + key)
-    for key in (
-        "exclusive_sql_owners",
-        "retired_tables",
-        "forbidden_patterns",
-        "forbidden_imports",
-        "module_boundaries",
-        "modules",
-    ):
+    for key in rule_groups:
         entries = topology.get(key, [])
         if key == "retired_tables" and isinstance(entries, dict):
             entries = [entries]
@@ -196,30 +192,31 @@ def _validate_sections(data: dict[str, Any]) -> None:
                         re.compile(expression)
                     except re.error as exc:
                         raise ValueError(f"Invalid forbidden pattern: {exc}") from exc
-            elif key in {"forbidden_imports", "module_boundaries"}:
-                imports = rule.get(
-                    "imports", rule.get("forbidden_imports", [rule.get("to")])
-                )
+            elif key == "forbidden_imports":
+                if rule.keys() - {"scope_prefixes", "imports", "rule_id", "message"}:
+                    raise ValueError("Unknown forbidden_imports rule keys")
+                imports = rule.get("imports")
                 _string_list(imports, key + ".imports")
                 if not imports or not all(imports):
                     raise ValueError(f"{key} requires at least one import prefix")
-                if "from" in rule and not isinstance(rule["from"], str):
-                    raise ValueError(f"{key}.from must be a string")
             elif key == "modules":
                 _validate_module(rule, topology)
     modules = topology.get("modules", [])
     by_path = {module["path"]: module for module in modules}
     if len(by_path) != len(modules):
         raise ValueError("topology.modules paths must be unique")
-    if topology.get("enforce_module_dependencies") or layers:
-        for module in modules:
-            for dependency in module.get("dependencies", []):
-                if dependency not in by_path or dependency == module["path"]:
+    for module in modules:
+        for dependency in module.get("dependencies", []):
+            target = by_path.get(dependency)
+            if target is not None and target.get("retired", False):
+                raise ValueError(f"Module '{module['path']}' cannot depend on retired module '{dependency}'")
+            if topology.get("enforce_module_dependencies") or layers:
+                if target is None or dependency == module["path"]:
                     raise ValueError(
                         f"Module '{module['path']}' has unknown or self dependency '{dependency}'"
                     )
                 source_layer = module.get("layer")
-                target_layer = by_path[dependency].get("layer")
+                target_layer = target.get("layer")
                 if (
                     layers
                     and source_layer
@@ -238,7 +235,19 @@ def _safe_relative_path(value: object) -> bool:
         and not PurePosixPath(value).is_absolute()
         and not PureWindowsPath(value).drive
         and "\\" not in value
+        and "\0" not in value
         and not any(part in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
+def _relative_glob(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and "\0" not in value
+        and not PurePosixPath(value).is_absolute()
+        and not PureWindowsPath(value).anchor
+        and ".." not in PureWindowsPath(value).parts
     )
 
 
@@ -248,6 +257,11 @@ def _validate_module(module: dict[str, Any], topology: dict[str, Any]) -> None:
     for key in ("languages", "boundary_docs", "dependencies"):
         if key in module:
             _string_list(module[key], "modules." + key)
+    retired = module.get("retired", False)
+    if not isinstance(retired, bool):
+        raise ValueError("modules.retired must be a boolean")
+    if retired and "dependencies" in module and module["dependencies"] != []:
+        raise ValueError("Retired modules must omit dependencies or declare an empty array")
     if any(not _safe_relative_path(doc) for doc in module.get("boundary_docs", [])):
         raise ValueError("Module boundary_docs must be safe repository-relative paths")
     for key in ("layer", "role"):
@@ -258,11 +272,5 @@ def _validate_module(module: dict[str, Any], topology: dict[str, Any]) -> None:
     layers = topology.get("layers", {})
     if layers and "layer" in module and module["layer"] not in layers:
         raise ValueError(f"Unknown module layer: {module['layer']}")
-    if layers and topology.get("enforce_module_dependencies") and "layer" not in module:
+    if not retired and layers and topology.get("enforce_module_dependencies") and "layer" not in module:
         raise ValueError(f"Module '{module['path']}' requires a layer")
-
-
-def iter_forbidden_import_rules(topology: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Iterate both supported declarations without mutating repository configuration."""
-    yield from topology.get("forbidden_imports", [])
-    yield from topology.get("module_boundaries", [])

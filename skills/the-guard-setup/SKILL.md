@@ -31,6 +31,8 @@ Check Python >= 3.11 and `guard --help`. If the CLI is not installed, install it
 (`python3 -m pip install /path/to/the-guard`), or run its `bin/guard` launcher.
 Installation has no external runtime dependencies; independent review also needs Git and a locally
 installed/authenticated `codex`, `claude` or `agy` CLI.
+Reviewer discovery and updater state default to `~/.config/the-guard`. An explicit updater
+state directory overrides the default and skips migration of legacy updater metadata.
 
 For core/full, run the selected preset:
 
@@ -57,9 +59,14 @@ Declare directory or single-file module paths; list root blueprints in `topology
 all document paths must be safe repository-relative paths. Review automatically loads root agent
 instructions, declared/detected blueprints and touched boundaries from the committed snapshot,
 and binds review evidence to their contents.
+Set `review.blueprint_globs` to repository-relative patterns to opt into task blueprints.
+`review.operational_ledgers` excludes paths from that discovery and defaults to `["CHANGELOG.md"]`.
 Use `topology.layers` to list allowed target layers (for example core: none, plugin: core),
 and `enforce_module_dependencies: true` to enforce the module allowlist. With both enabled,
-every module needs a layer; sync reports new unregistered modules instead of inventing one.
+every active module needs a layer. Sync reports new unregistered modules. Declare retired paths
+with `retired: true`. They are delete-only, exclude active boundary documents, and cannot accept
+inbound imports or dependency declarations. Use `forbidden_imports` with `scope_prefixes` and
+`imports` for additional import constraints.
 Layer-violating declared dependencies fail configuration loading. Discovery is evidence,
 not permission to import. Run `guard topology audit --repo-root . --json` to inspect existing
 violations, missing documents, unregistered modules and unused declared dependencies; record

@@ -15,6 +15,7 @@ def merge_topology(
 ) -> tuple[dict[str, Any], list[str]]:
     """Pure merge of observed inventory into repository-owned permissions."""
     existing = {m["path"]: m for m in topology.get("modules", [])}
+    retired = {path: module for path, module in existing.items() if module.get("retired", False)}
     governed = bool(
         topology.get("enforce_module_dependencies") or topology.get("layers")
     )
@@ -26,8 +27,11 @@ def merge_topology(
     merged = (
         {p: m for p, m in existing.items() if p in discovered_paths} if governed else {}
     )
+    merged.update(retired)
     unregistered = []
     for module in discovered:
+        if module["path"] in retired:
+            continue
         previous = existing.get(module["path"])
         if previous is None and requires_layer:
             unregistered.append(module["path"])
@@ -46,6 +50,8 @@ def merge_topology(
             entry["dependencies"] = [
                 p for p in (previous or {}).get("dependencies", []) if p not in pruned
             ]
+        elif retired:
+            entry["dependencies"] = [p for p in entry["dependencies"] if p not in retired]
         merged[module["path"]] = entry
     return {**topology, "modules": [merged[key] for key in sorted(merged)]}, sorted(
         unregistered

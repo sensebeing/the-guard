@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import fcntl
 import hashlib
 import importlib
@@ -16,6 +17,7 @@ import time
 from typing import Any, Iterator, Mapping
 
 AUTO_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
+AUTO_UPDATE_LOG_MAX_BYTES = 512 * 1024
 SKILL_NAMES = ("the-guard", "the-guard-setup")
 _BOOT_PACKAGE_DIR = globals().get("_BOOT_PACKAGE_DIR", Path(__file__).resolve().parent)
 PACKAGE_DIR = _BOOT_PACKAGE_DIR
@@ -57,8 +59,33 @@ def state_dir_for(
     configured = eff_env.get("THE_GUARD_STATE_DIR", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
-    base_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    return base_home / ".guard"
+    home = home_dir or eff_env.get("HOME")
+    base_home = Path(home).expanduser().resolve() if home else Path.home()
+    resolved_state = base_home / ".config" / "the-guard"
+    _migrate_auto_update_state(base_home / ".guard", resolved_state)
+    return resolved_state
+
+
+def _migrate_auto_update_state(legacy: Path, state: Path) -> None:
+    previous = legacy / "auto_update.json"
+    current = state / previous.name
+    if current.exists() or not previous.is_file():
+        return
+    with _try_file_lock(state / "auto_update.lock") as acquired:
+        if not acquired or current.exists():
+            return
+        try:
+            metadata = previous.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        atomic_write_text(current, metadata)
+        for name in (previous.name, "auto_update.log", "auto_update.lock"):
+            (legacy / name).unlink(missing_ok=True)
+        try:
+            legacy.rmdir()
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                raise
 
 
 def gemini_dir_for(
@@ -112,7 +139,13 @@ def _append_log(state_dir: Path, event: str, **fields: Any) -> None:
     }
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
-        with (state_dir / "auto_update.log").open("a", encoding="utf-8") as handle:
+        log_path = state_dir / "auto_update.log"
+        try:
+            if log_path.stat().st_size >= AUTO_UPDATE_LOG_MAX_BYTES:
+                os.replace(log_path, state_dir / "auto_update.log.1")
+        except FileNotFoundError:
+            pass
+        with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         return

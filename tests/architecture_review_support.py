@@ -6,6 +6,7 @@ so both review test files exercise the same Git topology.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -44,7 +45,7 @@ class ArchitectureReviewTestCase(unittest.TestCase):
         else:
             os.environ.pop("THE_GUARD_SESSION_MODE", None)
 
-    def _init_repo(self, tmp_dir: Path) -> tuple[Path, Path]:
+    def _init_repo(self, tmp_dir: Path, *, review: dict | None = None) -> tuple[Path, Path]:
         origin = tmp_dir / "origin.git"
         subprocess.run(
             ["git", "init", "--bare", str(origin)], check=True, capture_output=True
@@ -85,6 +86,10 @@ class ArchitectureReviewTestCase(unittest.TestCase):
             "Every business rule has a single executable owner.\n",
             encoding="utf-8",
         )
+        if review is not None:
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(json.dumps({"review": review}))
+            _git(repo, "add", ".guard/config.json")
         _git(
             repo,
             "add",
