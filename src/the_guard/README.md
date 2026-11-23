@@ -70,7 +70,12 @@ and equivalent configured and retained blueprint bodies across replayed snapshot
 rebase, configured blueprints count only when the replayed branch changed them or their symlink
 targets, while retained blueprint revisions remain fail-closed. Scope,
 exemptions and prompts share applicable
-retained history across linked worktrees, including when new discovery is disabled. Changes
+retained history across linked worktrees, including when new discovery is disabled. Sessions
+already landed in the target merge base contribute only retained blueprints whose resolved
+paths the candidate branch changes, so merged unrelated branches cannot pollute new scopes or
+invalidate rebased receipts. An unlanded linked-worktree session contributes its history only
+when its branch changed files overlap the candidate scope, comparing safe snapshot symlink
+targets so either alias of a blueprint counts. Changes
 limited to non-contract reports or plans remain review-exempt.
 
 Full and incremental prompts direct reviewers to inspect the complete touched subsystem at the
