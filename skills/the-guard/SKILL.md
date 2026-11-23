@@ -14,6 +14,8 @@ clean newer `~/the-guard` checkout is delegated immediately and the installed uv
 when its commit or package-tree digest is stale; inspection of the guard checkout remains
 snapshot-bound. Review sessions start a fresh full review when reviewer contract code,
 repository configuration, or policy rules change.
+Updater state and reviewer discovery default to `~/.config/the-guard`. The updater migrates
+legacy metadata on first default-path use and retains one rotated 512 KiB log backup.
 
 ## Daily loop
 
@@ -44,6 +46,8 @@ legacy coupling exists. Owners may be directories or single files. Keep their de
 boundary docs synchronized with responsibility changes. Review reads root agent instructions,
 `topology.architecture_docs` and detected root blueprints from the committed snapshot, alongside
 touched boundaries; changes to these documents invalidate prior evidence.
+Task blueprint discovery runs when `review.blueprint_globs` is configured. It selects matching
+Markdown paths and excludes `review.operational_ledgers`, which defaults to `["CHANGELOG.md"]`.
 Branch-wide `guard check` / `guard topology check` block newly broken document declarations and
 stale dependencies while grandfathering untouched legacy declarations. Edit checks reject changed unregistered
 production source under governance; protected pushes run static checks before exemptions/receipts.
@@ -53,12 +57,17 @@ A clean changed-scope check is not a clean whole-repository audit. `topology syn
 curated dependencies when layers or enforcement are enabled; never use discovery to bless a
 forbidden import. With both enabled, assign layers and nonempty roles to reported new modules before registering them.
 
-Missing module paths fail audit; sync prunes deleted governed owners and incoming edges.
+Missing active module paths fail audit. Sync prunes deleted active owners and preserves paths
+declared with `retired: true`. Retired paths allow deletions and block additions, modifications,
+and inbound imports. Built-in lexical diagnostics apply to rule IDs installed in the target policy.
 Branch checks ratchet newly nonexistent module declarations and missing roles in established
 layer/dependency governance. Tightened constraints recheck unchanged sources in affected modules.
 Review CLI and check-push run deterministic checks against the committed snapshot before providers
 or receipts; protected pushes read that snapshot directly without temporary worktrees. Edit guard
 ignores paths outside the repository and validates edited policy/configuration contracts.
+In local-hook mode, the gate checks the pushed Git ref even if its commit differs from `HEAD`.
+A matching `GO` receipt from a retained linked-worktree session can carry forward when the
+contract digest and merge-base and patch checks pass.
 
 ## GitHub PR mode
 

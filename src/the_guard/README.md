@@ -15,23 +15,25 @@ Layer ceilings do not grant dependencies: each module has a minimal explicit all
 import package exports or CLI. `config.VERSION` owns the version re-exported by the surface.
 
 
-- `config` validates repository-owned settings; `policy` validates manifest and rule documents.
+- `config` validates repository-owned settings and reads committed configuration through `git_helpers`.
+  `policy` validates manifest and rule documents.
 - `finding` defines the static diagnostic contract; `git_helpers` owns safe repository/snapshot file and symlink reads and changed-line diffs.
   `policy` adapts reader failures into policy diagnostics; `review/documents` consumes the same reader.
 - `topology/imports` owns Python/JS/TS import extraction and longest-prefix module resolution;
   `paths` owns production exclusions; `discovery` reports inventory; `configured` enforces declared
-  dependencies and layer ceilings at touched import lines, with an import-only API that compares owner-edge permission outcomes for constraint rechecks;
-  diagnostic text never decides baseline grandfathering. `runner` composes language checks;
+  dependencies and layer ceilings at touched import lines and enforces delete-only module retirements.
+  Its import-only API compares owner-edge permissions for constraint rechecks.
+  `runner` applies built-in language diagnostics for rule IDs installed in the target policy;
   `audit` owns shared dependency evidence for full scans and baseline-aware contract drift,
   scanning only affected modules and rechecking complete production imports (including changed files
   and callers affected by target-layer or owner-resolution changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
   granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
-- `review/contract` owns reviewer types and wire schema; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope and patch identity;
+- `review/contract` owns reviewer types, wire schema and output validation; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope, patch identity and receipt carry-forward;
   `documents` owns review document inventory, binding blueprint selection and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
-  `runner` owns process execution and response decoding; `prompt` owns snapshot-bound instructions;
+  `runner` owns process execution and provider stream decoding; `prompt` owns snapshot-bound instructions;
   `engine` composes review and continuation. These modules do not implement product policy semantics.
 - `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows.
-- `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update cooldown metadata in `~/.guard`. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports and reloads the updater from the checkout while retaining the original package as the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
+- `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports and reloads the updater from the checkout while retaining the original package as the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
 - Review sessions persist the first reviewed head, the binding revisions of task blueprints already reviewed, and a contract digest covering reviewer code, configuration, policy rules, root instructions and architecture/boundary snapshots. A digest change starts a fresh full review while preserving the binding blueprint revisions for a valid branch baseline.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
@@ -47,7 +49,8 @@ coupling never authorizes introducing or deepening a declared core boundary viol
 reviewed commit. Full, batched and incremental reviews map changes to these contracts
 before examining hunks. Missing boundary declarations do not count as loaded evidence.
 
-`review/documents` discovers one-hop references from Markdown changed in the branch, reading
+`review.blueprint_globs` defaults to an empty array. When configured, `review/documents` selects
+matching Markdown blueprints and discovers matching one-hop references from Markdown changed in the branch, reading
 its bodies at the merge base, reviewed revisions, and HEAD, and from `--note`. Persisted anchors
 without branch changes are retained as evidence and their outgoing links are skipped. Links
 beginning with `./` or `../` resolve against the source document directory. Other links try the
@@ -58,8 +61,14 @@ merge-base blueprints, then branch blueprints. The merge base supplies immutable
 Each changed blueprint and referenced merge-base document retains ordered revisions for every
 distinct reviewed body. Inline previews include each historical body and a bounded diff or
 deletion marker when it differs from HEAD. Symlink-backed blueprints compare resolved bodies.
-The prompt indexes revision lists for paths outside the inline preview. Anchor histories
-survive provider restarts and verified rebases. Operational ledgers are excluded. Changes
+The prompt indexes revisions outside the inline previews. Anchor histories
+survive provider restarts, verified rebases, and changes to discovery settings.
+`review.operational_ledgers` excludes explicit repository-relative paths from discovery and
+defaults to `["CHANGELOG.md"]`. A `GO` receipt records the review contract digest and the
+blueprint revisions it covered. Reuse requires coverage of the applicable retained revisions
+and equivalent configured and retained blueprint bodies across replayed snapshots. Scope,
+exemptions and prompts share applicable
+retained history across linked worktrees, including when new discovery is disabled. Changes
 limited to non-contract reports or plans remain review-exempt.
 
 Full and incremental prompts direct reviewers to inspect the complete touched subsystem at the
@@ -73,6 +82,11 @@ file without a declared module also fails the edit guard. Untouched baseline deb
 grandfathered; `guard topology audit` reports the full repository debt. Changes to module
 responsibilities require synchronized configuration and authoritative boundary docs.
 `guard topology sync` refreshes inventory without granting observed imports permission.
+Modules declared with `retired: true` keep their reserved paths after the last file is deleted.
+They have no declared dependency edges or active boundary documents. Changed files under retired
+paths and inbound imports trigger service-boundary checks. A new retirement also rechecks
+unchanged inbound imports throughout the repository. Active declarations cannot be nested
+within a retired path.
 
 Review CLI, check-push and protected-push checks read the exact target Git snapshot directly,
 without creating temporary worktrees. Exact snapshot reads use committed submodule metadata,
@@ -80,6 +94,15 @@ reject unavailable blobs and disable working-tree rename inference for both base
 findings block provider execution and receipt acceptance; the Python review engine remains the
 pure independent-review entry point. Loaded configuration, policy and contract digests pass
 directly to review consumers instead of being reloaded by each helper.
+`config.py` requires a regular configuration file and normalizes legacy import declarations only
+when a consumer explicitly loads a historical baseline.
+During default-state migration, `auto_update` holds both locks through the checkout, tool, skills
+and metadata writes. It retires the legacy files only after a successful update that replaces or
+verifies the installed guard. The cutover assumes older executables are no longer launched
+after that replacement.
+The protected-push hook uses Git's local and remote commit IDs, including object-only replayed
+commits. Repository review can carry forward a matching `GO` receipt from a retained session in
+another linked worktree when its contract digest and applicable merge-base and patch checks pass.
 Audit reports all missing module paths. Drift blocks modules deleted since the baseline or newly
 registered at nonexistent paths, while grandfathering baseline debt. Newly registered modules
 require roles once layer/dependency governance is established; sync prunes deleted owners and

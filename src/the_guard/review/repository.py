@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -26,14 +27,23 @@ from .contract import (
     ReviewScope,
     SubmoduleChange,
 )
-from .documents import is_architecture_contract, resolved_contract_paths
+from .documents import (
+    changed_task_blueprints,
+    is_architecture_contract,
+    is_configured_blueprint_path,
+    merge_task_blueprint_anchors,
+    normalize_task_blueprint_anchors,
+    resolved_contract_paths,
+    resolved_document_paths,
+)
 from .session import (
-    RECEIPT_SCHEMA,
     UTC,
     ReviewResult,
     ReviewSessionState,
+    compute_review_contract_digest,
+    list_review_sessions,
+    receipt_payload,
 )
-from .session import compute_review_contract_digest
 from .session import (
     load_review_session as _load_session_record,
 )
@@ -86,8 +96,14 @@ def load_valid_receipt(repo_root: Path, patch_digest: str) -> dict[str, Any] | N
     return _load_receipt_record(git_common_dir(repo_root), patch_digest)
 
 
-def save_receipt(repo_root: Path, result: ReviewResult) -> Path:
-    return _save_receipt_record(git_common_dir(repo_root), result)
+def save_receipt(
+    repo_root: Path, result: ReviewResult, *, contract_digest: str,
+    task_blueprint_anchors: dict[str, tuple[str, ...]],
+) -> Path:
+    return _save_receipt_record(
+        git_common_dir(repo_root), result, contract_digest=contract_digest,
+        task_blueprint_anchors=task_blueprint_anchors,
+    )
 
 
 def load_review_session(
@@ -102,11 +118,24 @@ def save_review_session(repo_root: Path, state: ReviewSessionState) -> Path:
     return _save_session_record(git_common_dir(repo_root), state)
 
 
+def _ordered_review_sessions(repo_root: Path) -> list[ReviewSessionState]:
+    current = load_review_session(repo_root)
+    retained = list_review_sessions(git_common_dir(repo_root))
+    if current is None:
+        return retained
+    current_key = (current.worktree_path, current.branch)
+    return [current, *(s for s in retained if (s.worktree_path, s.branch) != current_key)]
+
+
 def review_logs_dir(repo_root: Path, env: dict[str, str] | None = None) -> Path:
     return _resolve_logs_dir(git_common_dir(repo_root), env)
 
 
 def resolve_base_ref(repo_root: Path, main_branch: str = "main") -> str:
+    if len(main_branch) in (40, 64) and all(c in "0123456789abcdef" for c in main_branch):
+        if git_ok(repo_root, ["git", "cat-file", "-e", f"{main_branch}^{{commit}}"]):
+            return main_branch
+        raise RuntimeError(f"Cannot resolve base commit '{main_branch}'")
     for ref in (
         f"refs/remotes/origin/{main_branch}",
         f"refs/heads/{main_branch}",
@@ -134,7 +163,11 @@ def is_reviewable_path(
     if contract_paths and rel_path in contract_paths:
         return True
     settings = cfg.review
-    if rel_path == ".guard/config.json" or is_architecture_contract(rel_path, cfg):
+    if (
+        rel_path == ".guard/config.json"
+        or is_architecture_contract(rel_path, cfg)
+        or is_configured_blueprint_path(rel_path, cfg)
+    ):
         return True
     if any(
         fnmatch.fnmatchcase(rel_path, p)
@@ -194,9 +227,7 @@ def _classify_file_tier(
     if name_low.startswith("test_") or name_low.endswith(TEST_FILE_SUFFIXES):
         return 2
     as_posix = posix.as_posix()
-    if not as_posix.startswith(policy_prefixes) and (
-        posix.suffix.lower() in CONFIG_I18N_EXTENSIONS or name_low.endswith("-map.md")
-    ):
+    if not as_posix.startswith(policy_prefixes) and posix.suffix.lower() in CONFIG_I18N_EXTENSIONS:
         return 1
     return 0
 
@@ -318,7 +349,7 @@ def _tree_entry_matches(
     repo_root: Path, commit_sha: str, path: str, expected_mode: str, expected_sha: str
 ) -> bool:
     """Return True only when `path` in `commit_sha` has the exact `expected_mode` and `expected_sha`."""
-    if not expected_sha or expected_sha == "0" * 40:
+    if not expected_sha:
         return False
     proc = _git(
         repo_root,
@@ -331,6 +362,8 @@ def _tree_entry_matches(
     if proc.returncode != 0:
         return False
     line = proc.stdout.decode("utf-8", errors="replace").strip()
+    if expected_mode == "000000":
+        return not line
     if not line:
         return False
     meta, _, _ = line.partition("\t")
@@ -361,20 +394,28 @@ def _is_unchanged_rebuttal_round(
     )
 
 
-def collect_review_scope(repo_root: Path, main_branch: str = "main") -> ReviewScope:
+def collect_review_scope(
+    repo_root: Path,
+    main_branch: str = "main",
+    *,
+    head_ref: str = "HEAD",
+    config: GuardConfig | None = None,
+) -> ReviewScope:
+    """Collect the committed review scope, reusing configuration from that head if supplied."""
     base_ref = resolve_base_ref(repo_root, main_branch)
-    config = load_config(repo_root, revision="HEAD")
-    head_sha = _git_text(repo_root, "rev-parse", "HEAD")
+    head_sha = _git_text(repo_root, "rev-parse", "--verify", "--end-of-options", f"{head_ref}^{{commit}}")
+    config = config or load_config(repo_root, revision=head_sha)
     merge_base = _git_text(repo_root, "merge-base", base_ref, head_sha)
 
     contract_paths = resolved_contract_paths(repo_root, config, head_sha)
-    contract_paths.update(
-        resolved_contract_paths(
-            repo_root, load_config(repo_root, revision=merge_base), merge_base
+    if merge_base != head_sha:
+        contract_paths.update(
+            resolved_contract_paths(
+                repo_root, load_config(repo_root, revision=merge_base, allow_historical=True), merge_base,
+            )
         )
-    )
     raw_diff = _git_text(
-        repo_root, "diff", "--raw", "--no-renames", f"{merge_base}..{head_sha}"
+        repo_root, "diff", "--raw", "--no-renames", "--no-abbrev", f"{merge_base}..{head_sha}"
     )
     changed_files, reviewable_files, submodules = _parse_raw_diff_lines(
         raw_diff, config, contract_paths=contract_paths
@@ -418,7 +459,7 @@ def collect_review_scope(repo_root: Path, main_branch: str = "main") -> ReviewSc
     for entry in sub_digests:
         hasher.update(f"sub:{entry}\n".encode("utf-8"))
 
-    return ReviewScope(
+    scope = ReviewScope(
         base_ref=base_ref,
         merge_base=merge_base,
         head_sha=head_sha,
@@ -427,6 +468,49 @@ def collect_review_scope(repo_root: Path, main_branch: str = "main") -> ReviewSc
         submodule_changes=tuple(sorted(submodules, key=lambda item: item.path)),
         patch_digest=hasher.hexdigest(),
     )
+    return _include_retained_blueprints(repo_root, scope, config)
+
+
+def _include_retained_blueprints(repo_root: Path, scope: ReviewScope, config: GuardConfig) -> ReviewScope:
+    sessions = [s for s in _ordered_review_sessions(repo_root) if s.task_blueprint_anchors]
+    if not sessions:
+        return scope
+    checked_out = _git_text(repo_root, "rev-parse", "--verify", "HEAD", check=False) == scope.head_sha
+    owner_key = (str(repo_root.resolve()), current_branch_name(repo_root)) if checked_out else None
+    anchors = merge_task_blueprint_anchors(*(
+        s.task_blueprint_anchors for s in sessions
+        if _blueprint_history_applies(repo_root, scope, config, s, owner_key)
+    ))
+    if not anchors:
+        return scope
+    paths = resolved_document_paths(repo_root, scope.head_sha, anchors)
+    paths.update(resolved_document_paths(repo_root, scope.merge_base, anchors))
+    return replace(
+        scope,
+        task_blueprint_anchors=anchors,
+        reviewable_files=tuple(sorted(set(scope.reviewable_files) | paths.intersection(scope.changed_files))),
+    )
+
+
+def _blueprint_history_applies(
+    repo_root: Path, scope: ReviewScope, config: GuardConfig, session: ReviewSessionState,
+    owner_key: tuple[str, str] | None,
+) -> bool:
+    if _is_ancestor(repo_root, session.last_head_sha, scope.head_sha):
+        return True
+    if (session.worktree_path, session.branch) == owner_key:
+        return review_anchor_session(repo_root, scope, session, config=config) is not None
+    if not _is_ancestor(repo_root, session.merge_base, scope.merge_base):
+        return False
+    if session.last_patch_digest == scope.patch_digest:
+        return True
+    delta = _collect_branch_delta(repo_root, scope, session, config=config)
+    if delta is None or delta.submodule_changes:
+        return False
+    # Replayed code can keep the same reviewed subject while changing its blueprint.
+    paths = resolved_document_paths(repo_root, session.last_head_sha, session.task_blueprint_anchors)
+    paths.update(resolved_document_paths(repo_root, scope.head_sha, session.task_blueprint_anchors))
+    return set(delta.reviewable_files).union(delta.changed_blueprints) <= paths
 
 
 def _collect_branch_delta(
@@ -439,7 +523,7 @@ def _collect_branch_delta(
     """Compute verified branch delta since `session`, or return None when session continuation is inapplicable.
 
     Raises RuntimeError if git diff commands fail after commit existence is verified (fail-closed).
-    Returns an IncrementalReviewScope (which may have `has_changes == False` when zero files/submodules changed).
+    Returns an IncrementalReviewScope, which may contain no reviewable changes.
     """
     config = config or load_config(repo_root, revision=scope.head_sha)
     if session is None or not session.last_head_sha:
@@ -461,12 +545,14 @@ def _collect_branch_delta(
     ):
         return None
 
-    contract_paths = resolved_contract_paths(repo_root, config, scope.head_sha)
+    retained = session.task_blueprint_anchors.keys() | scope.task_blueprint_anchors.keys()
+    contract_paths = resolved_contract_paths(repo_root, config, scope.head_sha, retained_blueprints=retained)
     contract_paths.update(
         resolved_contract_paths(
             repo_root,
-            load_config(repo_root, revision=session.last_head_sha),
+            load_config(repo_root, revision=session.last_head_sha, allow_historical=True),
             session.last_head_sha,
+            retained_blueprints=retained,
         )
     )
 
@@ -480,6 +566,7 @@ def _collect_branch_delta(
             "diff",
             "--raw",
             "--no-renames",
+            "--no-abbrev",
             f"{session.last_head_sha}..{scope.head_sha}",
             check=False,
         )
@@ -500,6 +587,7 @@ def _collect_branch_delta(
             "diff",
             "--raw",
             "--no-renames",
+            "--no-abbrev",
             f"{session.merge_base}..{session.last_head_sha}",
             check=False,
         )
@@ -508,6 +596,7 @@ def _collect_branch_delta(
             "diff",
             "--raw",
             "--no-renames",
+            "--no-abbrev",
             f"{scope.merge_base}..{scope.head_sha}",
             check=False,
         )
@@ -559,12 +648,14 @@ def _collect_branch_delta(
                 path=sub.path, old_sha=prev_sha, new_sha=sub.new_sha
             )
 
+    changed_blueprints = changed_task_blueprints(repo_root, config, session.last_head_sha, scope.head_sha, retained)
     return IncrementalReviewScope(
         base_head_sha=session.last_head_sha,
         target_head_sha=scope.head_sha,
         changed_files=tuple(sorted(changed_files)),
         reviewable_files=tuple(sorted(reviewable_files)),
         submodule_changes=tuple(sorted(inc_subs.values(), key=lambda item: item.path)),
+        changed_blueprints=tuple(sorted(changed_blueprints)),
     )
 
 
@@ -605,6 +696,20 @@ def review_anchor_session(
     return session if valid_rebase else None
 
 
+def _anchors_cover(
+    reviewed: dict[str, tuple[str, ...]], required: dict[str, tuple[str, ...]],
+) -> bool:
+    return all(set(revisions).issubset(reviewed.get(path, ())) for path, revisions in required.items())
+
+
+def _receipt_covers(
+    receipt: dict[str, Any], contract_digest: str, anchors: dict[str, tuple[str, ...]],
+) -> bool:
+    return receipt.get("contract_digest") == contract_digest and _anchors_cover(
+        normalize_task_blueprint_anchors(receipt.get("task_blueprint_anchors")), anchors,
+    )
+
+
 def resolve_or_carry_forward_receipt(
     repo_root: Path,
     scope: ReviewScope,
@@ -615,19 +720,8 @@ def resolve_or_carry_forward_receipt(
     contract_digest: str | None = None,
 ) -> dict[str, Any] | None:
     existing = load_valid_receipt(repo_root, scope.patch_digest)
-    if (
-        existing is not None
-        and existing.get("head_sha") == scope.head_sha
-        and existing.get("merge_base") == scope.merge_base
-    ):
-        return existing
-    session = load_review_session(repo_root)
-    if (
-        session is None
-        or session.last_verdict != "GO"
-        or not session.last_patch_digest
-        or not session.last_head_sha
-    ):
+    sessions = [s for s in _ordered_review_sessions(repo_root) if s.last_verdict == "GO"]
+    if existing is None and not sessions:
         return None
     current_config = config or load_config(repo_root, revision=scope.head_sha)
     current_policy = policy or load_policy(
@@ -636,27 +730,53 @@ def resolve_or_carry_forward_receipt(
     current_contract_digest = contract_digest or compute_review_contract_digest(
         current_policy, current_config, repo_root=repo_root, revision=scope.head_sha
     )
-    if not (
-        bool(session.contract_digest)
-        and session.contract_digest == current_contract_digest
+    if (
+        existing is not None
+        and existing.get("head_sha") == scope.head_sha
+        and existing.get("merge_base") == scope.merge_base
+        and _receipt_covers(existing, current_contract_digest, scope.task_blueprint_anchors)
     ):
-        return None
-    if existing is not None and session.last_patch_digest == scope.patch_digest:
         return existing
-    prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
-    if prior_receipt is None:
-        return None
-    if session.merge_base == scope.merge_base or not _is_ancestor(
-        repo_root, session.merge_base, scope.merge_base
-    ):
-        return None
-    try:
-        delta = _collect_branch_delta(repo_root, scope, session, config=current_config)
-    except RuntimeError:
-        return None
-    if delta is None or delta.reviewable_files or delta.submodule_changes:
-        return None
+    for session in sessions:
+        if (
+            session.contract_digest != current_contract_digest
+            or not _anchors_cover(session.task_blueprint_anchors, scope.task_blueprint_anchors)
+        ):
+            continue
+        prior_receipt = load_valid_receipt(repo_root, session.last_patch_digest)
+        if prior_receipt is None or not _receipt_covers(
+            prior_receipt, current_contract_digest, session.task_blueprint_anchors,
+        ):
+            continue
+        same_base = session.merge_base == scope.merge_base
+        if not same_base and not _is_ancestor(repo_root, session.merge_base, scope.merge_base):
+            continue
+        if existing is None or session.last_patch_digest != scope.patch_digest:
+            if same_base:
+                continue
+            try:
+                delta = _collect_branch_delta(repo_root, scope, session, config=current_config)
+            except RuntimeError:
+                continue
+            if delta is None or delta.has_changes:
+                continue
+        elif changed_task_blueprints(
+            repo_root, current_config, session.last_head_sha, scope.head_sha,
+            session.task_blueprint_anchors.keys() | scope.task_blueprint_anchors.keys(),
+        ):
+            continue
+        return _carry_forward_receipt(repo_root, scope, session, prior_receipt, persist=persist)
+    return None
 
+
+def _carry_forward_receipt(
+    repo_root: Path,
+    scope: ReviewScope,
+    session: ReviewSessionState,
+    prior_receipt: dict[str, Any],
+    *,
+    persist: bool,
+) -> dict[str, Any] | None:
     carried = ReviewResult(
         verdict="GO",
         summary=str(prior_receipt.get("summary") or session.last_summary),
@@ -669,41 +789,33 @@ def resolve_or_carry_forward_receipt(
         session_id=str(prior_receipt.get("session_id") or session.session_id),
         log_path=str(prior_receipt.get("log_path") or ""),
     )
+    anchors = session.task_blueprint_anchors
     if not persist:
-        return {
-            "schema": RECEIPT_SCHEMA,
-            "verdict": "GO",
-            "provider": carried.provider,
-            "mode": carried.mode,
-            "session_id": carried.session_id,
-            "log_path": carried.log_path,
-            "patch_digest": carried.patch_digest,
-            "head_sha": carried.head_sha,
-            "merge_base": carried.merge_base,
-            "summary": carried.summary,
-        }
-    save_receipt(repo_root, carried)
-    save_review_session(
-        repo_root,
-        ReviewSessionState(
-            worktree_path=session.worktree_path,
-            branch=session.branch,
-            merge_base=scope.merge_base,
-            provider=carried.provider,
-            session_id=carried.session_id,
-            last_head_sha=scope.head_sha,
-            last_patch_digest=scope.patch_digest,
-            last_verdict="GO",
-            last_summary=carried.summary,
-            last_blocking_findings=(),
-            last_submodule_shas={
-                sub.path: sub.new_sha for sub in scope.submodule_changes
-            },
-            contract_digest=current_contract_digest,
-            round_count=session.round_count,
-            updated_at=datetime.now(UTC).isoformat(),
-            initial_head_sha=session.initial_head_sha,
-            task_blueprint_anchors=session.task_blueprint_anchors,
-        ),
+        return receipt_payload(
+            carried, contract_digest=session.contract_digest, task_blueprint_anchors=anchors,
+        )
+    save_receipt(
+        repo_root, carried, contract_digest=session.contract_digest, task_blueprint_anchors=anchors,
     )
+    if _git_text(repo_root, "rev-parse", "--verify", "HEAD", check=False) == scope.head_sha:
+        save_review_session(
+            repo_root,
+            replace(
+                session,
+                worktree_path=str(repo_root.resolve()),
+                branch=current_branch_name(repo_root),
+                merge_base=scope.merge_base,
+                provider=carried.provider,
+                session_id=carried.session_id,
+                last_head_sha=scope.head_sha,
+                last_patch_digest=scope.patch_digest,
+                last_verdict="GO",
+                last_summary=carried.summary,
+                last_blocking_findings=(),
+                last_submodule_shas={
+                    sub.path: sub.new_sha for sub in scope.submodule_changes
+                },
+                updated_at=datetime.now(UTC).isoformat(),
+            ),
+        )
     return load_valid_receipt(repo_root, scope.patch_digest)

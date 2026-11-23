@@ -53,6 +53,9 @@ def resolve_changed_file(root: Path, changed_file: str) -> tuple[str, Path] | No
         rel_path = absolute_path.relative_to(root)
     except ValueError:
         return None
+    lexical_path = Path(os.path.abspath(candidate))
+    if lexical_path.is_relative_to(root):
+        rel_path = lexical_path.relative_to(root)
     return rel_path.as_posix(), absolute_path
 
 
@@ -82,6 +85,19 @@ def git(cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str] | Non
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def repository_path_exists(root: Path, rel_path: str, revision: str | None) -> bool:
+    """Check for a repository entry, distinguishing absence from an unreadable revision."""
+    if revision is None:
+        path = root / rel_path
+        return path.exists() or path.is_symlink()
+    entries = git_stdout(root, [
+        "git", "ls-tree", "-z", f"{revision}^{{commit}}", "--", f":(literal){rel_path}",
+    ])
+    if entries is None:
+        raise ValueError(f"Cannot inspect {rel_path} at revision {revision}")
+    return bool(entries)
 
 
 def imported_submodule_trees(root: Path, base: str) -> dict[str, str]:
@@ -381,6 +397,7 @@ def read_repository_file(
     rel_path: str,
     *,
     revision: str | None,
+    require_regular: bool = False,
     _seen: frozenset[str] = frozenset(),
     loaded_paths: set[str] | None = None,
     snapshot_modes: dict[str, str] | None = None,
@@ -403,6 +420,8 @@ def read_repository_file(
                     timeout=15,
                 )
                 mode = entry.stdout.split(b" ", 1)[0].decode("ascii")
+            if require_regular and mode not in {"100644", "100755"}:
+                raise ValueError(f"Expected a regular file at revision {revision}: {rel_path}")
             if mode == "120000":
                 link = subprocess.run(
                     ["git", "show", f"{revision}:{rel_path}"],
@@ -449,7 +468,11 @@ def read_repository_file(
 
     try:
         target = repo_root / rel_path
-        if not target.resolve().is_relative_to(repo_root.resolve()):
+        resolved = target.resolve()
+        root = repo_root.resolve()
+        if require_regular and (resolved != root / rel_path or not target.is_file()):
+            raise ValueError(f"Expected a regular file: {rel_path}")
+        if not resolved.is_relative_to(root):
             raise ValueError(f"Path escapes repository: {rel_path}")
     except (ValueError, RuntimeError) as exc:
         raise ValueError(str(exc)) from exc

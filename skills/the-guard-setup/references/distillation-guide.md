@@ -19,7 +19,7 @@ Run `guard topology sync` to install the factual module inventory. Confirm resou
 adding `exclusive_sql_owners`; identify the replacing owner and current migration boundary before
 adding `retired_tables`. Declare module `role`, `layer`, `boundary_docs`, and allowed `dependencies`. Use
 `topology.layers` for directional layer ceilings and `enforce_module_dependencies: true` for
-module allowlists; use `forbidden_imports` or `module_boundaries` for additional explicit constraints. Use narrow `forbidden_patterns` for concrete disallowed dependencies; prefer a
+module allowlists. Use `forbidden_imports` with `scope_prefixes` and `imports` for additional explicit constraints. Use narrow `forbidden_patterns` for concrete disallowed dependencies and prefer a
 single owner contract over growing generic blacklists. Preserve existing declared constraints when
 refreshing discovered modules.
 

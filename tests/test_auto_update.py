@@ -23,6 +23,93 @@ from the_guard.review import cli as review_cli
 
 
 class AutoUpdateTests(unittest.TestCase):
+    def test_status_reads_legacy_metadata_without_migrating_until_self_update(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            home, package, state_metadata, _ = self._make_checkout(Path(root).resolve())
+            checkout = package.parents[1]
+            (checkout / "dirty").touch()
+            legacy = home / ".guard"
+            legacy.mkdir()
+            metadata = '{"installed_sha":"reviewed"}\n'
+            (legacy / "auto_update.json").write_text(metadata, encoding="utf-8")
+            for name in ("auto_update.log", "auto_update.lock"):
+                (legacy / name).touch()
+            override = home / "elsewhere"
+            self.assertEqual(auto_update.state_dir_for(home, override, {}), override)
+            self.assertEqual(auto_update.state_dir_for(home, env={"THE_GUARD_STATE_DIR": str(override)}), override)
+            self.assertTrue(legacy.exists())
+            state = auto_update.state_dir_for(home, env={})
+            self.assertEqual(state, home / ".config/the-guard")
+            status = auto_update.guard_status(version="test", home_dir=home, env={})
+            self.assertEqual(status["state_dir"], str(state))
+            self.assertEqual(status["auto_update"], json.loads(metadata))
+            self.assertEqual((legacy / "auto_update.json").read_text(), metadata)
+            self.assertFalse(state_metadata.exists())
+            self.assertFalse((state / "auto_update.lock").exists())
+            auto_update.self_update(checkout_dir=checkout, home_dir=home, state_dir=override, env={})
+            self.assertTrue(legacy.exists())
+            with (legacy / "auto_update.lock").open("a+") as old_updater:
+                fcntl.flock(old_updater.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+                self.assertEqual((locked["status"], locked["source_status"]), ("skipped_locked", "skipped_locked"))
+                self.assertEqual((legacy / "auto_update.json").read_text(), metadata)
+                self.assertTrue((legacy / "auto_update.lock").exists())
+                self.assertFalse(state_metadata.exists())
+            report = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+            self.assertEqual(report["status"], "skipped_dirty_checkout")
+            self.assertEqual(report["installed_sha"], "reviewed")
+            self.assertTrue(legacy.exists())
+            self.assertFalse(state_metadata.exists())
+
+            (checkout / "dirty").unlink()
+            subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", str(checkout)], check=True)
+            subprocess.run(["git", "-C", str(checkout), "fetch", "origin"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(checkout), "branch", "--set-upstream-to=origin/main"], check=True, capture_output=True)
+
+            sync_skills = auto_update.sync_global_skills
+
+            def sync_with_lock(*args, **kwargs):
+                with (legacy / "auto_update.lock").open("r+") as old_updater:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(old_updater.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual((legacy / "auto_update.json").read_text(), metadata)
+                return sync_skills(*args, **kwargs)
+
+            with mock.patch.object(auto_update, "sync_global_skills", side_effect=sync_with_lock):
+                report = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+            self.assertEqual(report["status"], "up_to_date")
+            self.assertEqual(json.loads(state_metadata.read_text()), report)
+            self.assertFalse(legacy.exists())
+            auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+            self.assertFalse(legacy.exists())
+
+    def test_background_scheduler_leaves_legacy_state_for_the_child_updater(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            legacy = home / ".guard"
+            legacy.mkdir()
+            metadata = legacy / "auto_update.json"
+            metadata.write_text('{"installed_sha":"legacy","last_checked_at":1}')
+            env = {"THE_GUARD_BIN": sys.executable, "THE_GUARD_AUTO_UPDATE": "1"}
+            with mock.patch.object(auto_update.subprocess, "Popen") as popen:
+                self.assertTrue(auto_update.maybe_trigger_background_auto_update(home_dir=home, env=env))
+            self.assertNotIn("--state-dir", popen.call_args.args[0])
+            self.assertTrue(metadata.is_file())
+            self.assertFalse((home / ".config/the-guard/auto_update.json").exists())
+
+    def test_auto_update_log_rotates_one_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root)
+            log = state / "auto_update.log"
+            backup = state / "auto_update.log.1"
+            log.write_bytes(b"x" * (512 * 1024))
+            backup.write_text("old backup", encoding="utf-8")
+            auto_update._append_log(state, "new record")
+            self.assertEqual(json.loads(log.read_text())["event"], "new record")
+            self.assertEqual(backup.read_bytes(), b"x" * (512 * 1024))
+            self.assertEqual(sorted(p.name for p in state.glob("auto_update.log*")),
+                             ["auto_update.log", "auto_update.log.1"])
+
     @staticmethod
     def _commit_checkout(checkout: Path, message: str) -> str:
         subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
@@ -49,8 +136,8 @@ class AutoUpdateTests(unittest.TestCase):
         )
         subprocess.run(["git", "init", "-b", "main", str(checkout)], check=True, capture_output=True)
         sha = self._commit_checkout(checkout, "guard checkout")
-        state = home / ".guard"
-        state.mkdir()
+        state = home / ".config/the-guard"
+        state.mkdir(parents=True)
         return home, package, state / "auto_update.json", sha
 
     @staticmethod
@@ -241,6 +328,8 @@ class AutoUpdateTests(unittest.TestCase):
                 (package / "new_module.py").touch()
                 self._commit_checkout(home / "the-guard", "advance checkout")
                 self.assertEqual(auto_update.maybe_delegate_to_checkout(["status"], home_dir=home, env=env), 2)
+                trigger.assert_not_called()
+                self.assertEqual(auto_update.maybe_delegate_to_checkout(["review"], home_dir=home, env=env), 2)
                 trigger.assert_called_once()
 
     def test_self_update_reinstalls_uv_tool_when_head_already_pulled(self) -> None:

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+import errno
 import fcntl
 import hashlib
 import importlib
@@ -16,6 +17,7 @@ import time
 from typing import Any, Iterator, Mapping
 
 AUTO_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
+AUTO_UPDATE_LOG_MAX_BYTES = 512 * 1024
 SKILL_NAMES = ("the-guard", "the-guard-setup")
 _BOOT_PACKAGE_DIR = globals().get("_BOOT_PACKAGE_DIR", Path(__file__).resolve().parent)
 PACKAGE_DIR = _BOOT_PACKAGE_DIR
@@ -51,14 +53,23 @@ def state_dir_for(
     state_dir: str | Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
+    return _state_dirs_for(home_dir, state_dir, env)[0]
+
+
+def _state_dirs_for(
+    home_dir: str | Path | None,
+    state_dir: str | Path | None,
+    env: Mapping[str, str] | None,
+) -> tuple[Path, Path | None]:
     eff_env = os.environ if env is None else env
     if state_dir is not None:
-        return Path(state_dir).expanduser().resolve()
+        return Path(state_dir).expanduser().resolve(), None
     configured = eff_env.get("THE_GUARD_STATE_DIR", "").strip()
     if configured:
-        return Path(configured).expanduser().resolve()
-    base_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    return base_home / ".guard"
+        return Path(configured).expanduser().resolve(), None
+    home = home_dir or eff_env.get("HOME")
+    base_home = Path(home).expanduser().resolve() if home else Path.home()
+    return base_home / ".config" / "the-guard", base_home / ".guard"
 
 
 def gemini_dir_for(
@@ -112,7 +123,13 @@ def _append_log(state_dir: Path, event: str, **fields: Any) -> None:
     }
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
-        with (state_dir / "auto_update.log").open("a", encoding="utf-8") as handle:
+        log_path = state_dir / "auto_update.log"
+        try:
+            if log_path.stat().st_size >= AUTO_UPDATE_LOG_MAX_BYTES:
+                os.replace(log_path, state_dir / "auto_update.log.1")
+        except FileNotFoundError:
+            pass
+        with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         return
@@ -205,15 +222,22 @@ def load_auto_update_status(
     state_dir: str | Path | None = None,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    resolved_state = state_dir_for(home_dir=home_dir, state_dir=state_dir, env=env)
-    metadata_path = resolved_state / "auto_update.json"
-    if not metadata_path.is_file():
-        return None
-    try:
-        value = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return {"status": "failed", "error": str(exc)}
-    return value if isinstance(value, dict) else {"status": "failed", "error": "invalid metadata"}
+    return _read_auto_update_status(*_state_dirs_for(home_dir, state_dir, env))
+
+
+def _read_auto_update_status(state: Path, legacy: Path | None) -> dict[str, Any] | None:
+    current = state / "auto_update.json"
+    # Recheck the current file if a concurrent update moves the legacy metadata.
+    paths = (current, legacy / current.name, current) if legacy is not None else (current,)
+    for path in paths:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            return {"status": "failed", "error": str(exc)}
+        return value if isinstance(value, dict) else {"status": "failed", "error": "invalid metadata"}
+    return None
 
 
 def guard_status(
@@ -226,7 +250,7 @@ def guard_status(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=env)
+    resolved_state, legacy = _state_dirs_for(resolved_home, state_dir, env)
     resolved_gemini = gemini_dir_for(home_dir=resolved_home, gemini_dir=gemini_dir, env=env)
     checkout: Path | None = None
     try:
@@ -249,9 +273,7 @@ def guard_status(
         "checkout": str(checkout) if checkout is not None else None,
         "guard_bin": shutil.which("guard") or "",
         "skill_links": skill_links,
-        "auto_update": load_auto_update_status(
-            home_dir=resolved_home, state_dir=resolved_state, env=env
-        ),
+        "auto_update": _read_auto_update_status(resolved_state, legacy),
     }
     return report
 
@@ -265,26 +287,29 @@ def self_update(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=env)
+    resolved_state, legacy = _state_dirs_for(resolved_home, state_dir, env)
     resolved_gemini = gemini_dir_for(home_dir=resolved_home, gemini_dir=gemini_dir, env=env)
-    resolved_state.mkdir(parents=True, exist_ok=True)
     metadata_path = resolved_state / "auto_update.json"
-    existing = _load_json_dict(metadata_path)
-    report: dict[str, Any] = {
-        "last_checked_at": time.time(),
-        "last_updated_at": existing.get("last_updated_at"),
-        "status": "failed",
-        "source_status": "failed",
-        "head_sha": existing.get("head_sha"),
-        "source_sha": existing.get("source_sha"),
-        "source_tree_digest": existing.get("source_tree_digest"),
-        "installed_sha": existing.get("installed_sha"),
-        "installed_tree_digest": existing.get("installed_tree_digest"),
-        "cli_status": "skipped",
-        "synced_skills": [],
-        "error": None,
-    }
-    with _try_file_lock(resolved_state / "auto_update.lock") as locked:
+    with _try_file_lock(resolved_state / "auto_update.lock") as locked, ExitStack() as stack:
+        if legacy is not None and not legacy.is_dir():
+            legacy = None
+        if locked and legacy is not None:
+            locked = stack.enter_context(_try_file_lock(legacy / "auto_update.lock"))
+        existing = _read_auto_update_status(resolved_state, legacy) or {}
+        report: dict[str, Any] = {
+            "last_checked_at": time.time(),
+            "last_updated_at": existing.get("last_updated_at"),
+            "status": "failed",
+            "source_status": "failed",
+            "head_sha": existing.get("head_sha"),
+            "source_sha": existing.get("source_sha"),
+            "source_tree_digest": existing.get("source_tree_digest"),
+            "installed_sha": existing.get("installed_sha"),
+            "installed_tree_digest": existing.get("installed_tree_digest"),
+            "cli_status": "skipped",
+            "synced_skills": [],
+            "error": None,
+        }
         if not locked:
             locked_report = {
                 **report,
@@ -293,7 +318,12 @@ def self_update(
             }
             _append_log(resolved_state, "auto_update_skipped_locked", **locked_report)
             return locked_report
+        cutover_ready = False
         try:
+            guard_bin = resolved_home / ".local/bin/guard"
+            is_real_home = resolved_home == Path.home().resolve()
+            has_installed_guard = guard_bin.exists() or (is_real_home and bool(shutil.which("guard")))
+            cutover_ready = not has_installed_guard
             checkout, explicit = _discover_checkout(checkout_dir, resolved_home)
             if checkout is not None:
                 dirty = _subprocess_run(
@@ -330,9 +360,6 @@ def self_update(
                         or existing.get("installed_tree_digest") != checkout_digest
                         or (installed_digest is not None and installed_digest != checkout_digest)
                     )
-                    guard_bin = resolved_home / ".local/bin/guard"
-                    is_real_home = resolved_home == Path.home().resolve()
-                    has_installed_guard = guard_bin.exists() or (is_real_home and bool(shutil.which("guard")))
                     reinstalled = False
                     if (
                         needs_reinstall and not explicit and shutil.which("uv")
@@ -346,6 +373,7 @@ def self_update(
                     if reinstalled or installed_digest == checkout_digest:
                         report["installed_sha"] = after_sha
                         report["installed_tree_digest"] = checkout_digest
+                        cutover_ready = True
                 report["head_sha"] = _subprocess_run(
                     ["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"], 20
                 ).strip()
@@ -360,6 +388,9 @@ def self_update(
                     "up_to_date"
                     if "nothing to upgrade" in uv_out.lower()
                     else "updated"
+                )
+                cutover_ready = cutover_ready or (
+                    _installed_guard_package_dir(resolved_home) == Path(__file__).resolve().parent
                 )
             else:
                 report["source_status"] = "skipped_no_source"
@@ -376,9 +407,11 @@ def self_update(
         except Exception as exc:
             report["error"] = str(exc)
             report["status"] = "failed"
-        atomic_write_text(
-            metadata_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n"
-        )
+        cutover = legacy is not None and cutover_ready and report["status"] in {"updated", "up_to_date"}
+        if cutover or metadata_path.exists() or legacy is None or not (legacy / metadata_path.name).is_file():
+            atomic_write_text(
+                metadata_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+            )
         _append_log(
             resolved_state,
             "auto_update_failed"
@@ -388,6 +421,15 @@ def self_update(
         )
         if report["status"] == "failed":
             raise RuntimeError(str(report["error"]))
+        if cutover and legacy is not None:
+            for name in (metadata_path.name, "auto_update.log", "auto_update.lock"):
+                (legacy / name).unlink(missing_ok=True)
+            stack.close()
+            try:
+                legacy.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                    raise
     return report
 
 
@@ -447,12 +489,12 @@ def maybe_trigger_background_auto_update(
         checkout, _ = _discover_checkout(None, resolved_home)
         if checkout is not None and _is_same_git_repo(Path(active_repo_root), checkout):
             return False
-    resolved_state = state_dir_for(home_dir=resolved_home, state_dir=state_dir, env=eff_env)
+    resolved_state, legacy = _state_dirs_for(resolved_home, state_dir, eff_env)
     resolved_gemini = gemini_dir_for(
         home_dir=resolved_home, gemini_dir=gemini_dir, env=eff_env
     )
     metadata_path = resolved_state / "auto_update.json"
-    metadata = _load_json_dict(metadata_path)
+    metadata = _read_auto_update_status(resolved_state, legacy) or {}
     try:
         cooldown = time.time() - float(metadata.get("last_checked_at") or 0)
     except (TypeError, ValueError):
@@ -489,7 +531,7 @@ def maybe_trigger_background_auto_update(
     with _try_file_lock(resolved_state / "auto_update.lock") as locked:
         if not locked:
             return False
-        metadata = _load_json_dict(metadata_path)
+        metadata = _read_auto_update_status(resolved_state, legacy) or {}
         try:
             cooldown = time.time() - float(metadata.get("last_checked_at") or 0)
         except (TypeError, ValueError):
@@ -504,11 +546,12 @@ def maybe_trigger_background_auto_update(
             "--quiet",
             "--home-dir",
             str(resolved_home),
-            "--state-dir",
-            str(resolved_state),
             "--gemini-dir",
             str(resolved_gemini),
         ]
+        if legacy is None:
+            cmd.extend(["--state-dir", str(resolved_state)])
+        migration_pending = legacy is not None and legacy.is_dir() and not metadata_path.exists()
         try:
             subprocess.Popen(
                 cmd,
@@ -521,9 +564,10 @@ def maybe_trigger_background_auto_update(
             metadata["status"] = "failed"
             metadata["error"] = str(exc)
             metadata["last_failed_at"] = time.time()
-            atomic_write_text(
-                metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
-            )
+            if not migration_pending:
+                atomic_write_text(
+                    metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+                )
             _append_log(
                 resolved_state,
                 "auto_update_spawn_failed",
@@ -532,9 +576,11 @@ def maybe_trigger_background_auto_update(
             )
             return False
         metadata["last_checked_at"] = time.time()
-        atomic_write_text(
-            metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
-        )
+        if not migration_pending:
+            # The child owns the first canonical write while legacy metadata is authoritative.
+            atomic_write_text(
+                metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+            )
         _append_log(resolved_state, "auto_update_spawned", command=cmd)
         return True
 
@@ -579,8 +625,7 @@ def _newer_checkout_package(
         else:
             baseline = _installed_vcs_commit(PACKAGE_DIR)
             if baseline is None:
-                metadata_path = state_dir_for(home_dir=home_dir, state_dir=state_dir, env=env) / "auto_update.json"
-                metadata = _load_json_dict(metadata_path)
+                metadata = load_auto_update_status(home_dir=home_dir, state_dir=state_dir, env=env) or {}
                 installed_sha = metadata.get("installed_sha")
                 baseline = installed_sha or metadata.get("source_sha")
                 # The installed SHA describes the global tool. A project venv can still be stale.
@@ -639,5 +684,9 @@ def maybe_delegate_to_checkout(
         "THE_GUARD_DELEGATED": "1",
     }
     proc = subprocess.run([sys.executable, "-m", "the_guard.cli", *argv], env=child_env, check=False)
-    maybe_trigger_background_auto_update(active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir, gemini_dir=gemini_dir, env=eff_env, force_local_sync=True)
+    if argv[0] != "status":
+        maybe_trigger_background_auto_update(
+            active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir,
+            gemini_dir=gemini_dir, env=eff_env, force_local_sync=True,
+        )
     return proc.returncode

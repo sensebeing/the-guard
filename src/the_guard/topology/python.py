@@ -13,7 +13,6 @@ from .rules import (
     FOR_UPDATE_SQL_RE,
     LOCK_OR_WRITE_FUNCTION_MARKERS,
     NON_RESOURCE_READ_CALLS,
-    READ_ACTION_SUFFIXES,
     READ_CALL_EXACT,
     READ_CALL_PREFIXES,
     READ_FUNCTION_EXACT,
@@ -173,17 +172,8 @@ def _is_read_function_or_endpoint(func: ast.FunctionDef | ast.AsyncFunctionDef) 
         if isinstance(decorator, ast.Call) and isinstance(
             decorator.func, ast.Attribute
         ):
-            method = decorator.func.attr.lower()
-            if method == "get":
+            if decorator.func.attr.lower() == "get":
                 return True
-            if method == "post" and decorator.args:
-                first_arg = decorator.args[0]
-                if isinstance(first_arg, ast.Constant) and isinstance(
-                    first_arg.value, str
-                ):
-                    route_path = first_arg.value.lower()
-                    if route_path.endswith(READ_ACTION_SUFFIXES):
-                        return True
 
     if name_lower in READ_FUNCTION_EXACT or name_lower.startswith(
         READ_FUNCTION_PREFIXES

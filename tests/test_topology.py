@@ -1,6 +1,7 @@
 """Read paths remain pure and efficient; owner/retirement rules ratchet changed code only."""
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ import shutil
 from pathlib import Path
 
 from the_guard.config import GuardConfig, load_config
+from the_guard.cli import main
 from the_guard.topology import (
     audit_topology,
     check_contract_drift,
@@ -25,6 +27,7 @@ from the_guard.topology.imports import (
 )
 from the_guard.topology.python import _check_python_file
 from the_guard.topology.swift import _check_swift_file
+from the_guard.topology.sync import merge_topology
 
 
 class TopologyTests(unittest.TestCase):
@@ -56,6 +59,130 @@ class TopologyTests(unittest.TestCase):
             base,
             _compute_changed_lines(base, text) if base is not None else None,
         )
+
+    def test_core_preset_only_emits_installed_lexical_rules(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            self.assertEqual(main(["init", "--repo-root", str(self.root), "--preset", "core"]), 0)
+        path = "src/api.py"
+        self.write(path, 'async def get_item(key):\n    await db.get_item(key)\n    await db.get_item(key)\n    return "SELECT * FROM items FOR UPDATE"\n')
+        findings = run_topology_guard(self.root, [path])
+        self.assertEqual({f.rule_id for f in findings}, {"guard.architecture-simplicity"})
+
+    def test_retired_module_blocks_edits_and_inbound_imports(self):
+        retired = "packages/legacy"
+        self.config({"enforce_module_dependencies": True, "layers": {"domain": ["domain"]},
+                     "modules": [{"path": retired, "retired": True, "boundary_docs": ["missing.md"]},
+                                 {"path": "packages/api", "layer": "domain"}]})
+        self.write(retired + "/notes.md", "Historical notes\n")
+        self.write("packages/api/api.py", "from legacy.api import read\n")
+        self.write("tools/use.py", "from legacy.api import read\n")
+        paths = [retired + "/notes.md", "packages/api/api.py", "tools/use.py"]
+        findings = run_topology_guard(self.root, paths)
+        self.assertEqual({f.path for f in findings if "retired" in f.message.lower()}, set(paths))
+        self.assertTrue(all(f.rule_id == "guard.service-boundaries" for f in findings))
+        report = audit_topology(self.root)
+        self.assertEqual(report["retired_modules"], [retired])
+        self.assertEqual(report["unregistered_modules"], ["tools"])
+        self.assertEqual(report["missing_boundary_docs"], [])
+        self.git("add", ".")
+        self.git("commit", "-m", "Record retired module")
+        (self.root / paths[0]).unlink()
+        self.assertEqual(run_topology_guard(self.root, [paths[0]]), [])
+        self.assertEqual(check_contract_drift(self.root, [], base="HEAD"), [])
+        self.assertTrue(next(m for m in sync_topology(self.root)["modules"] if m["path"] == retired)["retired"])
+
+        (self.root / retired).mkdir(exist_ok=True)
+        (self.root / paths[0]).symlink_to("../../packages/api/api.py")
+        self.assertEqual([f.path for f in run_topology_guard(self.root, [paths[0]])], [paths[0]])
+
+    def test_retired_imports_use_changed_spans_and_boundary_exemptions(self):
+        self.config({"modules": [{"path": "packages/legacy", "retired": True}]})
+        path = "packages/api/use.ts"
+        existing_import = 'import { old } from "../legacy/old.js";'
+        exemption = " // guard-exempt guard.service-boundaries: approved migration window"
+        self.write(path, existing_import + "\nconst value = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Legacy inbound import")
+        self.write(path, existing_import + "\nconst value = 2;\n")
+        self.assertEqual(run_topology_guard(self.root, [path], base="HEAD"), [])
+
+        import_text = 'import {\n  read,\n} from "../legacy/new.js";'
+        self.write(path, import_text + exemption + "\nconst value = 2;\n")
+        self.assertEqual(run_topology_guard(self.root, [path], base="HEAD"), [])
+        self.write(path, import_text + "\nconst value = 2;\n")
+        findings = run_topology_guard(self.root, [path], base="HEAD")
+        self.assertEqual([(f.line, f.rule_id) for f in findings], [(1, "guard.service-boundaries")])
+
+        retired_file = "packages/legacy/old.ts"
+        self.write(retired_file, exemption.strip() + "\nexport const old = 1;\n")
+        self.assertEqual(run_topology_guard(self.root, [retired_file], base="HEAD"), [])
+
+    def test_contract_drift_grandfathers_untouched_retired_imports_only(self):
+        path = "packages/api/use.ts"
+        topology = {"enforce_module_dependencies": True, "modules": [
+            {"path": "packages/api", "dependencies": ["packages/helper"]},
+            {"path": "packages/helper"},
+            {"path": "packages/legacy", "retired": True},
+        ]}
+        self.config(topology)
+        old_import = 'import { old } from "../legacy/old.js";'
+        self.write(path, old_import + "\nconst value = 1;\n")
+        self.write("packages/helper/index.ts", "export const helper = 1;\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Baseline with retired import and unused permission")
+        topology["modules"][0]["dependencies"] = []
+        self.config(topology)
+        self.write(path, "// Shift the existing import\n" + old_import + "\nconst value = 2;\n")
+        changed = [".guard/config.json", path]
+        self.assertEqual(check_contract_drift(self.root, changed, base="HEAD"), [])
+
+        new_import = 'import { read } from "../legacy/new.js";'
+        self.write(path, new_import + "\n" + old_import + "\nconst value = 2;\n")
+        findings = check_contract_drift(self.root, changed, base="HEAD")
+        self.assertEqual([(f.path, f.line) for f in findings], [(path, 1)])
+
+    def test_contract_drift_checks_unchanged_callers_outside_active_modules_on_retirement(self):
+        retired = "packages/legacy"
+        self.config({"modules": [{"path": retired}]})
+        callers = ["scripts/use.py", "tools/use.py"]
+        for path in callers:
+            self.write(path, "import legacy.api\n")
+        self.write("tests/use.py", "import legacy.api  # guard-exempt guard.service-boundaries: approved fixture\n")
+        self.write(retired + "/api.py", "def read():\n    return 1\n")
+        # A gitlink has no root-repository source blob, even when its submodule is declared.
+        gitlink = "vendor/uninitialized.py"
+        self.write(".gitmodules", f'[submodule "vendor"]\npath = {gitlink}\nurl = ../vendor\n')
+        self.git("add", ".")
+        commit = self.git("commit-tree", self.git("write-tree"), "-m", "Submodule snapshot")
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{commit},{gitlink}")
+        self.git("commit", "-m", "Record active module and callers")
+        base = self.git("rev-parse", "HEAD")
+
+        self.config({"modules": [{"path": retired, "retired": True}]})
+        changed = [".guard/config.json"]
+        findings = check_contract_drift(self.root, changed, base=base)
+        self.assertEqual([(f.path, f.line) for f in findings], [(path, 1) for path in callers])
+        self.git("add", ".guard/config.json")
+        self.git("commit", "-m", "Retire module")
+
+        self.write(callers[0], "pass\n")
+        self.assertTrue(self.git("ls-tree", "-r", "HEAD", "--", gitlink).startswith("160000 commit "))
+        self.assertFalse((self.root / gitlink / ".git").exists())
+        findings = check_contract_drift(self.root, changed, base=base, revision="HEAD")
+        self.assertEqual([(f.path, f.line) for f in findings], [(path, 1) for path in callers])
+
+    def test_governed_inventory_merge_drops_dependencies_on_retired_modules(self):
+        active = "packages/api"
+        retired = "packages/legacy"
+        topology = {"enforce_module_dependencies": True, "modules": [
+            {"path": active, "dependencies": [retired]},
+            {"path": retired, "retired": True},
+        ]}
+        discovered = [{"path": active, "boundary_docs": [], "dependencies": [retired]},
+                      {"path": retired, "retired": True}]
+        merged, _ = merge_topology(topology, discovered)
+        self.assertEqual(merged["modules"][0]["dependencies"], [])
+        self.assertTrue(merged["modules"][1]["retired"])
 
     def test_file_module_resolution_and_root_disambiguation(self):
         modules = ["src/the_guard/config.py", "src/the_guard/review", "packages/core/config.ts"]
@@ -288,7 +415,7 @@ class TopologyTests(unittest.TestCase):
 
     def test_topology_snapshot_ignores_dirty_source_and_dirty_symlink(self):
         self.config(
-            {"forbidden_imports": [{"from": "packages/a", "imports": ["forbidden"]}]}
+            {"forbidden_imports": [{"scope_prefixes": ["packages/a"], "imports": ["forbidden"]}]}
         )
         self.write("packages/a/main.ts", "export const value = 1;\n")
         self.git("add", ".")
@@ -341,7 +468,7 @@ class TopologyTests(unittest.TestCase):
 
     def test_snapshot_metadata_is_immutable_and_unavailable_reads_fail_closed(self):
         self.config(
-            {"forbidden_imports": [{"from": "packages/a", "imports": ["forbidden"]}]}
+            {"forbidden_imports": [{"scope_prefixes": ["packages/a"], "imports": ["forbidden"]}]}
         )
         self.write("packages/a/main.ts", "export const value = 1;\n")
         self.git("add", ".")
@@ -403,7 +530,7 @@ class TopologyTests(unittest.TestCase):
 
     def test_snapshot_baseline_ignores_dirty_rename_inference(self):
         self.config(
-            {"forbidden_imports": [{"from": "packages/a", "imports": ["forbidden"]}]}
+            {"forbidden_imports": [{"scope_prefixes": ["packages/a"], "imports": ["forbidden"]}]}
         )
         self.write("packages/a/original.ts", "import 'forbidden';\n")
         self.git("add", ".")
@@ -737,8 +864,7 @@ ${ /* comment import('ignored') */ await import(
                 self.assertIn(extracted, extract_imports(path, code))
                 for topology in (
                     {"modules": modules, "enforce_module_dependencies": True},
-                    {"forbidden_imports": [{"imports": [prefix]}]},
-                    {"module_boundaries": [{"from": "packages/core/", "to": prefix}]},
+                    {"forbidden_imports": [{"scope_prefixes": ["packages/core/"], "imports": [prefix]}]},
                 ):
                     cfg = GuardConfig(topology=topology)
                     for changed, expected in (({2}, 3), ({3}, 3), ({1}, 1), (None, 1)):
@@ -751,7 +877,7 @@ ${ /* comment import('ignored') */ await import(
                         lines[line] += comment + " guard-exempt guard.service-boundaries: approved boundary fixture"
                         self.assertEqual(check_configured(path, "\n".join(lines), None, {2}, cfg), [])
         for prefix in ("pkg/", "pkg."):
-            cfg = GuardConfig(topology={"forbidden_imports": [{"to": prefix}]})
+            cfg = GuardConfig(topology={"forbidden_imports": [{"imports": [prefix]}]})
             for spec in ("pkg", "pkg/item", "pkg.item"):
                 self.assertEqual(len(check_configured("src/a.ts", f'import "{spec}";', None, None, cfg)), 1)
             self.assertEqual(check_configured("src/a.ts", 'import "pkg_other";', None, None, cfg), [])
@@ -805,7 +931,7 @@ import '../orca-workspace/index.ts';
         discovered = {m["path"]: m for m in discover_topology(self.root)["modules"]}
         self.assertIn("frontend", discovered)
         self.assertEqual(discovered["packages/mailbox"]["dependencies"], ["packages/orca-workspace"])
-        cfg = GuardConfig(topology={"forbidden_imports": [{"from": "packages/mailbox/", "to": "../orca-workspace"}]})
+        cfg = GuardConfig(topology={"forbidden_imports": [{"scope_prefixes": ["packages/mailbox/"], "imports": ["../orca-workspace"]}]})
         self.assertEqual([f.line for f in check_configured(path, code, None, None, cfg)], [5, 8, 9, 10, 13, 14])
 
     def test_module_resolution_ownership_aliases_and_escape(self):
@@ -833,7 +959,9 @@ import '../orca-workspace/index.ts';
         self.assertIn((1, 1, "api.storage.rows"), imports)
         self.assertIn((2, 2, "internal.storage"), imports)
         self.assertIn((2, 2, "internal"), imports)
-        self.assertIn((1, 1, "api.storage.rows"), extract_imports("src/api/sub/main.py", code, ("custom",)))
+        custom_imports = extract_imports("custom/api/sub/main.py", code, ("custom",))
+        self.assertIn((1, 1, "api.storage.rows"), custom_imports)
+        self.assertNotIn((1, 1, "api.storage.rows"), extract_imports("app/api/sub/main.py", code))
         self.write("src/api/main.py", "from ..storage import rows\n")
         self.write("src/storage/__init__.py", "")
         modules = {m["path"]: m for m in discover_topology(self.root)["modules"]}
@@ -1035,7 +1163,7 @@ import '../orca-workspace/index.ts';
                         "literal": True,
                     }
                 ],
-                "forbidden_imports": [{"from": "src/", "to": "internal.storage"}],
+                "forbidden_imports": [{"scope_prefixes": ["src/"], "imports": ["internal.storage"]}],
             }
         )
         self.write(
@@ -1090,8 +1218,7 @@ import '../orca-workspace/index.ts';
                 "forbidden_patterns": [
                     {"literal_or_regex": "/reverse", "literal": True}
                 ],
-                "forbidden_imports": [{"imports": ["internal"]}],
-                "module_boundaries": [{"from": "src/", "to": "private"}],
+                "forbidden_imports": [{"scope_prefixes": ["src/"], "imports": ["internal", "private"]}],
             },
         )
         text = "\n".join(

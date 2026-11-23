@@ -6,6 +6,8 @@ Contract: incremental sessions bind reviewed scope and patch IDs; invalid contin
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -25,7 +27,7 @@ from the_guard.review.engine import (
 )
 from the_guard.review import session
 from the_guard.review.session import ReviewRunLogger
-from the_guard.review.prompt import _parse_numstat_entries
+from the_guard.review.prompt import _parse_numstat_entries, build_incremental_review_prompt
 from the_guard.review.repository import (
     _collect_branch_delta,
     _is_same_per_file_branch_patch,
@@ -34,6 +36,7 @@ from the_guard.review.repository import (
     compute_review_contract_digest,
 )
 from the_guard.config import load_config
+from the_guard.hooks import main_push_gate
 from the_guard.policy import load_policy
 from architecture_review_support import (
     ArchitectureReviewTestCase,
@@ -46,6 +49,254 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
+    def test_object_only_push_carries_review_from_linked_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo, _ = self._init_repo(root)
+            review_tree = root / "review"
+            _git(repo, "worktree", "add", "-b", "review", str(review_tree), "main")
+            (review_tree / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+            _git(review_tree, "add", "service.py")
+            _git(review_tree, "commit", "-m", "Reviewed change")
+            reviewed = run_architecture_review(review_tree, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "Reviewed change", "blocking_findings": [],
+            })
+            base = _git(repo, "rev-parse", "HEAD")
+            tree = _git(repo, "rev-parse", f"{reviewed.head_sha}^{{tree}}")
+            replay = _git(repo, "commit-tree", tree, "-p", base, "-m", "Replay reviewed change")
+            update = f"{replay} {replay} refs/heads/main {base}\n"
+            self.assertEqual(main_push_gate(repo, update), 0)
+            self.assertEqual(_git(repo, "rev-parse", "HEAD"), base)
+            self.assertEqual(load_review_session(review_tree).last_head_sha, reviewed.head_sha)
+            self.assertIsNone(load_review_session(repo))
+            scope = collect_review_scope(repo, main_branch=base, head_ref=replay)
+            self.assertEqual(resolve_or_carry_forward_receipt(repo, scope)["head_sha"], replay)
+            self.assertEqual(load_review_session(review_tree).last_head_sha, reviewed.head_sha)
+            self.assertIsNone(load_review_session(repo))
+
+            (review_tree / "service.py").write_text("VALUE = 2\n", encoding="utf-8")
+            _git(review_tree, "commit", "-am", "Unreviewed change")
+            tree = _git(review_tree, "rev-parse", "HEAD^{tree}")
+            unreviewed = _git(repo, "commit-tree", tree, "-p", base, "-m", "Replay unreviewed change")
+            with redirect_stderr(StringIO()) as stderr:
+                self.assertEqual(main_push_gate(repo, update.replace(replay, unreviewed)), 2)
+            self.assertIn("missing review receipt", stderr.getvalue())
+            with redirect_stderr(StringIO()) as stderr:
+                self.assertEqual(main_push_gate(repo, update.replace(base, "a" * 40)), 2)
+            self.assertEqual(stderr.getvalue(), "NO-GO: remote target commit is not fetched locally; run git fetch and retry.\n")
+
+    def test_object_only_push_can_reuse_review_across_an_advanced_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = "docs/plan.md"
+            repo, _ = self._init_repo(root, review={"blueprint_globs": [plan]})
+            review_tree = root / "review"
+            _git(repo, "worktree", "add", "-b", "review", str(review_tree), "main")
+            (review_tree / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (review_tree / plan).write_text("Keep exactly one owner.\n", encoding="utf-8")
+            _git(review_tree, "add", "service.py", plan)
+            _git(review_tree, "commit", "-m", "Reviewed change")
+            reviewed = run_architecture_review(review_tree, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "Reviewed change", "blocking_findings": [],
+            })
+
+            (repo / "other.py").write_text("UPSTREAM = True\n", encoding="utf-8")
+            _git(repo, "add", "other.py")
+            _git(repo, "commit", "-m", "Advance remote baseline")
+            base = _git(repo, "rev-parse", "HEAD")
+            _git(review_tree, "rebase", base)
+            (review_tree / "notes.md").write_text("Non-reviewable notes\n", encoding="utf-8")
+            _git(review_tree, "add", "notes.md")
+            _git(review_tree, "commit", "-m", "Document the replay")
+            tree = _git(review_tree, "rev-parse", "HEAD^{tree}")
+            replay = _git(repo, "commit-tree", tree, "-p", base, "-m", "Replay on advanced base")
+            scope = collect_review_scope(repo, main_branch=base, head_ref=replay)
+            self.assertNotEqual(scope.patch_digest, reviewed.patch_digest)
+            self.assertNotEqual(scope.merge_base, reviewed.merge_base)
+            self.assertEqual(main_push_gate(repo, f"{replay} {replay} refs/heads/main {base}\n"), 0)
+            self.assertIsNone(load_valid_receipt(repo, scope.patch_digest))
+            self.assertIsNone(load_review_session(repo))
+            # Carry the receipt with the recipient commit actually checked out.
+            _git(repo, "merge", "--ff-only", replay)
+            carried = resolve_or_carry_forward_receipt(repo, scope)
+            self.assertEqual(carried["merge_base"], base)
+            self.assertEqual(carried["head_sha"], replay)
+            self.assertEqual(load_review_session(review_tree).last_patch_digest, reviewed.patch_digest)
+            recipient = load_review_session(repo)
+            self.assertEqual((recipient.last_head_sha, recipient.last_patch_digest), (replay, scope.patch_digest))
+            donor = load_review_session(review_tree)
+            self.assertEqual(donor.task_blueprint_anchors, {plan: (reviewed.head_sha,)})
+            self.assertEqual(recipient.task_blueprint_anchors, donor.task_blueprint_anchors)
+
+    def test_incremental_blueprint_symlink_change_uses_only_physical_diff_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td), review={"blueprint_globs": ["docs/plan.md"]})
+            source = repo / "docs/plan-source.txt"
+            source.write_text("Initial owner constraint.\n")
+            (repo / "docs/plan.md").symlink_to(source.name)
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "Record blueprint")
+            run_architecture_review(repo, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "Reviewed", "blocking_findings": [],
+            })
+            prior = load_review_session(repo)
+            source.write_text("Changed owner constraint.\n" + "Additional detail.\n" * 4200)
+            _git(repo, "commit", "-am", "Update blueprint target")
+            scope = collect_review_scope(repo)
+            delta = collect_incremental_scope(repo, scope, prior)
+            self.assertEqual(delta.reviewable_files, ("docs/plan-source.txt",))
+            self.assertEqual(delta.changed_blueprints, ("docs/plan.md",))
+            prompt = build_incremental_review_prompt(repo, scope, prior, delta)
+            self.assertIn("docs/plan.md", prompt)
+            self.assertIn("docs/plan-source.txt", prompt)
+
+    def test_object_only_push_checks_retained_blueprint_from_another_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = "docs/plan.md"
+            repo, _ = self._init_repo(root, review={"blueprint_globs": [plan]})
+            _git(repo, "switch", "main")
+            (repo / "obsolete.py").write_text("enabled = False\n")
+            _git(repo, "add", "obsolete.py")
+            _git(repo, "commit", "-m", "Record obsolete owner")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            donor = root / "donor"
+            _git(repo, "worktree", "add", "-b", "review", str(donor), "main")
+            (donor / plan).write_text("Keep exactly one owner.\n")
+            _git(donor, "add", plan)
+            _git(donor, "rm", "obsolete.py")
+            _git(donor, "commit", "-m", "Review binding plan")
+
+            def reviewer(_):
+                return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+            reviewed = run_architecture_review(donor, reviewer_fn=reviewer)
+            (donor / ".guard/config.json").write_text("{}\n")
+            _git(donor, "commit", "-am", "Disable new blueprint discovery")
+            base = run_architecture_review(donor, reviewer_fn=reviewer).head_sha
+            self.assertEqual(load_review_session(donor).task_blueprint_anchors[plan], (reviewed.head_sha,))
+            self.assertIsNone(load_review_session(repo))
+
+            _git(donor, "rm", plan)
+            tree = _git(donor, "write-tree")
+            base_tree = _git(repo, "rev-parse", f"{base}^{{tree}}")
+            replayed_base = _git(repo, "commit-tree", base_tree, "-p", "main", "-m", "Replay the baseline")
+            for remote in (base, replayed_base):
+                with self.subTest(remote=remote):
+                    target = _git(repo, "commit-tree", tree, "-p", remote, "-m", "Remove retained blueprint")
+                    scope = collect_review_scope(repo, main_branch=remote, head_ref=target)
+                    self.assertEqual(scope.reviewable_files, (plan,))
+                    prompt = build_review_prompt(repo, scope)
+                    self.assertIn("Keep exactly one owner", prompt)
+                    self.assertIn("[deleted", prompt.lower())
+                    update = f"{target} {target} refs/heads/main {remote}\n"
+                    with redirect_stderr(StringIO()) as stderr:
+                        self.assertEqual(main_push_gate(repo, update), 2)
+                    self.assertIn("missing review receipt", stderr.getvalue())
+            self.assertIsNone(load_review_session(repo))
+
+    def test_advanced_baseline_cannot_carry_receipt_across_changed_blueprint(self) -> None:
+        plan = "docs/plan.md"
+        for retain_only in (False, True):
+            with self.subTest(retain_only=retain_only), tempfile.TemporaryDirectory() as td:
+                repo, _ = self._init_repo(Path(td), review={"blueprint_globs": [plan]})
+                _git(repo, "switch", "main")
+                (repo / plan).write_text("Keep one persistence owner.\n")
+                _git(repo, "add", plan)
+                _git(repo, "commit", "-m", "Set binding plan")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                (repo / "app.py").write_text("value = 1\n")
+                _git(repo, "add", "app.py")
+                _git(repo, "commit", "-m", "Implement reviewed patch")
+
+                def reviewer(_):
+                    return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+                reviewed = run_architecture_review(repo, reviewer_fn=reviewer, reviewer_note=f"See {plan}")
+                if retain_only:
+                    (repo / ".guard/config.json").write_text("{}\n")
+                    _git(repo, "commit", "-am", "Disable new blueprint discovery")
+                    reviewed = run_architecture_review(repo, reviewer_fn=reviewer)
+                self.assertIn(plan, load_review_session(repo).task_blueprint_anchors)
+
+                _git(repo, "switch", "main")
+                (repo / plan).write_text("Permit a second persistence owner.\n")
+                _git(repo, "commit", "-am", "Change upstream blueprint")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                scope = collect_review_scope(repo)
+                self.assertEqual(scope.patch_digest, reviewed.patch_digest)
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+                prompts = []
+
+                def record_review(prompt):
+                    prompts.append(prompt)
+                    return reviewer(prompt)
+
+                run_architecture_review(repo, reviewer_fn=record_review)
+                self.assertIn("Keep one persistence owner", prompts[0])
+                self.assertIn("Permit a second persistence owner", prompts[0])
+
+    def test_receipt_reuse_requires_review_of_retained_blueprint_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = "docs/plan.md"
+            repo, _ = self._init_repo(root, review={"blueprint_globs": [plan]})
+            base = _git(repo, "rev-parse", "main")
+            (repo / "app.py").write_text("value = 1\n")
+            (repo / plan).write_text("Keep one owner.\n")
+            _git(repo, "add", "app.py", plan)
+            _git(repo, "commit", "-m", "Record initial blueprint")
+
+            def go(_):
+                return {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []}
+
+            original = run_architecture_review(repo, reviewer_fn=go)
+            linked = root / "linked"
+            _git(repo, "worktree", "add", "-b", "linked", str(linked), original.head_sha)
+            (linked / plan).write_text("Keep one owner and retire the old write path.\n")
+            _git(linked, "commit", "-am", "Tighten blueprint")
+            tightened = run_architecture_review(linked, reviewer_fn=lambda _: {
+                "verdict": "NO-GO", "summary": "Retirement missing", "blocking_findings": [{
+                    "rule_id": "guard.service-boundaries", "file": "app.py", "line": 1,
+                    "issue": "The old write path remains", "required_fix": "Remove it",
+                }],
+            })
+            self.assertEqual(tightened.verdict, "NO-GO")
+
+            _git(linked, "revert", "--no-edit", tightened.head_sha)
+            scope = collect_review_scope(linked)
+            self.assertEqual(scope.patch_digest, original.patch_digest)
+            self.assertIn(tightened.head_sha, scope.task_blueprint_anchors[plan])
+            self.assertIn("retire the old write path", build_review_prompt(linked, scope))
+            self.assertIsNone(resolve_or_carry_forward_receipt(linked, scope))
+            self.assertEqual(load_review_session(linked).last_verdict, "NO-GO")
+
+            _git(linked, "reset", "--hard", original.head_sha)
+            scope = collect_review_scope(linked)
+            self.assertIn(tightened.head_sha, scope.task_blueprint_anchors[plan])
+            with redirect_stderr(StringIO()) as stderr:
+                update = f"{original.head_sha} {original.head_sha} refs/heads/main {base}\n"
+                self.assertEqual(main_push_gate(linked, update), 2)
+            self.assertIn("missing review receipt", stderr.getvalue())
+
+            fresh = run_architecture_review(linked, reviewer_fn=go)
+            self.assertEqual(fresh.verdict, "GO")
+            self.assertEqual(main_push_gate(linked, update), 0)
+
+    def test_configured_blueprint_change_is_reviewable_on_its_own(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td), review={"blueprint_globs": ["docs/plan.md"]})
+            (repo / "docs/plan.md").write_text("Binding plan.\n")
+            (repo / "docs/notes.md").write_text("Unrelated notes.\n")
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "Record plan and notes")
+            self.assertEqual(collect_review_scope(repo).reviewable_files, ("docs/plan.md",))
+
+
     def test_save_review_session_prunes_deleted_worktree_records_below_cap(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

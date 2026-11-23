@@ -89,7 +89,9 @@
         "boundary_docs": [
           "src/the_guard/README.md"
         ],
-        "dependencies": [],
+        "dependencies": [
+          "src/the_guard/git_helpers.py"
+        ],
         "layer": "foundation",
         "role": "Repository configuration validation and package version"
       },
@@ -209,7 +211,8 @@
         "dependencies": [
           "src/the_guard/config.py",
           "src/the_guard/finding.py",
-          "src/the_guard/git_helpers.py"
+          "src/the_guard/git_helpers.py",
+          "src/the_guard/policy.py"
         ],
         "layer": "domain",
         "role": "Deterministic import ownership, inventory, dependency and contract drift checks"

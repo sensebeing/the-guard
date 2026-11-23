@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..finding import Finding
-from ..git_helpers import BaseFileReader, git_ok, git_stdout, submodule_paths
+from ..git_helpers import BaseFileReader, compute_changed_lines, git_ok, git_stdout, submodule_paths
 from ..config import GuardConfig, load_config, repository_path
 from .configured import check_module_imports
 from .discovery import discover_topology, source_files
@@ -55,8 +55,9 @@ def audit_topology(
         if m["path"] not in modules
     )
     missing = _missing_docs(root, config)
+    retired = sorted(p for p, module in modules.items() if module.get("retired", False))
     missing_modules = sorted(
-        p for p in modules if not repository_path(root, p).exists()
+        p for p in modules if p not in retired and not repository_path(root, p).exists()
     )
     findings = [
         asdict(f)
@@ -67,6 +68,7 @@ def audit_topology(
     ) or config.topology.get("layers")
     return {
         "unregistered_modules": unregistered,
+        "retired_modules": retired,
         "missing_boundary_docs": missing,
         "missing_modules": missing_modules,
         "stale_dependencies": stale,
@@ -138,6 +140,7 @@ def _missing_docs(
     declarations.extend(
         (m["path"], m.get("boundary_docs", []))
         for m in config.topology.get("modules", [])
+        if not m.get("retired", False)
     )
     existing = None
     if revision is not None:
@@ -158,13 +161,13 @@ def _missing_docs(
 def _snapshot_paths(
     root: Path,
     revision: str,
-    paths: set[str],
+    paths: set[str] | None,
     *,
     recursive: bool = False,
     files_only: bool = False,
 ) -> set[str]:
-    """Read only requested snapshot trees, once; never consult the working tree."""
-    if not paths:
+    """Inventory snapshot paths, or only blob paths when files_only is set."""
+    if paths is not None and not paths:
         return set()
     output = git_stdout(
         root,
@@ -175,7 +178,7 @@ def _snapshot_paths(
             "-z",
             revision,
             "--",
-            *[f":(literal){p}" for p in sorted(paths)],
+            *[f":(literal){p}" for p in sorted(paths or ())],
         ],
     )
     if output is None:
@@ -183,9 +186,9 @@ def _snapshot_paths(
     result = set()
     for entry in output.split("\0"):
         metadata, separator, path = entry.partition("\t")
-        if separator and (not files_only or not metadata.startswith("040000 ")):
+        if separator and (not files_only or metadata.split()[1:2] == ["blob"]):
             result.add(path)
-            if not recursive and not files_only:
+            if paths is not None and not recursive and not files_only:
                 # With nested pathspecs, ls-tree can emit children in place of a tree.
                 parent = path.rpartition("/")[0]
                 while parent:
@@ -195,23 +198,29 @@ def _snapshot_paths(
     return result
 
 
-def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set[str]:
+def _tightened_import_scope(
+    config: GuardConfig, baseline: GuardConfig | None
+) -> tuple[set[str], bool]:
+    """Return tightened active owners and whether retirements also require a repository scan."""
     if baseline is None:
-        return set()
+        return set(), False
     current, old = config.topology, baseline.topology
     modules = {m["path"]: m for m in current.get("modules", [])}
-    if (
-        current.get("enforce_module_dependencies")
-        and not old.get("enforce_module_dependencies")
-    ) or (current.get("layers") and not old.get("layers")):
-        return set(modules)
     old_modules = {m["path"]: m for m in old.get("modules", [])}
+    resolution_changed = (
+        modules.keys() != old_modules.keys() or config.module_doc_roots != baseline.module_doc_roots
+    )
+    retired = {p for p, m in modules.items() if m.get("retired", False)}
+    new_retirement = any(not old_modules.get(p, {}).get("retired", False) for p in retired)
+    scan_all_callers = new_retirement or (bool(retired) and resolution_changed)
     if (
-        set(modules) != set(old_modules)
-        or config.module_doc_roots != baseline.module_doc_roots
+        resolution_changed
+        or new_retirement
+        or (current.get("enforce_module_dependencies") and not old.get("enforce_module_dependencies"))
+        or (current.get("layers") and not old.get("layers"))
     ):
         # Owner additions/removals change longest-prefix and alias resolution globally.
-        return set(modules)
+        return set(modules), scan_all_callers
     tightened = {
         path
         for path, module in modules.items()
@@ -236,7 +245,7 @@ def _tightened_modules(config: GuardConfig, baseline: GuardConfig | None) -> set
             after = current.get("layers", {}).get(source.get("layer"), [])
             if previous.get("layer") in before and module.get("layer") not in after:
                 tightened.add(path)
-    return tightened
+    return tightened, False
 
 
 def check_contract_drift(
@@ -267,7 +276,7 @@ def check_contract_drift(
     baseline = None
     if available:
         try:
-            baseline = load_config(root, revision=base)
+            baseline = load_config(root, revision=base, allow_historical=True)
         except ValueError:
             # Missing/invalid historical declarations cannot grandfather new permissions.
             baseline = None
@@ -279,6 +288,7 @@ def check_contract_drift(
         old_declared_docs.update(
             (module["path"], doc)
             for module in baseline.topology.get("modules", [])
+            if not module.get("retired", False)
             for doc in module.get("boundary_docs", [])
         )
     rule_id = config.rule_id_prefix + "single-source-of-truth"
@@ -304,7 +314,7 @@ def check_contract_drift(
         if revision is not None
         else {p for p in modules if repository_path(root, p).exists()}
     )
-    missing_modules = set(modules) - existing
+    missing_modules = {p for p, m in modules.items() if not m.get("retired", False)} - existing
     base_existing = _snapshot_paths(root, base, missing_modules) if available else set()
     for path in sorted(missing_modules):
         if available and (
@@ -335,7 +345,7 @@ def check_contract_drift(
         )
     ):
         for path in sorted(set(modules) - set(old_modules)):
-            if not str(modules[path].get("role") or "").strip():
+            if not modules[path].get("retired", False) and not modules[path].get("role"):
                 findings.append(
                     Finding(
                         config.rule_id_prefix + "service-boundaries",
@@ -347,9 +357,10 @@ def check_contract_drift(
     if not (
         config.topology.get("enforce_module_dependencies")
         or config.topology.get("layers")
+        or any(m.get("retired", False) for m in modules.values())
     ):
         return findings
-    tightened = _tightened_modules(config, baseline)
+    tightened, scan_all_callers = _tightened_import_scope(config, baseline)
     snapshot_reader = (
         BaseFileReader(root, revision, submodules, exact=True)
         if revision is not None
@@ -396,67 +407,54 @@ def check_contract_drift(
     if not scan_modules:
         return findings
     if revision is not None:
-        files = sorted(
-            _snapshot_paths(
-                root, revision, scan_modules, recursive=True, files_only=True
-            )
+        inventory = _snapshot_paths(
+            root, revision, None if scan_all_callers else scan_modules,
+            recursive=True, files_only=True,
         )
     else:
-        files = sorted(
-            {
-                p.relative_to(root).as_posix()
-                for module in scan_modules
-                for directory in [repository_path(root, module)]
-                for p in (
-                    [directory] if directory.is_file() else source_files(directory)
-                )
-                if not p.is_symlink()
-                and owner_module(p.relative_to(root).as_posix(), list(modules))
-                in scan_modules
-                and b"\x00" not in p.read_bytes()
-            }
-        )
+        roots = [root] if scan_all_callers else [repository_path(root, module) for module in scan_modules]
+        inventory = {
+            p.relative_to(root).as_posix()
+            for directory in roots
+            for p in ([directory] if directory.is_file() else source_files(directory))
+            if not p.is_symlink()
+        }
     files = [
         p
-        for p in files
+        for p in sorted(inventory)
         if not is_excluded_topology_path(p)
         and owner_module(p, list(modules)) in scan_modules
-        and (revision is None or "\x00" not in (read_current(p) or ""))
+        and "\x00" not in (read_current(p) or "")
     ]
-    for path in files:
-        if owner_module(path, list(modules)) in tightened:
-            text = read_current(path)
-            if text is not None:
-                findings.extend(
-                    check_module_imports(
-                        path,
-                        text,
-                        None,
-                        config,
-                        check_unregistered=False,
-                        baseline_config=baseline,
-                    )
-                )
+    # Only retirement permissions apply to callers outside active owner scopes.
+    import_paths = sorted(inventory) if scan_all_callers else [
+        p for p in files if owner_module(p, list(modules)) in tightened
+    ]
+    baseline_has_retirements = any(m.get("retired", False) for m in old_modules.values())
+    for path in import_paths:
+        text = read_current(path)
+        if text is None or "\x00" in text:
+            continue
+        prior_text = reader.read(path) if baseline_has_retirements else None
+        findings.extend(
+            check_module_imports(
+                path,
+                text,
+                None,
+                config,
+                check_unregistered=False,
+                baseline_config=baseline,
+                baseline_changed_lines=(
+                    compute_changed_lines(prior_text, text) if prior_text is not None else None
+                ),
+            )
+        )
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []
     if baseline and candidates:
-        output = git_stdout(
-            root,
-            [
-                "git",
-                "ls-tree",
-                "-r",
-                "--name-only",
-                "-z",
-                base,
-                "--",
-                *[f":(literal){p}" for p in sorted(candidates)],
-            ],
-        )
-        if output is None:
-            raise ValueError("Cannot inspect baseline module imports")
         baseline_files = [
-            p for p in output.split("\0") if p and "\x00" not in (reader.read(p) or "")
+            p for p in sorted(_snapshot_paths(root, base, candidates, recursive=True, files_only=True))
+            if "\x00" not in (reader.read(p) or "")
         ]
         old_observed, _ = _dependency_evidence(baseline, baseline_files, reader.read)
     _, stale = _dependency_evidence(

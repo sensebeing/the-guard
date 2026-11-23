@@ -258,19 +258,26 @@ guard review run --force
 guard review check-push
 ```
 
-Initial reviews inspect the full changed file scope before reporting high-confidence blockers, and follow-up runs on the same branch resume the verified reviewer session to check fixes and new deltas. Review prompts bind reads to committed Git refs (`base..head`) and forbid file writes, test execution, or subagent spawning. Receipts (`the-guard-receipt/v1`) are stored under `.git/the-guard-receipts/` by Git stable patch ID and patch digest, so clean rebases onto an updated `main` carry verified review evidence forward automatically.
+Initial reviews inspect the full changed file scope before reporting high-confidence blockers, and follow-up runs on the same branch resume the verified reviewer session to check fixes and new deltas. Review prompts bind reads to committed Git refs (`base..head`) and forbid file writes, test execution, or subagent spawning. Linked worktrees share receipts and retained sessions under the Git common directory. The local pre-push gate checks the commit Git is pushing, including object-only replays, and can carry verified `GO` evidence forward from another linked worktree when the contract and patch match or the replay introduces no reviewable delta on an advanced baseline.
 
 ## Configuration
 
-`.guard/config.json` is optional. By default, `guard` reads the policy block in `AGENTS.md`. Add `.guard/config.json` when you want custom paths, review scopes, or declarative topology constraints (see the full multi-service [examples/config.example.json](examples/config.example.json)):
+`.guard/config.json` is optional and must be a regular file when present. By default, `guard`
+reads the policy block in `AGENTS.md`. Configuration supports custom paths, review scopes, and
+declarative topology constraints. See the multi-service [configuration example](examples/config.example.json).
 
 ```json
 {
   "manifest_file": "AGENTS.md",
   "detail_dir": "docs/standards/rules",
   "main_branch": "main",
+  "review": {
+    "blueprint_globs": ["docs/design/*.md"],
+    "operational_ledgers": ["CHANGELOG.md"]
+  },
   "topology": {
-    "forbidden_imports": [{"from": "src/ui/", "to": "internal.storage"}],
+    "modules": [{"path": "src/legacy_jobs", "retired": true}],
+    "forbidden_imports": [{"scope_prefixes": ["src/ui/"], "imports": ["internal.storage"]}],
     "exclusive_sql_owners": [
       {
         "table": "jobs",
@@ -298,6 +305,13 @@ Initial reviews inspect the full changed file scope before reporting high-confid
 The optional `review.integration_mode` key accepts `local-hooks`, `github-pr`, or `both` and
 selects the integration boundary that `guard init` records and the `pre-push` gate enforces.
 
+`review.blueprint_globs` opts task blueprint discovery into repository-relative glob patterns.
+The default empty array skips discovery. `review.operational_ledgers` lists repository-relative
+files to exclude from discovery and defaults to `["CHANGELOG.md"]`. Previously reviewed
+blueprints retain their revision history after discovery settings change.
+Changes to a configured blueprint require review. Receipt reuse requires coverage of the
+applicable retained revisions and equivalent blueprint bodies across replayed snapshots.
+
 The policy manifest lives between `<!-- the-guard-policy:start -->` and `<!-- the-guard-policy:end -->` in `AGENTS.md`:
 
 ```yaml
@@ -315,6 +329,11 @@ To suppress a specific static finding inline, add a comment with at least 8 char
 `# guard-exempt guard.architecture-simplicity: concrete reason here`
 
 Reviewer behavior can be configured with `THE_GUARD_REVIEW_CONFIG`, `THE_GUARD_REVIEW_PROVIDER`, `THE_GUARD_REVIEW_MODEL`, `THE_GUARD_REVIEW_EFFORT`, `THE_GUARD_REVIEW_STALL_SECONDS`, `THE_GUARD_REVIEW_HEARTBEAT_SECONDS`, `THE_GUARD_REVIEW_MAX_SECONDS`, and `THE_GUARD_REVIEW_LOG_DIR`. Provider discovery persists to `~/.config/the-guard/review-agent.json`.
+The same directory holds updater metadata and logs by default. Legacy updater metadata in
+`~/.guard` migrates during the next update using the default state directory after any running
+legacy updater releases its lock. `THE_GUARD_STATE_DIR` and
+`--state-dir` override the updater location. The updater rotates `auto_update.log` at 512 KiB and
+keeps one backup.
 
 ## Topology checks and CLI reference
 
@@ -331,6 +350,11 @@ Declare `topology.layers` as allowed target layers, for example
 allowed. Module paths support directories and single files such as `src/core/config.py`.
 Give modules a `layer`, single-owner `role`, `dependencies`, and `boundary_docs`; declare root
 blueprints in `topology.architecture_docs` using safe repository-relative paths.
+Use `retired: true` to reserve a module path for deletion. Retired modules may omit `layer`,
+`languages`, `boundary_docs`, and `role`. They cannot declare dependencies or receive declared
+dependencies or inbound imports. Checks block additions and modifications under the retired path.
+Retiring a module also checks unchanged callers throughout the repository. Active module
+declarations cannot use paths within a retired module.
 Set `enforce_module_dependencies: true` to reject undeclared internal imports. Declared
 edges must also obey the layer ceiling at config load; editing dependencies cannot legalize
 an upward import. Python AST and JS/TS literal imports (including relative paths, multiline
@@ -344,8 +368,9 @@ modules are reported as `unregistered_modules` until you assign their layers exp
 violations, missing declared boundary documents, unregistered modules and unused declared
 dependencies. Stale-dependency checks apply only to modules with Python/JS/TS production
 source whose remaining files have inert documentation/configuration extensions; unsupported
-component files also prevent assuming zero imports. Production exclusions apply to language
-and module-dependency checks; explicit configured rules still apply to their declared scopes. Violations or missing documents fail the audit; unregistered modules and stale
+component files also prevent assuming zero imports. Built-in Python and Swift checks emit only
+rule IDs declared in the target policy. Production exclusions apply to built-in language
+and active-module dependency checks. Explicit rules apply to their declared scopes. Violations or missing documents fail the audit; unregistered modules and stale
 dependencies additionally fail governed repositories. Exit codes are 0 (pass) and 2 (fail).
 Branch-wide `guard check` and `guard topology check` reject newly missing declared documents
 and newly stale dependencies while grandfathering untouched legacy declarations. With governance
@@ -368,7 +393,7 @@ prior review evidence.
 | --- | --- |
 | Python AST checks | Write locks inside read-only functions or endpoints; duplicate awaited reads on the same execution path without an intervening write; single-entity awaited reads inside loops or comprehensions. |
 | Swift lexical checks | Duplicate awaited reads within the same function scope. |
-| Declared topology rules | Layer ceilings, enforced module dependencies, `forbidden_imports` (`module_boundaries`), `exclusive_sql_owners`, `retired_tables`, and `forbidden_patterns`. |
+| Declared topology rules | Layer ceilings, enforced module dependencies, retired modules, `forbidden_imports`, `exclusive_sql_owners`, `retired_tables`, and `forbidden_patterns`. |
 | Legacy debt ratchets | Baseline-aware line and function-signature matching so legacy files only fail when a change introduces new violations or fails to reduce touched `retired_tables` references. |
 
 ### Commands and exit codes

@@ -171,11 +171,7 @@ def extract_imports(
                 modules = []
                 if node.level:
                     parts = path.removesuffix(".py").split("/")[: -node.level]
-                    if parts and parts[0] in {
-                        *GuardConfig.module_doc_roots,
-                        *module_doc_roots,
-                        "app",
-                    }:
+                    if parts and parts[0] in module_doc_roots:
                         modules.append(
                             ".".join([*parts, *([module] if module else [])])
                         )

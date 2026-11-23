@@ -193,8 +193,8 @@ TOOL_SCHEMA = {
         "module_doc_roots": ["services", "ui", "agents"],
         "topology": {
             "forbidden_imports": [
-                {"from": "ui/", "to": "services.orders.internal"},
-                {"from": "services/billing/", "to": "services.orders.internal"},
+                {"scope_prefixes": ["ui/"], "imports": ["services.orders.internal"]},
+                {"scope_prefixes": ["services/billing/"], "imports": ["services.orders.internal"]},
             ],
             "exclusive_sql_owners": [
                 {

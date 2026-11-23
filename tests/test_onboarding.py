@@ -56,6 +56,10 @@ class OnboardingTests(unittest.TestCase):
             "lib/api.py",
             'def get_item():\n    return "SELECT * FROM items FOR UPDATE"\n',
         )
+        self.assertEqual(run_topology_guard(self.root, ["lib/api.py"]), [])
+        with self.assertRaises(PolicyError):
+            load_policy(self.root)
+        initialize(self.root)
         findings = run_topology_guard(
             self.root, ["lib/api.py"], config=load_config(self.root)
         )
@@ -64,6 +68,7 @@ class OnboardingTests(unittest.TestCase):
         )
 
     def test_duplicate_reads_and_n_plus_one(self):
+        initialize(self.root, preset="full")
         self.write(
             "src/api.py",
             "async def handler(ids):\n    a = await db.get_item(1)\n    b = await db.get_item(1)\n    return [await db.get_item(key) for key in ids]\n",
@@ -164,6 +169,39 @@ class GithubPrIntegrationModeTests(unittest.TestCase):
             self.assertEqual(main_push_gate(self.root, direct), 2)
         self.assertIn("missing review receipt", stderr.getvalue())
         self.assertNotIn("review.integration_mode=github-pr", stderr.getvalue())
+
+    def test_push_gate_uses_protected_branch_and_mode_from_pushed_commit(self):
+        self.init_repo()
+        initialize(self.root, integration_mode="github-pr")
+        self.git("add", ".")
+        self.git("commit", "-m", "Current checkout protects main with GitHub PRs")
+        base = self.git("rev-parse", "HEAD")
+        config = json.loads((self.root / ".guard/config.json").read_text())
+        config["main_branch"] = "release"
+        config["review"]["integration_mode"] = "local-hooks"
+        self.write(".guard/config.json", json.dumps(config))
+        self.write("src/api.py", "value = 1\n")
+        self.git("add", ".")
+        tree = self.git("write-tree")
+        pushed = self.git("commit-tree", tree, "-p", base, "-m", "Protect release with local hooks")
+        self.assertEqual(self.git("rev-parse", "HEAD"), base)
+
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(main_push_gate(self.root, f"{pushed} {pushed} refs/heads/release {base}\n"), 2)
+        self.assertIn("missing review receipt", stderr.getvalue())
+        self.assertEqual(main_push_gate(self.root, f"{pushed} {pushed} refs/heads/main {base}\n"), 0)
+
+        config["review"]["integration_mode"] = "github-pr"
+        self.write(".guard/config.json", json.dumps(config))
+        self.git("add", ".guard/config.json")
+        tree = self.git("write-tree")
+        pushed = self.git("commit-tree", tree, "-p", base, "-m", "Protect release with GitHub PRs")
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(main_push_gate(self.root, f"{pushed} {pushed} refs/heads/release {base}\n"), 2)
+        self.assertIn("direct push to refs/heads/release is disabled", stderr.getvalue())
+
+        blob = self.git("rev-parse", "HEAD:README.md")
+        self.assertEqual(main_push_gate(self.root, f"refs/tags/readme {blob} refs/tags/readme {'0' * 40}\n"), 0)
 
     def test_conflicting_workflow_fails_before_policy_writes(self):
         self.write(".github/workflows/the-guard-review.yml", "name: custom\n")
