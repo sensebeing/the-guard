@@ -73,7 +73,7 @@ def _scoped_config_payload(
     topology = payload.get("topology", {})
     modules = topology.pop("modules", [])
     declared_modules = {module["path"]: module for module in modules}
-    if not touched or ".guard/config.json" in scope.changed_files:
+    if ".guard/config.json" in scope.changed_files:
         topology["modules"] = [
             {key: value for key, value in module.items() if key != "boundary_docs"}
             if module["path"] not in touched
@@ -81,27 +81,23 @@ def _scoped_config_payload(
             for module in modules
         ]
         return payload
+
+    def neighbour_projection(module_path: str) -> dict[str, Any]:
+        declared = declared_modules[module_path]
+        return {
+            "path": module_path,
+            "layer": declared.get("layer"),
+            "role": declared.get("role"),
+            "dependencies": list(declared.get("dependencies", [])),
+            "retired": declared.get("retired", False),
+        }
+
     topology["modules"] = {
         "touched": [
             declared_modules.get(module, {"path": module}) for module in sorted(touched)
         ],
-        "upstream": [
-            {
-                "path": module,
-                "layer": declared_modules[module].get("layer"),
-                "role": declared_modules[module].get("role"),
-                "retired": declared_modules[module].get("retired", False),
-            }
-            for module in sorted(upstream)
-        ],
-        "downstream": [
-            {
-                "path": module,
-                "layer": declared_modules[module].get("layer"),
-                "retired": declared_modules[module].get("retired", False),
-            }
-            for module in sorted(downstream)
-        ],
+        "upstream": [neighbour_projection(module) for module in sorted(upstream)],
+        "downstream": [neighbour_projection(module) for module in sorted(downstream)],
     }
     return payload
 

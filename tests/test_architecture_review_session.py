@@ -568,7 +568,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(downstream, {"services/c"})
             baseline = digest()
 
-            # Unrelated modules and one-hop prose are outside the scoped contract.
+            # Unrelated module declarations and one-hop boundary prose stay outside the contract.
             self.assertEqual(
                 baseline, digest(variant({"services/d": {"layer": "foundation"}}))
             )
@@ -576,19 +576,20 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 baseline,
                 digest(variant({"services/d": {"dependencies": ["services/b"]}})),
             )
-            self.assertEqual(
-                baseline, digest(variant({"services/c": {"role": "downstream"}}))
-            )
             (repo / "services/b/CLAUDE.md").write_text("b owner tightened\n")
             _git(repo, "commit", "-am", "upstream module prose")
             upstream_doc = _git(repo, "rev-parse", "HEAD")
             self.assertEqual(baseline, digest(revision=upstream_doc))
+            (repo / "services/c/CLAUDE.md").write_text("c owner tightened\n")
+            _git(repo, "commit", "-am", "downstream module prose")
+            downstream_doc = _git(repo, "rev-parse", "HEAD")
+            self.assertEqual(baseline, digest(revision=downstream_doc))
             (repo / "services/d/CLAUDE.md").write_text("d owner tightened\n")
             _git(repo, "commit", "-am", "unrelated module prose")
             unrelated_doc = _git(repo, "rev-parse", "HEAD")
             self.assertEqual(baseline, digest(revision=unrelated_doc))
 
-            # Touched prose, its dependencies, and neighbour layer/role changes invalidate.
+            # Touched prose and one-hop structural contract changes invalidate.
             (repo / "services/a/CLAUDE.md").write_text("a owner tightened\n")
             _git(repo, "commit", "-am", "touched module prose")
             touched_doc = _git(repo, "rev-parse", "HEAD")
@@ -600,20 +601,66 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertNotEqual(
                 baseline, digest(variant({"services/a": {"dependencies": []}}))
             )
-            self.assertNotEqual(
-                baseline, digest(variant({"services/b": {"layer": "workflow"}}))
+            for upstream_change in (
+                {"layer": "workflow"},
+                {"role": "tighter owner"},
+                {"dependencies": ["services/d"]},
+                {"retired": True},
+            ):
+                with self.subTest(upstream_change=upstream_change):
+                    self.assertNotEqual(
+                        baseline, digest(variant({"services/b": upstream_change}))
+                    )
+            for downstream_change in (
+                {"layer": "surface"},
+                {"role": "downstream owner"},
+                {"dependencies": ["services/a", "services/d"]},
+                {"retired": True},
+            ):
+                with self.subTest(downstream_change=downstream_change):
+                    self.assertNotEqual(
+                        baseline, digest(variant({"services/c": downstream_change}))
+                    )
+
+            # A scope touching no declared module keeps the empty scoped projection.
+            unbound_scope = replace(
+                scope,
+                changed_files=("tests/test_x.py",),
+                reviewable_files=("tests/test_x.py",),
+            )
+
+            def unbound_digest(config_value: GuardConfig = config) -> str:
+                return compute_review_contract_digest(
+                    policy,
+                    config_value,
+                    repo_root=repo,
+                    revision=head,
+                    scope=unbound_scope,
+                )
+
+            self.assertEqual(
+                unbound_digest(), unbound_digest(variant({"services/d": {"layer": "foundation"}}))
+            )
+            self.assertEqual(
+                unbound_digest(),
+                unbound_digest(variant({"services/d": {"dependencies": ["services/b"]}})),
+            )
+            config_scope = replace(
+                unbound_scope,
+                changed_files=(".guard/config.json", "tests/test_x.py"),
+                reviewable_files=(".guard/config.json", "tests/test_x.py"),
             )
             self.assertNotEqual(
-                baseline, digest(variant({"services/b": {"role": "tighter owner"}}))
-            )
-            self.assertNotEqual(
-                baseline, digest(variant({"services/b": {"retired": True}}))
-            )
-            self.assertNotEqual(
-                baseline, digest(variant({"services/c": {"layer": "surface"}}))
-            )
-            self.assertNotEqual(
-                baseline, digest(variant({"services/c": {"retired": True}}))
+                compute_review_contract_digest(
+                    policy, config, repo_root=repo, revision=head, scope=config_scope
+                ),
+                compute_review_contract_digest(
+                    policy,
+                    variant({"services/d": {"layer": "foundation"}}),
+                    repo_root=repo,
+                    revision=head,
+                    scope=config_scope,
+                ),
             )
 
             # Standalone callers keep the complete-config behavior.
