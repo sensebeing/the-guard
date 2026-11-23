@@ -93,6 +93,10 @@ pure independent-review entry point. Loaded configuration, policy and contract d
 directly to review consumers instead of being reloaded by each helper.
 `config.py` requires a regular configuration file and normalizes legacy import declarations only
 when a consumer explicitly loads a historical baseline.
+During default-state migration, `auto_update` holds both locks through the checkout, tool, skills
+and metadata writes. It retires the legacy files only after a successful update that replaces or
+verifies the installed guard. The cutover assumes older executables are no longer launched
+after that replacement.
 The protected-push hook uses Git's local and remote commit IDs, including object-only replayed
 commits. Repository review can carry forward a matching `GO` receipt from a retained session in
 another linked worktree when its contract digest and applicable merge-base and patch checks pass.

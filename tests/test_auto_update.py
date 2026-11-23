@@ -58,6 +58,26 @@ class AutoUpdateTests(unittest.TestCase):
             report = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
             self.assertEqual(report["status"], "skipped_dirty_checkout")
             self.assertEqual(report["installed_sha"], "reviewed")
+            self.assertTrue(legacy.exists())
+            self.assertFalse(state_metadata.exists())
+
+            (checkout / "dirty").unlink()
+            subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", str(checkout)], check=True)
+            subprocess.run(["git", "-C", str(checkout), "fetch", "origin"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(checkout), "branch", "--set-upstream-to=origin/main"], check=True, capture_output=True)
+
+            sync_skills = auto_update.sync_global_skills
+
+            def sync_with_lock(*args, **kwargs):
+                with (legacy / "auto_update.lock").open("r+") as old_updater:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(old_updater.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual((legacy / "auto_update.json").read_text(), metadata)
+                return sync_skills(*args, **kwargs)
+
+            with mock.patch.object(auto_update, "sync_global_skills", side_effect=sync_with_lock):
+                report = auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})
+            self.assertEqual(report["status"], "up_to_date")
             self.assertEqual(json.loads(state_metadata.read_text()), report)
             self.assertFalse(legacy.exists())
             auto_update.self_update(checkout_dir=checkout, home_dir=home, env={})

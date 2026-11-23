@@ -27,7 +27,7 @@ from the_guard.review.engine import (
 )
 from the_guard.review import session
 from the_guard.review.session import ReviewRunLogger
-from the_guard.review.prompt import _parse_numstat_entries
+from the_guard.review.prompt import _parse_numstat_entries, build_incremental_review_prompt
 from the_guard.review.repository import (
     _collect_branch_delta,
     _is_same_per_file_branch_patch,
@@ -71,7 +71,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertIsNone(load_review_session(repo))
             scope = collect_review_scope(repo, main_branch=base, head_ref=replay)
             self.assertEqual(resolve_or_carry_forward_receipt(repo, scope)["head_sha"], replay)
-            self.assertEqual(load_review_session(review_tree).last_head_sha, replay)
+            self.assertEqual(load_review_session(review_tree).last_head_sha, reviewed.head_sha)
             self.assertIsNone(load_review_session(repo))
 
             (review_tree / "service.py").write_text("VALUE = 2\n", encoding="utf-8")
@@ -88,11 +88,13 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
     def test_object_only_push_can_reuse_review_across_an_advanced_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            repo, _ = self._init_repo(root)
+            plan = "docs/plan.md"
+            repo, _ = self._init_repo(root, review={"blueprint_globs": [plan]})
             review_tree = root / "review"
             _git(repo, "worktree", "add", "-b", "review", str(review_tree), "main")
             (review_tree / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
-            _git(review_tree, "add", "service.py")
+            (review_tree / plan).write_text("Keep exactly one owner.\n", encoding="utf-8")
+            _git(review_tree, "add", "service.py", plan)
             _git(review_tree, "commit", "-m", "Reviewed change")
             reviewed = run_architecture_review(review_tree, reviewer_fn=lambda _: {
                 "verdict": "GO", "summary": "Reviewed change", "blocking_findings": [],
@@ -113,10 +115,40 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertNotEqual(scope.merge_base, reviewed.merge_base)
             self.assertEqual(main_push_gate(repo, f"{replay} {replay} refs/heads/main {base}\n"), 0)
             self.assertIsNone(load_valid_receipt(repo, scope.patch_digest))
+            self.assertIsNone(load_review_session(repo))
+            # Carry the receipt with the recipient commit actually checked out.
+            _git(repo, "merge", "--ff-only", replay)
             carried = resolve_or_carry_forward_receipt(repo, scope)
             self.assertEqual(carried["merge_base"], base)
             self.assertEqual(carried["head_sha"], replay)
-            self.assertEqual(load_review_session(review_tree).last_patch_digest, scope.patch_digest)
+            self.assertEqual(load_review_session(review_tree).last_patch_digest, reviewed.patch_digest)
+            recipient = load_review_session(repo)
+            self.assertEqual((recipient.last_head_sha, recipient.last_patch_digest), (replay, scope.patch_digest))
+            donor = load_review_session(review_tree)
+            self.assertEqual(donor.task_blueprint_anchors, {plan: (reviewed.head_sha,)})
+            self.assertEqual(recipient.task_blueprint_anchors, donor.task_blueprint_anchors)
+
+    def test_incremental_blueprint_symlink_change_uses_only_physical_diff_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td), review={"blueprint_globs": ["docs/plan.md"]})
+            source = repo / "docs/plan-source.txt"
+            source.write_text("Initial owner constraint.\n")
+            (repo / "docs/plan.md").symlink_to(source.name)
+            _git(repo, "add", "docs")
+            _git(repo, "commit", "-m", "Record blueprint")
+            run_architecture_review(repo, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "Reviewed", "blocking_findings": [],
+            })
+            prior = load_review_session(repo)
+            source.write_text("Changed owner constraint.\n" + "Additional detail.\n" * 4200)
+            _git(repo, "commit", "-am", "Update blueprint target")
+            scope = collect_review_scope(repo)
+            delta = collect_incremental_scope(repo, scope, prior)
+            self.assertEqual(delta.reviewable_files, ("docs/plan-source.txt",))
+            self.assertEqual(delta.changed_blueprints, ("docs/plan.md",))
+            prompt = build_incremental_review_prompt(repo, scope, prior, delta)
+            self.assertIn("docs/plan.md", prompt)
+            self.assertIn("docs/plan-source.txt", prompt)
 
     def test_advanced_baseline_cannot_carry_receipt_across_changed_blueprint(self) -> None:
         plan = "docs/plan.md"

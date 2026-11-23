@@ -463,7 +463,7 @@ def _collect_branch_delta(
     """Compute verified branch delta since `session`, or return None when session continuation is inapplicable.
 
     Raises RuntimeError if git diff commands fail after commit existence is verified (fail-closed).
-    Returns an IncrementalReviewScope (which may have `has_changes == False` when zero files/submodules changed).
+    Returns an IncrementalReviewScope, which may contain no reviewable changes.
     """
     config = config or load_config(repo_root, revision=scope.head_sha)
     if session is None or not session.last_head_sha:
@@ -589,9 +589,10 @@ def _collect_branch_delta(
     return IncrementalReviewScope(
         base_head_sha=session.last_head_sha,
         target_head_sha=scope.head_sha,
-        changed_files=tuple(sorted(set(changed_files) | changed_blueprints)),
-        reviewable_files=tuple(sorted(set(reviewable_files) | changed_blueprints)),
+        changed_files=tuple(sorted(changed_files)),
+        reviewable_files=tuple(sorted(reviewable_files)),
         submodule_changes=tuple(sorted(inc_subs.values(), key=lambda item: item.path)),
+        changed_blueprints=tuple(sorted(changed_blueprints)),
     )
 
 
@@ -680,7 +681,7 @@ def resolve_or_carry_forward_receipt(
                 delta = _collect_branch_delta(repo_root, scope, session, config=current_config)
             except RuntimeError:
                 continue
-            if delta is None or delta.reviewable_files or delta.submodule_changes:
+            if delta is None or delta.has_changes:
                 continue
         elif changed_task_blueprints(
             repo_root, current_config, session.last_head_sha, scope.head_sha, session.task_blueprint_anchors.keys()
@@ -724,22 +725,25 @@ def _carry_forward_receipt(
             "summary": carried.summary,
         }
     save_receipt(repo_root, carried)
-    save_review_session(
-        repo_root,
-        replace(
-            session,
-            merge_base=scope.merge_base,
-            provider=carried.provider,
-            session_id=carried.session_id,
-            last_head_sha=scope.head_sha,
-            last_patch_digest=scope.patch_digest,
-            last_verdict="GO",
-            last_summary=carried.summary,
-            last_blocking_findings=(),
-            last_submodule_shas={
-                sub.path: sub.new_sha for sub in scope.submodule_changes
-            },
-            updated_at=datetime.now(UTC).isoformat(),
-        ),
-    )
+    if _git_text(repo_root, "rev-parse", "--verify", "HEAD", check=False) == scope.head_sha:
+        save_review_session(
+            repo_root,
+            replace(
+                session,
+                worktree_path=str(repo_root.resolve()),
+                branch=current_branch_name(repo_root),
+                merge_base=scope.merge_base,
+                provider=carried.provider,
+                session_id=carried.session_id,
+                last_head_sha=scope.head_sha,
+                last_patch_digest=scope.patch_digest,
+                last_verdict="GO",
+                last_summary=carried.summary,
+                last_blocking_findings=(),
+                last_submodule_shas={
+                    sub.path: sub.new_sha for sub in scope.submodule_changes
+                },
+                updated_at=datetime.now(UTC).isoformat(),
+            ),
+        )
     return load_valid_receipt(repo_root, scope.patch_digest)

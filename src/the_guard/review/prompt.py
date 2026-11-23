@@ -333,6 +333,11 @@ def _render_prior_findings_section(
             f"Incremental files ({len(inc_scope.reviewable_files)}): "
             + ", ".join("`" + p + "`" for p in inc_scope.reviewable_files)
         )
+        if inc_scope.changed_blueprints:
+            lines.append(
+                "Changed task blueprints: "
+                + ", ".join(f"`{path}`" for path in inc_scope.changed_blueprints)
+            )
     elif _is_unchanged_rebuttal_round(scope, session, reviewer_note):
         lines.append("HEAD unchanged: evidence-only rebuttal")
     else:

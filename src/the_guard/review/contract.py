@@ -119,10 +119,11 @@ class IncrementalReviewScope:
     changed_files: tuple[str, ...]
     reviewable_files: tuple[str, ...]
     submodule_changes: tuple[SubmoduleChange, ...]
+    changed_blueprints: tuple[str, ...] = ()
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.reviewable_files or self.submodule_changes)
+        return bool(self.reviewable_files or self.submodule_changes or self.changed_blueprints)
 
 
 CODE_EXTENSIONS = frozenset(
