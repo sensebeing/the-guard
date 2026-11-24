@@ -114,8 +114,9 @@ documents have a 24,000 UTF-8 byte limit. The document section has a 180,000 UTF
 Oversized documents use a heading index with line numbers and a snapshot read command.
 Incremental prompts send prior findings, rebuttal evidence, the verified change, and new or
 changed boundary and blueprint context. A same-patch rebase with updated touched boundaries
-resumes when the verified session can inspect the document delta, including declared boundary
-additions and removals. An unchanged-head rebuttal uses the session history.
+resumes when the verified session can inspect the document delta. The prompt shows declared
+boundary additions and removals by module, including transfers of unchanged documents.
+An unchanged-head rebuttal uses the session history.
 The manifest supplies the allowed finding IDs for prompts, output schemas and verdict validation.
 A `NO-GO` verdict requires at least one blocking finding.
 

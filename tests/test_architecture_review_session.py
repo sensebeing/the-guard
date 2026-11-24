@@ -973,6 +973,52 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     self.assertEqual(receipt["head_sha"], result.head_sha)
                     reviewed = result
 
+    def test_rebased_boundary_doc_transfer_reports_both_module_bindings(self) -> None:
+        for branch_delta, document_budget in ((False, 180_000), (True, 180_000), (True, 220)):
+            with self.subTest(branch_delta=branch_delta, document_budget=document_budget), tempfile.TemporaryDirectory() as td:
+                repo, env, _ = self._start_module_review(Path(td))
+                doc = "docs/shared-boundary.md"
+                config_path = repo / ".guard/config.json"
+                _git(repo, "switch", "main")
+                (repo / doc).write_text("Shared boundary context\n")
+                config = json.loads(config_path.read_text())
+                a, b, _ = config["topology"]["modules"]
+                a["boundary_docs"] = [doc]
+                config_path.write_text(json.dumps(config))
+                _git(repo, "add", doc)
+                _git(repo, "commit", "-am", "bind the shared document to a")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                (repo / "services/b/main.py").write_text("value = 2\n")
+                _git(repo, "commit", "-am", "touch both module owners")
+                first = run_architecture_review(repo, env=env)
+
+                _git(repo, "switch", "main")
+                a["boundary_docs"] = []
+                b["boundary_docs"] = [doc]
+                config_path.write_text(json.dumps(config))
+                _git(repo, "commit", "-am", "transfer the unchanged document from a to b")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                scope = collect_review_scope(repo)
+                self.assertEqual(scope.patch_digest, first.patch_digest)
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+                if branch_delta:
+                    (repo / "services/a/main.py").write_text("value = 3\n")
+                    _git(repo, "commit", "-am", "add a verified implementation delta")
+
+                with mock.patch("the_guard.review.prompt.MAX_SNAPSHOT_DOCS_TOTAL_BYTES", document_budget):
+                    result = run_architecture_review(repo, env=env)
+                if document_budget == 220:
+                    self.assertEqual(result.mode, "full")
+                else:
+                    self.assertEqual((result.mode, result.session_id), ("incremental", first.session_id))
+                    prompt = Path(result.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                    self.assertIn("- `services/a` removed `docs/shared-boundary.md`", prompt)
+                    self.assertIn("- `services/b` added `docs/shared-boundary.md`", prompt)
+
     def test_same_patch_contract_mismatch_without_inspectable_delta_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, env, _ = self._start_module_review(Path(td))

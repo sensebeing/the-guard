@@ -1155,21 +1155,38 @@ def _render_module_context_delta(
         and path not in new_docs and path not in prior_architecture
     )
     declarations = {module["path"]: module for module in context.topology.get("modules", ())}
-    prior_declared_docs = {
-        path for module in common_modules
-        for path in prior_modules.get(module, {}).get("boundary_docs", ())
-    }
-    current_declared_docs = {
-        path for module in context.touched
-        for path in declarations.get(module, {}).get("boundary_docs", ())
-    }
-    removed_docs = sorted(
-        prior_declared_docs.difference(current_declared_docs, current_docs, prior_architecture, changed_docs)
+
+    def declared_bindings(modules: Mapping[str, dict], touched: set[str]) -> set[tuple[str, str]]:
+        return {
+            (module, path) for module in touched
+            for path in modules.get(module, {}).get("boundary_docs", ())
+        }
+
+    prior_bindings = declared_bindings(prior_modules, common_modules)
+    current_bindings = declared_bindings(declarations, context.touched)
+    removed_bindings = prior_bindings - current_bindings
+    added_bindings = sorted(
+        (module, path) for module, path in current_bindings - prior_bindings
+        if module in common_modules
     )
-    if not (new_modules or new_docs or changed_docs or removed_docs):
+    removed_docs = sorted(
+        {path for _, path in removed_bindings}.difference(
+            {path for _, path in current_bindings}, current_docs, prior_architecture, changed_docs,
+        )
+    )
+    if not (new_modules or new_docs or changed_docs or removed_bindings or added_bindings):
         return
 
+    omitted_before = budget.omitted
     budget.append("## Updated Module Scope & Boundary Context")
+    if removed_bindings or added_bindings:
+        budget.append("\n".join([
+            "Declared `boundary_docs` changes by module",
+            *(f"- `{module}` removed `{path}`" for module, path in sorted(removed_bindings)),
+            *(f"- `{module}` added `{path}`" for module, path in added_bindings),
+        ]))
+        if budget.omitted != omitted_before:
+            raise _PriorModuleContextUnavailable("Boundary declaration changes exceed the document budget")
     if removed_docs:
         budget.append(
             "Removed from declared boundary_docs (no longer bound as module boundary): "
