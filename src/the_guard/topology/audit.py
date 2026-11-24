@@ -482,12 +482,16 @@ def check_contract_drift(
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []
     if baseline and candidates:
+        # Baseline evidence uses baseline ownership so a new nested owner cannot
+        # hide edges the parent module used to own, while current evidence keeps
+        # target ownership.
+        baseline_owner_paths = list(old_modules)
         baseline_candidates = [
             p
             for p in sorted(
                 _snapshot_paths(root, base, candidates, recursive=True, files_only=True)
             )
-            if owner_module(p, module_paths) in candidates
+            if owner_module(p, baseline_owner_paths) in candidates
             and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
         ]
         reader.preload(baseline_candidates)

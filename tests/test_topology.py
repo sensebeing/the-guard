@@ -595,6 +595,54 @@ class TopologyTests(unittest.TestCase):
         self.assertIn("retired module 'packages/legacy'", by_path["packages/surface/use_legacy.vue"].message)
         self.assertLessEqual(len(commands), 25, commands)
 
+    def test_contract_drift_baseline_evidence_uses_baseline_ownership(self):
+        self.config({
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/a", "dependencies": ["packages/b"]},
+                {"path": "packages/b", "dependencies": []},
+            ],
+        })
+        self.write("packages/a/keep.py", "value = 1\n")
+        self.write("packages/a/nested/main.py", "import packages.b.api\n")
+        self.write("packages/b/api.py", "def read():\n    return 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "baseline parent-owned dependency")
+        base = self.git("rev-parse", "HEAD")
+        self.config({
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/a", "dependencies": ["packages/b"]},
+                {"path": "packages/a/nested", "dependencies": []},
+                {"path": "packages/b", "dependencies": []},
+            ],
+        })
+        self.write("packages/a/keep.py", "value = 2\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "split nested owner")
+        head = self.git("rev-parse", "HEAD")
+        findings = check_contract_drift(
+            self.root,
+            [".guard/config.json", "packages/a/keep.py"],
+            base=base,
+            revision=head,
+        )
+        self.assertEqual(
+            {(f.path, f.rule_id, f.message) for f in findings},
+            {
+                (
+                    "packages/a/nested/main.py",
+                    "guard.service-boundaries",
+                    "Module 'packages/a/nested' imports undeclared dependency 'packages/b' (allowed: []).",
+                ),
+                (
+                    ".guard/config.json",
+                    "guard.single-source-of-truth",
+                    "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency.",
+                ),
+            },
+        )
+
     def test_snapshot_baseline_ignores_dirty_rename_inference(self):
         self.config(
             {"forbidden_imports": [{"scope_prefixes": ["packages/a"], "imports": ["forbidden"]}]}
