@@ -23,6 +23,7 @@ from the_guard.review.repository import (
     collect_review_scope,
     collect_incremental_scope,
     load_review_session,
+    load_valid_receipt,
 )
 from the_guard.review.session import ReviewSessionState
 from the_guard.topology import check_contract_drift, run_topology_guard
@@ -384,6 +385,91 @@ class LargeDiffTests(ArchitectureReviewTestCase):
         assert set(actual) == set(deleted)
         assert len([cmd for cmd in commands if "show" in cmd]) < 30
         assert f"{base}..{head}" in prompt
+
+    def test_rebased_bulk_blueprint_deletions_keep_receipt_history(self):
+        deleted = [f"docs/plans/retired_{i:03d}.md" for i in range(160)]
+        changed = "docs/plans/z_changed.md"
+        active = "docs/plans/z_active.md"
+        symlink = "docs/plans/z_link.md"
+        branch_only = "docs/plans/z_branch_only.md"
+        _git(self.repo, "checkout", "main")
+        for path in [*deleted, changed, active]:
+            self.write(path, b"# Original plan\n")
+        self.write("docs/linked-plan.txt", b"# Linked plan\n")
+        (self.repo / symlink).symlink_to("../linked-plan.txt")
+        base1 = self.commit("publish plans")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", base1)
+        _git(self.repo, "checkout", "topic")
+        _git(self.repo, "rebase", "main")
+        for path in [*deleted, symlink]:
+            (self.repo / path).unlink()
+        self.write(branch_only, b"# Branch-only plan\n")
+        self.write("src/live.py", b"value = 1\n")
+        self.commit("retire plans and add a branch plan")
+
+        prompts = []
+
+        def reviewer(prompt):
+            prompts.append(prompt)
+            if len(prompts) == 3:
+                return {"verdict": "GO", "summary": "Review complete", "blocking_findings": []}
+            return {
+                "verdict": "NO-GO",
+                "summary": "Retirement incomplete",
+                "blocking_findings": [{
+                    "rule_id": "guard.single-source-of-truth", "file": branch_only, "line": 1,
+                    "issue": "The branch still carries a superseded plan.",
+                    "required_fix": "Remove the superseded plan.",
+                }],
+            }
+
+        first = run_architecture_review(self.repo, reviewer_fn=reviewer, reviewer_note=f"See {changed}")
+        _git(self.repo, "checkout", "main")
+        self.write(changed, b"# Upstream plan revision\n")
+        base2 = self.commit("revise an upstream plan")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", base2)
+        _git(self.repo, "checkout", "topic")
+        _git(self.repo, "rebase", "main")
+        run_architecture_review(self.repo, reviewer_fn=reviewer)
+
+        _git(self.repo, "checkout", "main")
+        self.write("README.md", b"# Updated upstream README\n")
+        base3 = self.commit("advance upstream again")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", base3)
+        _git(self.repo, "checkout", "topic")
+        _git(self.repo, "rebase", "main")
+        for path in (changed, branch_only):
+            (self.repo / path).unlink()
+        self.write(active, b"# Plan still active at HEAD\n")
+        head = self.commit("retire two more plans and revise an active plan")
+        result = run_architecture_review(self.repo, reviewer_fn=reviewer)
+        self.assertEqual(result.merge_base, base3)
+        self.assertEqual(len(prompts), 3)
+        prompt = prompts[-1]
+        self.assertLess(len(prompt), 20_000)
+
+        section = prompt.split("## Additional previously reviewed task blueprints\n", 1)[1]
+        individual, bulk = section.split("### Deleted merge-base task blueprints\n", 1)
+        inventory, _ = json.JSONDecoder().raw_decode(individual[individual.index("{"):])
+        self.assertTrue(set(deleted).isdisjoint(inventory))
+        expected_individual = {
+            changed: (base3, base1, base2),
+            active: (base3, head),
+            symlink: (base3, base2, base1),
+            branch_only: (first.head_sha,),
+        }
+        self.assertEqual(inventory, {path: list(revisions) for path, revisions in expected_individual.items()})
+        grouped = bulk.split("\n## ", 1)[0]
+        self.assertIn(f"docs/plans/: {len(deleted)} deleted task blueprints.", grouped)
+        note, = (line for line in grouped.splitlines() if base1 in line or base2 in line)
+        for revision in (base1, base2):
+            self.assertEqual(note.count(revision), 1)
+        self.assertIn(f"matched their Anchor 0 bodies at {base3}", note)
+
+        expected = dict.fromkeys(deleted, (base3, base2, base1)) | expected_individual
+        self.assertEqual(load_review_session(self.repo).task_blueprint_anchors, expected)
+        receipt = load_valid_receipt(self.repo, result.patch_digest)
+        self.assertEqual(receipt["task_blueprint_anchors"], {path: list(revisions) for path, revisions in expected.items()})
 
     def test_batched_blueprints_preserve_bytes_and_validate_utf8(self):
         self.write("docs/plans/active.md", b"# line\r\nnext\r")
