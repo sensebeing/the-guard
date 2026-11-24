@@ -48,6 +48,37 @@ from .session import (
 )
 
 
+def _full_review_reason(
+    *,
+    force: bool,
+    stored_session: ReviewSessionState | None,
+    contract_changed: bool,
+    has_incremental_prompt: bool,
+    prior_session: ReviewSessionState | None,
+    provider: str,
+) -> str:
+    """Name the objective condition that sends this provider run down the full path.
+
+    This is the sole vocabulary for the read-only `full_review_reason` run metadata:
+    ``""`` (incremental), ``force``, ``no_prior_session``, ``contract_changed``,
+    ``no_incremental_delta``, ``provider_changed`` and ``missing_session_id``.
+    ``resume_failed`` is recorded by the caller after a failed incremental resume.
+    """
+    if force:
+        return "force"
+    if stored_session is None:
+        return "no_prior_session"
+    if contract_changed or prior_session is None:
+        return "contract_changed"
+    if not has_incremental_prompt:
+        return "no_incremental_delta"
+    if prior_session.provider != provider:
+        return "provider_changed"
+    if not prior_session.session_id:
+        return "missing_session_id"
+    return ""
+
+
 def run_architecture_review(
     repo_root: Path,
     *,
@@ -243,6 +274,14 @@ def run_architecture_review(
                 and prior_session.provider == provider
                 and bool(prior_session.session_id)
             )
+            full_review_reason = _full_review_reason(
+                force=force,
+                stored_session=stored_session,
+                contract_changed=contract_changed,
+                has_incremental_prompt=inc_prompt is not None,
+                prior_session=prior_session,
+                provider=provider,
+            )
             if can_resume and prior_session is not None and inc_prompt is not None:
                 try:
                     payload, resolved_session_id, log_path = _invoke_provider(
@@ -267,6 +306,7 @@ def run_architecture_review(
                         )
                     break
                 except Exception as resume_exc:
+                    full_review_reason = "resume_failed"
                     sys.stderr.write(
                         f"[arch-review][{provider}] incremental session resume ({prior_session.session_id}) failed ({resume_exc}); falling back to full session...\n"
                     )
@@ -281,6 +321,7 @@ def run_architecture_review(
                     eff_env,
                     scope=scope,
                     mode="full",
+                    full_review_reason=full_review_reason,
                     prev_head_sha=prev_head_sha,
                     reviewer_note=eff_note,
                     model=model,

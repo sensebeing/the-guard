@@ -893,7 +893,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "    print('2.0.0')\n"
                 "    raise SystemExit(0)\n"
                 "args = sys.argv[1:]\n"
-                "prompt = args[args.index('-p') + 1] if '-p' in args else ''\n"
+                "prompt = sys.stdin.read()\n"
                 "resume_id = args[args.index('--resume') + 1] if '--resume' in args else ''\n"
                 "session_id = args[args.index('--session-id') + 1] if '--session-id' in args else (resume_id or 'sid-default')\n"
                 "with open(os.environ['CLAUDE_CALLS_FILE'], 'a', encoding='utf-8') as f:\n"
@@ -1259,7 +1259,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "    print('2.1.105 (Claude Code)')\n"
                 "    raise SystemExit(0)\n"
                 "args = sys.argv[1:]\n"
-                "prompt = args[args.index('-p') + 1] if '-p' in args else ''\n"
+                "prompt = sys.stdin.read()\n"
                 "resume_id = args[args.index('--resume') + 1] if '--resume' in args else ''\n"
                 "calls_path = os.environ['CLAUDE_CALLS_FILE']\n"
                 "with open(calls_path, 'a', encoding='utf-8') as f:\n"
@@ -1506,8 +1506,8 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 cmd: list[str], *args: object, **kwargs: object
             ) -> subprocess.CompletedProcess[bytes]:
                 if (
-                    len(cmd) >= 3
-                    and cmd[1] == "diff"
+                    len(cmd) >= 6
+                    and cmd[:4] == ["git", "-c", "core.fsmonitor=false", "diff"]
                     and "--raw" in cmd
                     and f"{session.merge_base}..{session.last_head_sha}" in cmd
                 ):
@@ -1620,3 +1620,78 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(result.provider, "agy")
             saved_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
             self.assertEqual(saved_cfg["preferred_provider"], "claude")
+
+    def test_run_metadata_records_incremental_and_resume_failure_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            service = repo / "services/catalog/service.py"
+            service.parent.mkdir(parents=True)
+            service.write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "round 1")
+
+            fake_home = tmp / "home"
+            fake_bin = fake_home / ".local/bin"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
+            log_dir = tmp / "logs"
+            (fake_home / ".claude").mkdir(parents=True)
+            _write_exec(
+                fake_bin / "claude",
+                "#!/usr/bin/env python3\n"
+                "import json, os, subprocess, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('2.0.0')\n"
+                "    raise SystemExit(0)\n"
+                "args = sys.argv[1:]\n"
+                "sys.stdin.read()\n"
+                "if '--resume' in args and os.environ.get('FAIL_RESUME') == '1':\n"
+                "    print(json.dumps({'type': 'error', 'message': 'resume transport exploded'}))\n"
+                "    raise SystemExit(1)\n"
+                "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'reason-session'}))\n"
+                "print(json.dumps({'type': 'result', 'result': {'structured_output': {\n"
+                "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+                "    'verdict': 'GO', 'summary': 'reason probe', 'blocking_findings': []\n"
+                "}}}))\n",
+            )
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(fake_home),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_LOG_DIR": str(log_dir),
+            }
+
+            def meta_of(result) -> dict:
+                return json.loads(
+                    Path(
+                        result.log_path.replace(".events.jsonl", ".meta.json")
+                    ).read_text(encoding="utf-8")
+                )
+
+            first = run_architecture_review(repo, env=env)
+            self.assertEqual(first.mode, "full")
+
+            service.write_text("value = 2\n", encoding="utf-8")
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "round 2")
+            incremental = run_architecture_review(repo, env=env)
+            self.assertEqual(incremental.mode, "incremental")
+            self.assertEqual(meta_of(incremental)["full_review_reason"], "")
+
+            service.write_text("value = 3\n", encoding="utf-8")
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "round 3")
+            fallback = run_architecture_review(repo, env={**env, "FAIL_RESUME": "1"})
+            self.assertEqual(fallback.mode, "full")
+            self.assertEqual(meta_of(fallback)["full_review_reason"], "resume_failed")
+            failed = [
+                payload
+                for payload in (
+                    json.loads(path.read_text(encoding="utf-8"))
+                    for path in log_dir.glob("*.meta.json")
+                )
+                if payload["status"] == "failed"
+            ]
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0]["mode"], "incremental")
+            self.assertEqual(failed[0]["full_review_reason"], "")

@@ -64,8 +64,16 @@ from .session import (
 def _git(
     repo_root: Path, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[bytes]:
+    """Run a snapshot-only Git command isolated from the host worktree's fsmonitor.
+
+    Review reads immutable objects and never consults the worktree index, so a wedged
+    or cross-version `fsmonitor--daemon` cannot be allowed to stall it.
+    """
     return subprocess.run(
-        ["git", *args], cwd=repo_root, check=check, capture_output=True
+        ["git", "-c", "core.fsmonitor=false", *args],
+        cwd=repo_root,
+        check=check,
+        capture_output=True,
     )
 
 

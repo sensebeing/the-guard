@@ -529,6 +529,8 @@ def _build_provider_cmd(
     common_dir: Path | None = None,
 ) -> list[str]:
     if provider == "agy":
+        # `agy -p` consumes the following token as its prompt value and never reads
+        # stdin, so the prompt must stay in argv for this provider.
         cmd = [
             binary_path,
             "-p",
@@ -551,10 +553,11 @@ def _build_provider_cmd(
             cmd.extend(["--conversation", resume_session_id])
         return cmd
     if provider == "claude":
+        # The prompt travels over stdin: argv has an OS size ceiling (E2BIG) once a
+        # review prompt approaches 1 MB.
         cmd = [
             binary_path,
             "-p",
-            prompt,
             "--permission-mode",
             "plan",
             "--disallowedTools",
@@ -677,6 +680,7 @@ def _invoke_provider(
     *,
     scope: ReviewScope,
     mode: str = "full",
+    full_review_reason: str = "",
     resume_session_id: str | None = None,
     prev_head_sha: str | None = None,
     reviewer_note: str = "",
@@ -702,6 +706,7 @@ def _invoke_provider(
         resume_session_id=resume_session_id,
         prev_head_sha=prev_head_sha,
         reviewer_note=reviewer_note,
+        full_review_reason=full_review_reason,
         env=env,
     )
     initial_session_id = (
@@ -722,7 +727,12 @@ def _invoke_provider(
         )
         try:
             rc, out, err = _run_streaming_cmd(
-                provider, cmd, cwd=repo_root, env=child_env, run_logger=run_logger
+                provider,
+                cmd,
+                cwd=repo_root,
+                env=child_env,
+                stdin_text=prompt if provider == "claude" else None,
+                run_logger=run_logger,
             )
             if rc != 0:
                 raise RuntimeError(

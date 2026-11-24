@@ -16,6 +16,12 @@ snapshot-bound. Review sessions start a fresh full review when reviewer contract
 repository configuration, or policy rules change.
 Updater state and reviewer discovery default to `~/.config/the-guard`. The updater migrates
 legacy metadata on first default-path use and retains one rotated 512 KiB log backup.
+Review prompts reach `claude` over standard input so prompt size is not bounded by the OS argv
+limit (`agy -p` requires its prompt as the flag value). Snapshot Git reads run with
+`-c core.fsmonitor=false`, so a wedged or cross-version worktree fsmonitor daemon cannot stall
+them. Each run's `.meta.json` and `index.jsonl` record `full_review_reason` when the run is full:
+`force`, `no_prior_session`, `contract_changed`, `no_incremental_delta`, `provider_changed`,
+`missing_session_id` or `resume_failed`; incremental runs record an empty value.
 
 ## Daily loop
 
@@ -29,10 +35,13 @@ legacy metadata on first default-path use and retains one rotated 512 KiB log ba
    `guard review` for an independent pre-merge architecture review of committed snapshots.
    A clean static check or successful `guard probe` is not an independent review receipt.
 4. **Resolve or rebut.** Fix blocking findings at the architectural root cause across the affected
-   pattern, preserving real safety boundaries. Commit fixes and rerun `guard review`. When the
-   implementation already satisfies the contract, submit factual evidence with
-   `guard review --note "<file:line and owner contract evidence>"` instead of changing correct
-   code merely to appease a reviewer. A rebuttal requests reassessment; it does not bypass review.
+   pattern, preserving real safety boundaries. Commit fixes and rerun plain `guard review`; the prior
+   session resumes incrementally, which is several times faster than a cold run. Do not pass `--force`
+   during iterative fix-and-re-review; reserve it for discarding a corrupted session or forcing an
+   explicit cold re-audit. When the implementation already satisfies the contract, submit factual
+   evidence with `guard review --note "<file:line and owner contract evidence>"` instead of changing
+   correct code merely to appease a reviewer. A rebuttal requests reassessment; it does not bypass
+   review.
 5. **Verify integration readiness.** After a `GO` result, run `guard check-push` before integrating
    into `main`. If the committed patch changes, obtain matching review evidence again. A local
    receipt establishes review readiness, not permission to merge, push, or publish; follow the
