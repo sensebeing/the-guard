@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None, *, _from_root_cli: bool = False) -> int:
         p = sub.add_parser(name)
         p.add_argument("--repo-root", default=".")
         p.add_argument("--main-branch", default=None)
+        if name == "check-push":
+            p.add_argument("--head", default="HEAD", help="Commit or ref to verify (default: HEAD)")
         if name in ("run", "probe"):
             p.add_argument("--reprobe", action="store_true")
         if name == "publish-github":
@@ -92,7 +94,8 @@ def main(argv: list[str] | None = None, *, _from_root_cli: bool = False) -> int:
 
 def _run_review(args: argparse.Namespace, root: Path) -> int:
     try:
-        config = load_config(root)
+        head_ref = args.head if args.command == "check-push" else "HEAD"
+        config = load_config(root, revision=head_ref if args.command == "check-push" else None)
         main_branch = args.main_branch or config.main_branch
         if args.command == "publish-github":
             if args.input_json == "-":
@@ -139,7 +142,7 @@ def _run_review(args: argparse.Namespace, root: Path) -> int:
             and os.environ.get("THE_GUARD_REVIEW_ACTIVE") == "1"
         ):
             return 0
-        scope = collect_review_scope(root, main_branch=main_branch)
+        scope = collect_review_scope(root, main_branch=main_branch, head_ref=head_ref)
         snapshot_config = load_config(root, revision=scope.head_sha)
         snapshot_policy = load_policy(
             root, revision=scope.head_sha, config=snapshot_config

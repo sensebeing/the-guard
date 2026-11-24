@@ -2045,6 +2045,37 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertIn("EXEMPT", proc.stdout)
 
+    def test_check_push_verifies_non_head_commit_with_dirty_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            path = repo / "services/catalog/app.py"
+            path.parent.mkdir(parents=True)
+            path.write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "reviewed candidate")
+            target = _git(repo, "rev-parse", "HEAD").strip()
+            result = run_architecture_review(
+                repo, reviewer_fn=lambda _prompt: {
+                    "verdict": "GO",
+                    "summary": "Clean change",
+                    "blocking_findings": [],
+                },
+            )
+            self.assertEqual(result.verdict, "GO")
+            path.write_text("value = 2\n", encoding="utf-8")
+            _git(repo, "commit", "-am", "different unreviewed head")
+            dirty_config = repo / ".guard/config.json"
+            dirty_config.parent.mkdir(exist_ok=True)
+            dirty_config.write_text("invalid dirty config\n", encoding="utf-8")
+
+            cmd = [sys.executable, str(GATE_CLI), "review", "check-push", "--repo-root", str(repo)]
+            verified = subprocess.run([*cmd, "--head", target], capture_output=True, text=True)
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertIn("VERIFIED", verified.stdout)
+            blocked = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertIn("NO-GO", blocked.stderr)
+
     def test_code_diff_blocks_push_until_go_receipt_and_survives_rebase(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
