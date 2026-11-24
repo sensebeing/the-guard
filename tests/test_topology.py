@@ -20,6 +20,7 @@ from the_guard.topology import (
     sync_topology,
 )
 from the_guard.topology.configured import check_configured
+from the_guard.topology import audit as topology_audit
 from the_guard.git_helpers import BaseFileReader, BaseFileEntry, _compute_changed_lines
 from the_guard.topology.imports import (
     DETERMINISTIC_IMPORT_EXTENSIONS,
@@ -264,6 +265,169 @@ class TopologyTests(unittest.TestCase):
         self.assertNotIn("packages/c", findings[0].message)
         self.assertEqual(findings[0].rule_id, "guard.single-source-of-truth")
         self.assertTrue(check_contract_drift(self.root, [], base="absent-base"))
+
+    def _dependency_fixture(self, *, dependencies=("packages/b",)):
+        topology = {
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/a", "dependencies": list(dependencies)},
+                {"path": "packages/b"},
+            ],
+        }
+        self.config(topology)
+        self.write("packages/a/main.py", "from packages.b.api import value\n")
+        self.write("packages/a/z_unchanged.py", "other = 1\n")
+        self.write("packages/b/api.py", "value = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "dependency baseline")
+        return topology, self.git("rev-parse", "HEAD")
+
+    def test_contract_drift_import_retained_requires_no_unchanged_inventory(self):
+        _, base = self._dependency_fixture()
+        path = "packages/a/main.py"
+        self.write(path, "from packages.b.api import value\nother = 1\n")
+        self.git("commit", "-am", "retain import")
+        with (
+            patch.object(topology_audit, "source_files", wraps=topology_audit.source_files) as walk,
+            patch.object(topology_audit, "extract_imports", wraps=extract_imports) as imports,
+            patch.object(BaseFileReader, "preload", autospec=True, side_effect=BaseFileReader.preload) as preload,
+        ):
+            for revision in (None, "HEAD"):
+                self.assertEqual(check_contract_drift(self.root, [path], base=base, revision=revision), [])
+        walk.assert_not_called()
+        self.assertEqual({call.args[0] for call in imports.call_args_list}, {path})
+        self.assertTrue(all(set(call.args[1]) <= {path} for call in preload.call_args_list))
+
+    def test_contract_drift_finds_omitted_changed_path_in_both_modes(self):
+        _, base = self._dependency_fixture()
+        self.write("packages/a/main.py", "value = 1\n")
+        self.git("commit", "-am", "remove last import")
+        for revision in (None, "HEAD"):
+            with self.subTest(revision=revision):
+                findings = check_contract_drift(self.root, [], base=base, revision=revision)
+                self.assertEqual([f.message for f in findings], [
+                    "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency."
+                ])
+
+    def test_contract_drift_stops_at_unchanged_import(self):
+        _, base = self._dependency_fixture()
+        self.write("packages/a/another.py", "from packages.b.api import value\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "second import")
+        base = self.git("rev-parse", "HEAD")
+        self.write("packages/a/main.py", "value = 1\n")
+        self.git("commit", "-am", "remove one import")
+        with patch.object(topology_audit, "extract_imports", wraps=extract_imports) as imports:
+            result = check_contract_drift(self.root, [], base=base, revision="HEAD")
+        self.assertEqual(result, [])
+        scanned = [call.args[0] for call in imports.call_args_list]
+        self.assertEqual(scanned.count("packages/a/another.py"), 1)
+        self.assertNotIn("packages/a/z_unchanged.py", scanned)
+
+    def test_contract_drift_counts_an_import_in_an_untracked_file(self):
+        _, base = self._dependency_fixture()
+        self.write("packages/a/main.py", "value = 1\n")
+        self.assertTrue(check_contract_drift(self.root, [], base=base))
+        self.write("packages/a/untracked.py", "from packages.b.api import value\n")
+        self.assertEqual(check_contract_drift(self.root, [], base=base), [])
+
+    def test_contract_drift_accounts_for_git_index_flags(self):
+        _, base = self._dependency_fixture()
+        path = "packages/a/main.py"
+        for flag in ("assume-unchanged", "skip-worktree"):
+            with self.subTest(flag=flag):
+                self.git("update-index", "--" + flag, path)
+                self.write(path, "value = 1\n")
+                findings = check_contract_drift(self.root, [], base=base)
+                self.assertEqual([f.message for f in findings], [
+                    "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency."
+                ])
+                self.write(path, "from packages.b.api import value\n")
+                self.git("update-index", "--no-" + flag, path)
+
+    def test_contract_drift_uses_baseline_coverage_for_tracked_generated_source(self):
+        self._dependency_fixture()
+        self.git("rm", "packages/a/main.py")
+        self.write("packages/a/build/generated.py", "from packages.b.api import value\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "baseline includes a tracked generated source")
+        base = self.git("rev-parse", "HEAD")
+        path = "packages/a/z_unchanged.py"
+        self.write(path, "other = 2\n")
+        findings = check_contract_drift(self.root, [path], base=base)
+        self.assertEqual([f.message for f in findings], [
+            "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency."
+        ])
+
+    def test_contract_drift_reads_worktree_sources_transformed_by_git(self):
+        self._dependency_fixture()
+        self.write(".gitattributes", "packages/a/main.py filter=normalize-source\n")
+        self.git("config", "filter.normalize-source.clean",
+                 "sed 's/^value = 1$/from packages.b.api import value/'")
+        self.git("add", ".gitattributes")
+        self.git("commit", "-m", "baseline with source filter")
+        base = self.git("rev-parse", "HEAD")
+        self.write("packages/a/main.py", "value = 1\n")
+        self.assertEqual(self.git("diff", "--name-only", base), "")
+        self.assertEqual([f.message for f in check_contract_drift(self.root, [], base=base)], [
+            "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency."
+        ])
+
+    def test_contract_drift_reports_new_unused_dependency(self):
+        topology, base = self._dependency_fixture(dependencies=())
+        topology["modules"][0]["dependencies"] = ["packages/b"]
+        self.config(topology)
+        self.write("packages/a/main.py", "value = 1\n")
+        findings = check_contract_drift(self.root, [], base=base)
+        self.assertEqual([f.message for f in findings], [
+            "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency."
+        ])
+
+    def test_contract_drift_unknown_text_on_either_side_exempts_module(self):
+        _, base = self._dependency_fixture()
+        self.write("packages/a/first.swift", "let value = 1\n")
+        self.write("packages/a/main.py", "value = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "replace import with Swift source")
+        with patch.object(topology_audit, "extract_imports", wraps=extract_imports) as imports:
+            findings = check_contract_drift(self.root, ["packages/a/main.py"], base=base, revision="HEAD")
+        self.assertEqual(findings, [])
+        self.assertNotIn("packages/a/z_unchanged.py", [call.args[0] for call in imports.call_args_list])
+
+        self.git("checkout", "--detach", base)
+        self.write("packages/a/first.swift", "let value = 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "mixed-language baseline")
+        base = self.git("rev-parse", "HEAD")
+        self.git("rm", "packages/a/first.swift")
+        self.write("packages/a/main.py", "value = 1\n")
+        self.git("commit", "-am", "remove Swift source and import")
+        self.assertEqual(check_contract_drift(self.root, [], base=base, revision="HEAD"), [])
+
+    def test_contract_drift_falls_back_when_resolution_changes(self):
+        topology, base = self._dependency_fixture()
+        path = "packages/a/main.py"
+        self.write(path, "value = 1\n")
+        for setting in ("module paths", "module doc roots", "submodules"):
+            with self.subTest(setting=setting):
+                if setting == "module paths":
+                    self.config({**topology, "modules": [*topology["modules"], {"path": "packages/c"}]})
+                    self.write("packages/c/api.py", "value = 1\n")
+                elif setting == "module doc roots":
+                    self.write(".guard/config.json", json.dumps({
+                        "topology": topology, "module_doc_roots": ["modules"],
+                    }))
+                else:
+                    self.config(topology)
+                    self.write(".gitmodules", '[submodule "vendor"]\npath = vendor\n')
+                with patch.object(
+                    topology_audit, "_dependency_evidence", wraps=topology_audit._dependency_evidence
+                ) as evidence:
+                    findings = check_contract_drift(self.root, [path], base=base)
+                self.assertEqual([f.message for f in findings], [
+                    "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency."
+                ])
+                self.assertEqual(evidence.call_count, 2)
 
     def test_contract_drift_recognizes_nested_modules_in_snapshot(self):
         self.config({

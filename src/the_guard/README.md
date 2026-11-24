@@ -132,6 +132,8 @@ new missing declared documents and newly stale dependency edges. An edited produ
 file without a declared module also fails the edit guard. Untouched baseline debt stays
 grandfathered; `guard topology audit` reports the full repository debt. Changes to module
 responsibilities require synchronized configuration and authoritative boundary docs.
+With stable ownership and import resolution, the stale-dependency ratchet checks
+changed files first and scans unchanged sources only for edges that may have lost their last import.
 `guard topology sync` refreshes inventory without granting observed imports permission.
 Modules declared with `retired: true` keep their reserved paths after the last file is deleted.
 They have no declared dependency edges or active boundary documents. Changed files under retired
@@ -140,8 +142,11 @@ unchanged inbound imports throughout the repository. Active declarations cannot 
 within a retired path.
 
 Review CLI, check-push and protected-push checks read the exact target Git snapshot directly,
-without creating temporary worktrees. Exact snapshot reads use committed submodule metadata,
-reject unavailable blobs and disable working-tree rename inference for both baseline and target reads; binary assets do not count as import coverage. Dirty local files cannot alter the verdict. Deterministic
+without creating temporary worktrees. `guard review check-push --head <rev>` verifies a
+specific commit or ref and defaults to `HEAD` when omitted. Exact snapshot reads use committed
+submodule metadata, reject unavailable blobs and disable working-tree rename inference for both
+baseline and target reads. Binary assets do not count as import coverage. Dirty local files
+cannot alter the verdict. Deterministic
 findings block provider execution and receipt acceptance; the Python review engine remains the
 pure independent-review entry point. Loaded configuration, policy and contract digests pass
 directly to review consumers instead of being reloaded by each helper.

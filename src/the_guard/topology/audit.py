@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,7 @@ from ..finding import Finding
 from ..git_helpers import BaseFileReader, compute_changed_lines, git_ok, git_stdout, submodule_paths
 from ..config import GuardConfig, load_config, repository_path
 from .configured import check_module_imports
-from .discovery import discover_topology, source_files
+from .discovery import IGNORED, discover_topology, source_files
 from .imports import (
     DETERMINISTIC_IMPORT_EXTENSIONS,
     extract_imports,
@@ -33,6 +33,16 @@ INERT_MODULE_FILE_EXTENSIONS = {
     ".cfg",
     ".lock",
 }
+_EVIDENCE_BATCH_SIZE = 128
+
+
+def _import_targets(
+    path: str, text: str, module_paths: Sequence[str], doc_roots: Sequence[str]
+) -> Iterator[str]:
+    for _, _, spec in extract_imports(path, text, doc_roots):
+        target = resolve_target_module(path, spec, module_paths, doc_roots)
+        if target:
+            yield target
 
 
 def audit_topology(
@@ -103,12 +113,9 @@ def _dependency_evidence(
         source_extensions[source].add(Path(path).suffix)
         if Path(path).suffix not in DETERMINISTIC_IMPORT_EXTENSIONS:
             continue
-        for _, _, spec in extract_imports(
-            path, read(path) or "", config.module_doc_roots
-        ):
-            target = resolve_target_module(path, spec, paths, config.module_doc_roots)
-            if target:
-                observed[source].add(target)
+        observed[source].update(
+            _import_targets(path, read(path) or "", paths, config.module_doc_roots)
+        )
     for path in coverage_files:
         if is_excluded_topology_path(path):
             continue
@@ -248,6 +255,292 @@ def _tightened_import_scope(
     return tightened, False
 
 
+def _module_inventory(root: Path, revision: str | None, paths: set[str] | None) -> set[str]:
+    if revision is not None:
+        return _snapshot_paths(root, revision, paths, recursive=True, files_only=True)
+    roots = [root] if paths is None else [repository_path(root, path) for path in paths]
+    return {
+        p.relative_to(root).as_posix()
+        for source in roots
+        for p in ([source] if source.is_file() else source_files(source))
+        if not p.is_symlink()
+    }
+
+
+def _dependency_changes(
+    root: Path, base: str, revision: str | None, modules: set[str], hints: Sequence[str]
+) -> tuple[set[str], set[str]]:
+    """Collect touched paths and tracked paths whose worktree visibility may differ."""
+    module_paths = sorted(modules)
+    pathspecs = [f":(literal){module}" for module in module_paths]
+    diff = git_stdout(root, [
+        "git", "-c", "core.fsmonitor=false", "diff", "--name-only", "--no-renames",
+        "--ignore-submodules=none", "-z", base,
+        *([revision] if revision is not None else []), "--", *pathspecs,
+    ])
+    if diff is None:
+        raise ValueError("Cannot inspect changed module files against baseline")
+    paths = set(hints)
+    paths.update(filter(None, diff.split("\0")))
+    if revision is not None:
+        return paths, set()
+    indexed = git_stdout(root, [
+        "git", "ls-files", "-v", "--stage", "--cached", "--others",
+        "--exclude-standard", "-z", "--", *pathspecs,
+    ])
+    # Conversion attributes can make Git report clean content that differs from raw source.
+    raw_sources = git_stdout(root, [
+        "git", "ls-files", "--cached", "-z", "--", *pathspecs,
+        *[
+            f":(exclude,literal,attr:!filter !ident !working-tree-encoding){module}"
+            for module in module_paths
+        ],
+    ])
+    if indexed is None or raw_sources is None:
+        raise ValueError("Cannot inspect working-tree module files")
+    paths.update(filter(None, raw_sources.split("\0")))
+    different_inventory = set()
+    for record in filter(None, indexed.split("\0")):
+        status, entry = record[0], record[2:]
+        if status == "?":
+            paths.add(entry)
+            continue
+        metadata, _, path = entry.partition("\t")
+        # Git diff can omit working-tree changes to these index entries.
+        if status.islower() or status == "S":
+            paths.add(path)
+        if metadata.startswith("120000 ") or _has_pruned_directory(path):
+            different_inventory.add(path)
+    return paths, different_inventory
+
+
+def _has_pruned_directory(path: str) -> bool:
+    return any(
+        part in IGNORED or part.endswith((".egg-info", ".dist-info"))
+        for part in path.split("/")[:-1]
+    )
+
+
+def _worktree_source_is_visible(root: Path, module: str, path: str) -> bool:
+    if path != module and _has_pruned_directory(path.removeprefix(module + "/")):
+        return False
+    current = root / path
+    return all(
+        not entry.is_symlink()
+        for entry in (current, *current.parents)
+        if entry != root and entry.is_relative_to(root)
+    )
+
+
+def _non_binary_sources(
+    paths: Sequence[str],
+    read: Callable[[str], str | None],
+    reader: BaseFileReader | None = None,
+) -> Iterator[tuple[str, str]]:
+    for start in range(0, len(paths), _EVIDENCE_BATCH_SIZE):
+        batch = paths[start : start + _EVIDENCE_BATCH_SIZE]
+        if reader is not None:
+            reader.preload(batch)
+        for path in batch:
+            text = read(path)
+            if text is not None and "\x00" not in text:
+                yield path, text
+
+
+def _evidence_inventory(
+    inventory: set[str], modules: Sequence[str], owner: str
+) -> set[str]:
+    return {
+        path for path in inventory
+        if not is_excluded_topology_path(path)
+        and owner_module(path, modules) == owner
+        and Path(path).suffix not in INERT_MODULE_FILE_EXTENSIONS
+    }
+
+
+def _incremental_stale_dependencies(
+    root: Path,
+    config: GuardConfig,
+    modules: dict[str, dict[str, Any]],
+    old_modules: dict[str, dict[str, Any]],
+    changed_files: Sequence[str],
+    *,
+    reader: BaseFileReader,
+    snapshot_reader: BaseFileReader | None,
+    read_current: Callable[[str], str | None],
+) -> list[tuple[str, str]]:
+    """Find newly unused declared edges from changed sources and remaining witnesses."""
+    declared = {
+        module: set(entry["dependencies"])
+        for module, entry in modules.items()
+        if entry.get("dependencies")
+    }
+    if not declared:
+        return []
+    base = reader.base
+    revision = snapshot_reader.base if snapshot_reader is not None else None
+    module_paths = list(modules)
+    changed_by_module: dict[str, set[str]] = {}
+    changed_paths, different_inventory = _dependency_changes(
+        root, base, revision, set(declared), changed_files
+    )
+    for path in changed_paths:
+        owner = owner_module(path, module_paths)
+        if owner in declared:
+            changed_by_module.setdefault(owner, set()).add(path)
+
+    added_dependencies = {
+        module: dependencies - set(old_modules[module].get("dependencies", []))
+        for module, dependencies in declared.items()
+    }
+    for path in different_inventory:
+        owner = owner_module(path, module_paths)
+        if owner is None or not (owner in changed_by_module or added_dependencies.get(owner)):
+            continue
+        if not _worktree_source_is_visible(root, owner, path):
+            # A blob excluded by the worktree inventory contributes only on the base side.
+            changed_by_module.setdefault(owner, set()).add(path)
+
+    deterministic = {
+        module: sorted(
+            path for path in paths
+            if not is_excluded_topology_path(path)
+            and Path(path).suffix in DETERMINISTIC_IMPORT_EXTENSIONS
+        )
+        for module, paths in changed_by_module.items()
+    }
+    changed_sources = [path for paths in deterministic.values() for path in paths]
+    # Gitlink contents are outside the parent commit's evidence inventory.
+    base_sources = (
+        _snapshot_paths(root, base, set(changed_sources), files_only=True)
+        if reader.submodules else set(changed_sources)
+    )
+    reader.preload(base_sources)
+    if snapshot_reader is not None:
+        snapshot_sources = (
+            _snapshot_paths(root, snapshot_reader.base, set(changed_sources), files_only=True)
+            if snapshot_reader.submodules else set(changed_sources)
+        )
+        snapshot_reader.preload(snapshot_sources)
+
+    stale: list[tuple[str, str]] = []
+    for module, dependencies in sorted(declared.items()):
+        added = added_dependencies[module]
+        changed = changed_by_module.get(module, set())
+        if not changed and not added:
+            continue
+        paths = deterministic.get(module, [])
+        before = list(_non_binary_sources([path for path in paths if path in base_sources], reader.read))
+        current_paths = (
+            [path for path in paths if path in snapshot_sources]
+            if snapshot_reader is not None
+            else [path for path in paths if _worktree_source_is_visible(root, module, path)]
+        )
+        after = list(_non_binary_sources(current_paths, read_current))
+        old_imports = {
+            target for path, text in before
+            for target in _import_targets(path, text, module_paths, config.module_doc_roots)
+        }
+        new_imports = {
+            target for path, text in after
+            for target in _import_targets(path, text, module_paths, config.module_doc_roots)
+        }
+        # An unchanged file that used an edge at base still uses it now.
+        suspect = (added | ((dependencies - added) & old_imports)) - new_imports
+        if not suspect:
+            continue
+
+        current_files = _evidence_inventory(
+            _module_inventory(root, revision, {module}), module_paths, module
+        )
+        base_files = _evidence_inventory(
+            _module_inventory(root, base, {module}), module_paths, module
+        )
+        current_unknown = sorted(
+            path for path in current_files if Path(path).suffix not in DETERMINISTIC_IMPORT_EXTENSIONS
+        )
+        base_unknown = sorted(
+            path for path in base_files if Path(path).suffix not in DETERMINISTIC_IMPORT_EXTENSIONS
+            and (path not in current_files or path in changed)
+        )
+        if (
+            next(_non_binary_sources(current_unknown, read_current, snapshot_reader), None) is not None
+            or next(_non_binary_sources(base_unknown, reader.read, reader), None) is not None
+        ):
+            continue
+
+        has_non_binary_det = bool(before or after)
+        remaining = sorted(
+            path for path in current_files - changed
+            if Path(path).suffix in DETERMINISTIC_IMPORT_EXTENSIONS
+        )
+        for path, text in _non_binary_sources(remaining, read_current, snapshot_reader):
+            has_non_binary_det = True
+            suspect.difference_update(_import_targets(path, text, module_paths, config.module_doc_roots))
+            if not suspect:
+                break
+        if has_non_binary_det:
+            stale.extend((module, dep) for dep in sorted(suspect))
+    return stale
+
+
+def _full_stale_dependencies(
+    root: Path,
+    config: GuardConfig,
+    baseline: GuardConfig | None,
+    old_modules: dict[str, dict[str, Any]],
+    candidates: set[str],
+    inventory: set[str],
+    *,
+    available: bool,
+    reader: BaseFileReader,
+    snapshot_reader: BaseFileReader | None,
+    read_current: Callable[[str], str | None],
+) -> list[tuple[str, str]]:
+    module_paths = [module["path"] for module in config.topology.get("modules", [])]
+    evidence_candidates = [
+        path for path in sorted(inventory)
+        if not is_excluded_topology_path(path)
+        and owner_module(path, module_paths) in candidates
+        and Path(path).suffix not in INERT_MODULE_FILE_EXTENSIONS
+    ]
+    if snapshot_reader is not None:
+        snapshot_reader.preload(evidence_candidates)
+    old_observed: dict[str, set[str]] = {}
+    baseline_files: list[str] = []
+    if baseline is not None:
+        # Baseline evidence uses baseline ownership so a new nested owner cannot
+        # hide edges the parent module used to own.
+        baseline_owner_paths = list(old_modules)
+        baseline_candidates = [
+            path
+            for path in sorted(_module_inventory(root, reader.base, candidates))
+            if owner_module(path, baseline_owner_paths) in candidates
+            and Path(path).suffix not in INERT_MODULE_FILE_EXTENSIONS
+        ]
+        reader.preload(baseline_candidates)
+        baseline_files = [
+            path for path in baseline_candidates if "\x00" not in (reader.read(path) or "")
+        ]
+        old_observed, _ = _dependency_evidence(baseline, baseline_files, reader.read)
+    stale_files = [
+        path for path in evidence_candidates if "\x00" not in (read_current(path) or "")
+    ]
+    _, stale = _dependency_evidence(
+        config, stale_files, read_current, coverage_files=baseline_files,
+    )
+    result = []
+    for item in stale:
+        module, dependency = item["module"], item["unused_dependency"]
+        if module in candidates and (
+            not available
+            or dependency not in old_modules.get(module, {}).get("dependencies", [])
+            or dependency in old_observed.get(module, set())
+        ):
+            result.append((module, dependency))
+    return result
+
+
 def check_contract_drift(
     root: Path | str,
     changed_files: Sequence[str],
@@ -264,12 +557,11 @@ def check_contract_drift(
         root, ["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"]
     )
     submodules = submodule_paths(root, revision=revision)
+    base_submodules = submodule_paths(root, revision=base) if available else submodules
     reader = BaseFileReader(
         root,
         base,
-        submodule_paths(root, revision=base)
-        if revision is not None and available
-        else submodules,
+        base_submodules if revision is not None else submodules,
         exact=revision is not None,
     )
     config_path = ".guard/config.json"
@@ -374,59 +666,39 @@ def check_contract_drift(
         return current.read_text(errors="replace") if current.is_file() else None
 
     module_paths = list(modules)
-    candidates = {
-        m
-        for m in modules
-        if set(modules[m].get("dependencies", []))
-        != set(old_modules.get(m, {}).get("dependencies", []))
-    }
-    deleted = ""
-    if available:
-        deleted = git_stdout(
-            root,
-            [
-                "git",
-                "diff",
-                "--name-only",
-                "--diff-filter=D",
-                "-z",
-                base,
-                *([revision] if revision is not None else []),
-                "--",
-            ],
-        )
-        if deleted is None:
-            raise ValueError("Cannot inspect deleted module files against baseline")
-    changed_owned = [
-        path
-        for path in {*changed_files, *filter(None, deleted.split("\0"))}
-        if owner_module(path, module_paths) is not None
-    ]
-    if available:
-        reader.preload(changed_owned)
-    if snapshot_reader is not None:
-        snapshot_reader.preload(changed_owned)
-    for path in changed_owned:
-        owner = owner_module(path, module_paths)
-        text = read_current(path)
-        if not available or reader.read(path) != text:
-            candidates.add(owner)
-    scan_modules = candidates | tightened
-    if not scan_modules:
-        return findings
-    if revision is not None:
-        inventory = _snapshot_paths(
-            root, revision, None if scan_all_callers else scan_modules,
-            recursive=True, files_only=True,
-        )
-    else:
-        roots = [root] if scan_all_callers else [repository_path(root, module) for module in scan_modules]
-        inventory = {
-            p.relative_to(root).as_posix()
-            for directory in roots
-            for p in ([directory] if directory.is_file() else source_files(directory))
-            if not p.is_symlink()
+    incremental = (
+        available
+        and baseline is not None
+        and modules.keys() == old_modules.keys()
+        and config.module_doc_roots == baseline.module_doc_roots
+        and submodules == base_submodules
+    )
+    candidates = set()
+    if not incremental:
+        candidates = {
+            module
+            for module in modules
+            if set(modules[module].get("dependencies", []))
+            != set(old_modules.get(module, {}).get("dependencies", []))
         }
+        changed_paths, _ = (
+            _dependency_changes(root, base, revision, set(modules), changed_files)
+            if available and modules else (changed_files, set())
+        )
+        changed_owned = {
+            path for path in changed_paths if owner_module(path, module_paths) is not None
+        }
+        if available:
+            reader.preload(changed_owned)
+        if snapshot_reader is not None:
+            snapshot_reader.preload(changed_owned)
+        for path in sorted(changed_owned):
+            text = read_current(path)
+            if not available or reader.read(path) != text:
+                candidates.add(owner_module(path, module_paths))
+    inventory = _module_inventory(
+        root, revision, None if scan_all_callers else candidates | tightened
+    )
     # Inert documents and data carry no import edges; other text keeps extract_imports coverage.
     if scan_all_callers:
         import_candidates = [
@@ -442,17 +714,9 @@ def check_contract_drift(
             and owner_module(p, module_paths) in tightened
             and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
         ]
-    # Stale evidence reports candidate modules only, and inert files carry no imports.
-    evidence_candidates = [
-        p
-        for p in sorted(inventory)
-        if not is_excluded_topology_path(p)
-        and owner_module(p, module_paths) in candidates
-        and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
-    ]
     baseline_has_retirements = any(m.get("retired", False) for m in old_modules.values())
     if snapshot_reader is not None:
-        snapshot_reader.preload([*import_candidates, *evidence_candidates])
+        snapshot_reader.preload(import_candidates)
     if baseline_has_retirements:
         reader.preload(import_candidates)
     if scan_all_callers:
@@ -479,50 +743,26 @@ def check_contract_drift(
                 ),
             )
         )
-    old_observed: dict[str, set[str]] = {}
-    baseline_files: list[str] = []
-    if baseline and candidates:
-        # Baseline evidence uses baseline ownership so a new nested owner cannot
-        # hide edges the parent module used to own, while current evidence keeps
-        # target ownership.
-        baseline_owner_paths = list(old_modules)
-        baseline_candidates = [
-            p
-            for p in sorted(
-                _snapshot_paths(root, base, candidates, recursive=True, files_only=True)
+    if incremental:
+        stale = _incremental_stale_dependencies(
+            root, config, modules, old_modules, changed_files,
+            reader=reader if reader.exact else BaseFileReader(root, base, base_submodules, exact=True),
+            snapshot_reader=snapshot_reader, read_current=read_current,
+        )
+    elif candidates:
+        stale = _full_stale_dependencies(
+            root, config, baseline, old_modules, candidates, inventory,
+            available=available, reader=reader, snapshot_reader=snapshot_reader, read_current=read_current,
+        )
+    else:
+        stale = []
+    for module, dependency in stale:
+        findings.append(
+            Finding(
+                rule_id,
+                config_path,
+                1,
+                f"Stale dependency '{module}' -> '{dependency}'; remove the unused declared dependency.",
             )
-            if owner_module(p, baseline_owner_paths) in candidates
-            and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
-        ]
-        reader.preload(baseline_candidates)
-        baseline_files = [
-            p
-            for p in baseline_candidates
-            if "\x00" not in (reader.read(p) or "")
-        ]
-        old_observed, _ = _dependency_evidence(baseline, baseline_files, reader.read)
-    stale_files = [
-        p for p in evidence_candidates if "\x00" not in (read_current(p) or "")
-    ]
-    _, stale = _dependency_evidence(
-        config,
-        stale_files,
-        read_current,
-        coverage_files=baseline_files,
-    )
-    for item in stale:
-        module, dependency = item["module"], item["unused_dependency"]
-        if module in candidates and (
-            not available
-            or dependency not in old_modules.get(module, {}).get("dependencies", [])
-            or dependency in old_observed.get(module, set())
-        ):
-            findings.append(
-                Finding(
-                    rule_id,
-                    config_path,
-                    1,
-                    f"Stale dependency '{module}' -> '{dependency}'; remove the unused declared dependency.",
-                )
-            )
+        )
     return findings
