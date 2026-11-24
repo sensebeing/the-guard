@@ -34,10 +34,12 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
         receipt = {
             "contract_digest": "1" * 64,
             "guard_tree_digest": "2" * 64,
+            "guard_sha": "old-sha",
         }
         with (
             patch("the_guard.review.repository.load_valid_receipt", return_value=receipt),
             patch.object(session, "compute_package_tree_digest", side_effect=OSError("unreadable")),
+            patch.object(session, "_installed_vcs_commit", return_value="current-sha"),
         ):
             message = diagnose_missing_receipt(Path("."), scope, contract_digest="3" * 64)
 
@@ -77,7 +79,8 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
             self.assertIsInstance(receipt["guard_sha"], str)
             self.assertTrue(scope.task_blueprint_anchors)
 
-            legacy = {key: value for key, value in receipt.items() if not key.startswith("guard_")}
+            legacy_runtime = {key: value for key, value in receipt.items() if key != "review_contract_version"}
+            legacy = {key: value for key, value in legacy_runtime.items() if not key.startswith("guard_")}
             old_contract = "1" * 64
             old_tree = "2" * 64
             old_path = "/old/the_guard"
@@ -85,23 +88,40 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
             update = f"refs/heads/topic {scope.head_sha} refs/heads/main {scope.merge_base}\n"
             cases = (
                 ("legacy accepted", legacy, 0, ()),
-                ("provenance only", {**receipt, "guard_tree_digest": old_tree}, 0, ()),
+                ("same version and contract", {
+                    **receipt, "review_contract_version": "v1",
+                    "guard_tree_digest": old_tree, "guard_sha": different_sha,
+                }, 0, ()),
                 ("absent", None, 2, ("missing review receipt for pushed range", scope.patch_digest[:12])),
-                ("runtime tree drift", {
-                    **receipt, "contract_digest": old_contract, "guard_tree_digest": old_tree,
+                ("same version and changed contract", {
+                    **receipt, "review_contract_version": "v1", "contract_digest": old_contract,
+                    "guard_tree_digest": old_tree, "guard_sha": different_sha,
+                }, 2, (
+                    "review contract changed", old_contract[:12], contract[:12],
+                    "Policy, .guard/config.json, or boundary docs changed. Re-run guard review.",
+                )),
+                ("explicit version drift", {
+                    **receipt, "review_contract_version": "v0", "contract_digest": old_contract,
+                    "guard_package_dir": old_path,
+                }, 2, (
+                    "runtime mismatch", "review_contract_version=v0", "review_contract_version=v1",
+                    old_path, str(package_dir), "guard self-update", "guard review",
+                )),
+                ("legacy runtime tree drift", {
+                    **legacy_runtime, "contract_digest": old_contract, "guard_tree_digest": old_tree,
                     "guard_package_dir": old_path,
                 }, 2, (
                     "runtime mismatch", old_path, str(package_dir), old_contract[:12],
                     contract[:12], "guard self-update", "guard review",
                 )),
-                ("runtime SHA drift", {
-                    **receipt, "contract_digest": old_contract, "guard_sha": different_sha,
+                ("legacy runtime SHA drift", {
+                    **legacy_runtime, "contract_digest": old_contract, "guard_sha": different_sha,
                 }, 2, ("runtime mismatch", different_sha, receipt["guard_sha"], "guard self-update")),
-                ("matching runtime", {**receipt, "contract_digest": old_contract}, 2, (
+                ("legacy matching runtime", {**legacy_runtime, "contract_digest": old_contract}, 2, (
                     "review contract changed", old_contract[:12], contract[:12], "guard review",
                 )),
-                ("matching SHA prefix", {
-                    **receipt, "contract_digest": old_contract, "guard_sha": receipt["guard_sha"][:5],
+                ("legacy matching SHA prefix", {
+                    **legacy_runtime, "contract_digest": old_contract, "guard_sha": receipt["guard_sha"][:5],
                 }, 2, ("review contract changed",)),
                 ("legacy contract drift", {**legacy, "contract_digest": old_contract}, 2, (
                     "review contract changed", old_contract[:12], contract[:12], "guard review",
@@ -125,7 +145,7 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
                     self.assertEqual(load_valid_receipt(repo, scope.patch_digest), payload)
                     with redirect_stderr(StringIO()) as hook_stderr:
                         self.assertEqual(main_push_gate(repo, update), exit_code)
-                    with redirect_stderr(StringIO()) as cli_stderr, redirect_stdout(StringIO()):
+                    with redirect_stderr(StringIO()) as cli_stderr, redirect_stdout(StringIO()) as cli_stdout:
                         self.assertEqual(
                             review_main(["check-push", "--repo-root", str(repo)], _from_root_cli=True),
                             exit_code,
@@ -133,6 +153,11 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
                     self.assertEqual(cli_stderr.getvalue(), hook_stderr.getvalue())
                     for part in expected:
                         self.assertIn(part, cli_stderr.getvalue())
+                    if exit_code == 0:
+                        self.assertIn("VERIFIED", cli_stdout.getvalue())
+                    if "review contract changed" in expected:
+                        self.assertNotIn("runtime mismatch", cli_stderr.getvalue())
+            self.assertEqual(receipt.get("review_contract_version"), "v1")
 
     def test_runtime_sha_uses_only_matching_update_metadata(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import GuardConfig, load_config
+from ..git_helpers import clean_git_env
 from ..policy import Policy, load_policy
 from .contract import ReviewScope, validate_review_output
 from .prompt import (
@@ -113,7 +114,7 @@ def run_architecture_review(
     reviewer_fn: Callable[[str], dict[str, Any]] | None = None,
 ) -> ReviewResult:
     """Run independent architecture review; `reviewer_fn` is a Python-only unit-test seam."""
-    eff_env = dict(os.environ if env is None else env)
+    eff_env = clean_git_env(os.environ if env is None else env)
     eff_note = _sanitize_reviewer_note(reviewer_note)
     scope = (
         scope

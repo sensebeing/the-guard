@@ -20,6 +20,7 @@ from .contract import (
     POLICY_REVIEWABLE_EXACT_PATHS,
     POLICY_REVIEWABLE_PREFIXES,
     PROMPT_SKILL_PATH_MARKERS,
+    REVIEW_CONTRACT_VERSION,
     SERVICE_CONFIG_EXTENSIONS,
     TEST_DIR_PARTS,
     TEST_FILE_SUFFIXES,
@@ -858,29 +859,42 @@ def diagnose_missing_receipt(
     )
     receipt_contract = receipt.get("contract_digest")
     if receipt_contract != current_contract:
-        receipt_sha = str(receipt.get("guard_sha") or "")
-        receipt_tree = receipt.get("guard_tree_digest")
+        receipt_version = str(receipt.get("review_contract_version") or "")
         receipt_digest = str(receipt_contract or "")[:12] or "unknown"
         contracts = f"receipt contract {receipt_digest}, verifier contract {current_contract[:12]}"
-        if receipt_tree or receipt_sha:
+        contract_changed = f"NO-GO: review contract changed ({contracts}). "
+        if receipt_version == REVIEW_CONTRACT_VERSION:
+            return contract_changed + "Policy, .guard/config.json, or boundary docs changed. Re-run guard review."
+
+        receipt_sha = str(receipt.get("guard_sha") or "")
+        receipt_tree = receipt.get("guard_tree_digest")
+        if receipt_version or receipt_tree or receipt_sha:
             runtime = active_guard_runtime()
             verifier_sha = runtime["guard_sha"]
             verifier_tree = runtime["guard_tree_digest"]
-            if (receipt_tree and verifier_tree and receipt_tree != verifier_tree) or (
+            tree_changed = receipt_tree and receipt_tree != verifier_tree
+            sha_changed = (
                 receipt_sha and verifier_sha
                 and not (receipt_sha.startswith(verifier_sha) or verifier_sha.startswith(receipt_sha))
-            ):
+            )
+            if receipt_version or (verifier_tree and (tree_changed or sha_changed)):
                 receipt_dir = receipt.get("guard_package_dir") or "unknown package path"
+                versions = (
+                    f"Receipt review_contract_version={receipt_version}. "
+                    f"Verifier review_contract_version={REVIEW_CONTRACT_VERSION}. "
+                    if receipt_version else ""
+                )
                 return (
                     f"NO-GO: the-guard runtime mismatch ({contracts}). "
+                    f"{versions}"
                     f"Receipt runtime {receipt_sha or 'unknown SHA'} at {receipt_dir}. "
                     f"Verifier runtime {verifier_sha or 'unknown SHA'} at {runtime['guard_package_dir']}. "
                     "Use the same guard CLI for review and verification. "
                     "Run guard self-update to align them, then re-run guard review."
                 )
         return (
-            f"NO-GO: review contract changed ({contracts}). "
-            "Policy, .guard/config.json, boundary docs, or the guard version may have changed. "
+            contract_changed
+            + "Policy, .guard/config.json, boundary docs, or the guard version may have changed. "
             "Re-run guard review."
         )
     if not _anchors_cover(

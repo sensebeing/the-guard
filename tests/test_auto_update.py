@@ -767,6 +767,48 @@ class AutoUpdateTests(unittest.TestCase):
             self.assertEqual(report["source_status"], "skipped_no_source")
             self.assertEqual(report["status"], "skipped_no_source")
 
+    def test_uv_upgrade_without_checkout_persists_installed_provenance(self) -> None:
+        cases = (
+            ("Nothing to upgrade", "up_to_date", "up_to_date"),
+            ("Updated the-guard", "updated", "reinstalled"),
+        )
+        for uv_output, status, cli_status in cases:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as root:
+                home = Path(root).resolve()
+                installed = home / ".local/share/uv/tools/the-guard/lib/python3.11/site-packages/the_guard"
+                installed.parent.mkdir(parents=True)
+                pending = home / "new-package"
+                pending.mkdir()
+                (pending / "__init__.py").write_text("VERSION = 'new'\n", encoding="utf-8")
+                direct_url = installed.parent / "the_guard-0.1.0.dist-info/direct_url.json"
+                sha = "0123456789abcdefabcd0123456789abcdefabcd"
+
+                def upgrade(command, timeout):
+                    self.assertEqual(command, ["uv", "tool", "upgrade", "the-guard"])
+                    pending.rename(installed)
+                    direct_url.parent.mkdir()
+                    direct_url.write_text(
+                        json.dumps({"vcs_info": {"vcs": "git", "commit_id": sha}}),
+                        encoding="utf-8",
+                    )
+                    return uv_output
+
+                with (
+                    mock.patch.object(auto_update, "PACKAGE_DIR", installed),
+                    mock.patch.object(auto_update.shutil, "which", return_value="/usr/bin/uv"),
+                    mock.patch.object(auto_update, "_subprocess_run", side_effect=upgrade),
+                ):
+                    report = auto_update.self_update(home_dir=home, env={})
+
+                self.assertEqual(report["status"], status)
+                self.assertEqual(report["installed_sha"], sha[:7])
+                self.assertEqual(report["head_sha"], sha[:7])
+                self.assertEqual(
+                    report["installed_tree_digest"], auto_update.compute_package_tree_digest(installed),
+                )
+                self.assertEqual(report["cli_status"], cli_status)
+                self.assertEqual(auto_update.load_auto_update_status(home_dir=home, env={}), report)
+
     def test_concurrent_lock_returns_skipped_locked_immediately(self) -> None:
         """When auto_update.lock is held, self_update returns skipped_locked without blocking."""
         with tempfile.TemporaryDirectory() as root:

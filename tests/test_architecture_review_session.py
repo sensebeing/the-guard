@@ -678,6 +678,71 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             second = compute_review_contract_digest(load_policy(repo), load_config(repo))
             self.assertNotEqual(first, second)
 
+    def test_contract_digest_changes_with_review_contract_version(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            policy, config = load_policy(repo), load_config(repo)
+            baseline = compute_review_contract_digest(policy, config)
+            with mock.patch.object(session, "REVIEW_CONTRACT_VERSION", "future", create=True):
+                self.assertNotEqual(baseline, compute_review_contract_digest(policy, config))
+
+    def test_contract_digest_ignores_runtime_python_files(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo, _ = self._init_repo(root)
+            policy, config = load_policy(repo), load_config(repo)
+            baseline = compute_review_contract_digest(policy, config)
+            runtime = root / "installed" / "the_guard"
+            review = runtime / "review"
+            review.mkdir(parents=True)
+            for name in ("config.py", "policy.py", "git_helpers.py"):
+                (runtime / name).write_text("# Packaged module\n", encoding="utf-8")
+            module = review / "different_name.py"
+            module.write_text("# Patched runtime\n", encoding="utf-8")
+            with mock.patch.object(session, "__file__", str(review / "session.py")):
+                self.assertEqual(baseline, compute_review_contract_digest(policy, config))
+                module.write_text("# Another release\n", encoding="utf-8")
+                self.assertEqual(baseline, compute_review_contract_digest(policy, config))
+
+    def test_scoped_contract_digest_changes_with_committed_repository_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td), review={})
+            config_path = repo / ".guard/config.json"
+            config_data = {"topology": {"modules": [{
+                "path": "app", "boundary_docs": ["app/README.md"],
+            }]}}
+            config_path.write_text(json.dumps(config_data), encoding="utf-8")
+            app = repo / "app"
+            app.mkdir()
+            boundary = app / "README.md"
+            boundary.write_text("Application owns the source data.\n", encoding="utf-8")
+            (app / "main.py").write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Add reviewed application")
+
+            def digest() -> str:
+                scope = collect_review_scope(repo)
+                config = load_config(repo, revision=scope.head_sha)
+                policy = load_policy(repo, revision=scope.head_sha, config=config)
+                return compute_review_contract_digest(
+                    policy, config, repo_root=repo, revision=scope.head_sha, scope=scope,
+                )
+
+            previous = digest()
+            policy_path = repo / "docs/standards/rules/single-source-of-truth.md"
+            updates = (
+                (policy_path, policy_path.read_text() + "\nKeep data ownership explicit.\n"),
+                (config_path, json.dumps({**config_data, "review": {"project_title": "App"}})),
+                (boundary, "Application owns source data and validation.\n"),
+            )
+            for path, content in updates:
+                with self.subTest(path=path.relative_to(repo)):
+                    path.write_text(content, encoding="utf-8")
+                    _git(repo, "commit", "-am", f"Update {path.name}")
+                    current = digest()
+                    self.assertNotEqual(previous, current)
+                    previous = current
+
     def test_scoped_contract_digest_covers_only_touched_and_one_hop_modules(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))

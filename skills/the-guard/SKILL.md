@@ -12,8 +12,9 @@ its policy and module contracts define the rules, not this skill.
 Checks, reviews, and `guard hook` workflows may schedule a non-blocking background update. A
 clean newer `~/the-guard` checkout is delegated immediately and the installed uv tool is repaired
 when its commit or package-tree digest is stale; inspection of the guard checkout remains
-snapshot-bound. Review sessions start a fresh full review when reviewer contract code,
-repository configuration, or policy rules change.
+snapshot-bound. Changes to the review contract version, scoped repository configuration,
+policy rules, or boundary documents require a fresh full review. Routine fixes and
+automatic updates at the same contract version preserve existing `GO` receipts.
 Updater state and reviewer discovery default to `~/.config/the-guard`. The updater migrates
 legacy metadata on first default-path use and retains one rotated 512 KiB log backup.
 Review prompts reach `claude` over standard input so prompt size is not bounded by the OS argv

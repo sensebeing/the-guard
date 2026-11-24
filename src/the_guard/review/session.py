@@ -22,7 +22,7 @@ from ..auto_update import (
 from ..config import GuardConfig
 from ..git_helpers import git_stdout
 from ..policy import Policy
-from .contract import BlockingFinding, ReviewScope
+from .contract import REVIEW_CONTRACT_VERSION, BlockingFinding, ReviewScope
 from .documents import (
     architecture_document_paths,
     boundary_document_paths,
@@ -140,23 +140,11 @@ def compute_review_contract_digest(
     revision: str | None = None,
     scope: ReviewScope | None = None,
 ) -> str:
-    """Hash the complete reviewer contract and its policy/config dependencies.
+    """Hash the review contract version and the applicable repository contract.
 
     With a review scope, the configuration and document contract is limited to the touched
     modules and their one-hop dependency neighbours so unrelated changes cannot invalidate it.
     """
-    digest = hashlib.sha256()
-    source_dir = Path(__file__).parent
-    for path in sorted(source_dir.glob("*.py")):
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
-    for path in (
-        Path(__file__).parents[1] / "config.py",
-        Path(__file__).parents[1] / "policy.py",
-        Path(__file__).parents[1] / "git_helpers.py",
-    ):
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
     if repo_root is not None and scope is not None:
         documents, config_payload = _scoped_contract_payload(
             repo_root, config, scope, revision
@@ -167,6 +155,7 @@ def compute_review_contract_digest(
         )
         config_payload = asdict(config)
     payload = {
+        "contract_version": REVIEW_CONTRACT_VERSION,
         "documents": documents,
         "config": config_payload,
         "policy": {
@@ -184,10 +173,8 @@ def compute_review_contract_digest(
             ],
         },
     }
-    digest.update(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    )
-    return digest.hexdigest()
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def contract_digest_matches(
@@ -317,6 +304,7 @@ def receipt_payload(
         "session_id": result.session_id,
         "log_path": result.log_path,
         "contract_digest": contract_digest,
+        "review_contract_version": REVIEW_CONTRACT_VERSION,
         "task_blueprint_anchors": dict(task_blueprint_anchors),
         "reviewed_at": datetime.now(UTC).isoformat(),
         **active_guard_runtime(),

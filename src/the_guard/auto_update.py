@@ -392,8 +392,18 @@ def self_update(
                     if "nothing to upgrade" in uv_out.lower()
                     else "updated"
                 )
+                installed_dir = _installed_guard_package_dir(resolved_home)
+                if installed_dir is not None:
+                    installed_sha = _installed_vcs_commit(installed_dir)
+                    report["installed_sha"] = report["head_sha"] = (
+                        installed_sha[:7] if installed_sha else None
+                    )
+                    report["installed_tree_digest"] = compute_package_tree_digest(installed_dir)
+                    report["cli_status"] = (
+                        "up_to_date" if report["source_status"] == "up_to_date" else "reinstalled"
+                    )
                 cutover_ready = cutover_ready or (
-                    _installed_guard_package_dir(resolved_home) == Path(__file__).resolve().parent
+                    installed_dir == Path(__file__).resolve().parent
                 )
             else:
                 report["source_status"] = "skipped_no_source"

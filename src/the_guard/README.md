@@ -28,13 +28,34 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   scanning only affected modules and rechecking complete production imports (including changed files
   and callers affected by target-layer or owner-resolution changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
   granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
-- `review/contract` owns reviewer types, wire schema and output validation; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope, patch identity, receipt carry-forward and fsmonitor-isolated snapshot Git calls;
-  `documents` owns review document inventory, binding blueprint selection and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
-  `runner` owns process execution, stdin prompt delivery and provider stream decoding; `prompt` owns snapshot-bound instructions;
+- `review/contract` owns the explicit review contract version, reviewer types, wire schema and
+  output validation. `review/github` owns GitHub PR target parsing, attributable formatting,
+  and publication. `repository` owns Git scope, patch identity, receipt carry-forward and
+  fsmonitor-isolated snapshot Git calls. `documents` owns review document inventory, binding
+  blueprint selection and snapshot reads. `session` owns local evidence persistence.
+  `provider` owns CLI discovery and configuration. `runner` owns process execution, stdin prompt
+  delivery and provider stream decoding. `prompt` owns snapshot-bound instructions.
   `engine` composes review and continuation. These modules do not implement product policy semantics.
-- `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows.
+- `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows. The managed
+  `pre-push` hook resolves the push worktree before clearing repository selectors such as
+  `GIT_DIR` using the list from `git_helpers`. It finds `guard` on `PATH` or falls back to
+  `~/.local/bin/guard` and passes the complete ref update stream.
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports to the checkout, then reloads the Git helpers and updater in dependency order. The original package remains the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
-- Review sessions persist the first reviewed head, the binding revisions of task blueprints already reviewed, and a contract digest covering reviewer code, configuration, policy rules, root instructions and the reviewed scope's architecture documents, touched-module boundary documents and touched/one-hop module declarations. Unrelated modules' documents, declarations and blueprint additions do not invalidate that evidence; changes to a touched module's contract or a one-hop neighbour's layer, role or dependency do. A digest change starts a fresh full review while preserving the binding blueprint revisions for a valid branch baseline. Codex isolation homes trust the worktree and common repository root, and provider stream decoding combines stderr with structured stdout errors so quota or auth failures reach sticky failover.
+- Review sessions persist the first reviewed head, binding task blueprint revisions and a
+  `contract_digest` covering `REVIEW_CONTRACT_VERSION`, repository configuration, policy rules,
+  root instructions, scoped architecture documents, touched-module boundary documents and
+  touched and one-hop module declarations. Routine runtime upgrades preserve existing `GO`
+  receipts when the version and repository contract match. Evidence stays valid after changes
+  limited to unrelated modules' documents, declarations and blueprint additions. Changes to a
+  touched module's contract or a one-hop neighbour's layer, role or dependency change the digest
+  and start a full review. Binding blueprint revisions persist for a valid branch baseline.
+
+Without a local checkout, `guard self-update` runs `uv tool upgrade the-guard` and records the
+installed package's PEP 610 commit, package-tree digest and CLI update status.
+
+Provider processes receive an environment cleared of inherited Git repository selectors.
+Codex isolation homes trust the worktree and common repository root, and provider stream decoding
+combines stderr with structured stdout errors so quota or auth failures reach sticky failover.
 
 For both `codex exec` and `codex exec resume`, static reviews disable each `[mcp_servers]`
 entry discovered in `.codex/config.toml` layers up to the active worktree's Git root. A single

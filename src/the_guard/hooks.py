@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .config import load_config
-from .git_helpers import changed_files, clean_git_env, git_ok, resolve_changed_file
+from .git_helpers import GIT_REPO_ENV_VARS, changed_files, clean_git_env, git_ok, resolve_changed_file
 from .policy import PolicyError, load_policy
 from .review.repository import (
     collect_review_scope,
@@ -19,9 +19,26 @@ from .review.session import compute_review_contract_digest
 from .topology import check_contract_drift, run_topology_guard
 
 
-HOOK_CONTENT = (
+_LEGACY_HOOK_CONTENTS = (
     "#!/bin/sh\n# Managed by the-guard\n"
     'exec guard hook main-push-gate --repo-root "$(git rev-parse --show-toplevel)"\n'
+)
+HOOK_CONTENT = (
+    "#!/bin/sh\n"
+    "# Managed by the-guard\n"
+    "if ! top=$(git rev-parse --show-toplevel 2>/dev/null); then\n"
+    "    echo 'the-guard pre-push: could not resolve the Git worktree root.' >&2\n"
+    "    exit 1\n"
+    "fi\n"
+    f"unset {' '.join(GIT_REPO_ENV_VARS)}\n"
+    'if ! guard_bin=$(command -v guard) || [ ! -f "$guard_bin" ] || [ ! -x "$guard_bin" ]; then\n'
+    '    guard_bin="$HOME/.local/bin/guard"\n'
+    "fi\n"
+    'if [ ! -f "$guard_bin" ] || [ ! -x "$guard_bin" ]; then\n'
+    "    echo 'the-guard pre-push: install guard with uv tool install git+https://github.com/sensebeing/the-guard' >&2\n"
+    "    exit 1\n"
+    "fi\n"
+    'exec "$guard_bin" hook main-push-gate --repo-root "$top"\n'
 )
 
 
@@ -40,7 +57,7 @@ def hook_install_plan(root: Path | str) -> Path:
     if not directory.is_absolute():
         directory = root / directory
     hook = directory / "pre-push"
-    if hook.exists() and hook.read_text() != HOOK_CONTENT:
+    if hook.exists() and hook.read_text() not in (HOOK_CONTENT, _LEGACY_HOOK_CONTENTS):
         raise ValueError(
             f"Refusing to overwrite existing hook: {hook}; chain guard hook main-push-gate explicitly"
         )
