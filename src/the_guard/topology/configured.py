@@ -229,6 +229,7 @@ def check_module_imports(
         check_unregistered=check_unregistered,
         baseline_config=baseline_config,
         baseline_changed_lines=baseline_changed_lines,
+        source_text=text,
     )
 
 
@@ -242,6 +243,7 @@ def _check_module_imports(
     check_unregistered: bool = True,
     baseline_config: GuardConfig | None = None,
     baseline_changed_lines: set[int] | None = None,
+    source_text: str | None = None,
 ) -> list[Finding]:
     topology = config.topology
     modules = {m["path"]: m for m in topology.get("modules", [])}
@@ -282,9 +284,19 @@ def _check_module_imports(
     )
     old_paths = list(old_modules)
     old_source = owner_module(path, old_paths)
-    # Evaluate current import resolution under the old contract as well.
-    old_targets = (
-        {
+    old_targets = set()
+    if baseline_config is not None and imports:
+        # Compare current imports under both resolvers. The historical parser input
+        # joins split lines, so reuse only when that changes at most a final newline.
+        baseline_text = "\n".join(lines)
+        same_parse = baseline_config.module_doc_roots == config.module_doc_roots and (
+            source_text == baseline_text
+            or (source_text == baseline_text + "\n" and not baseline_text.endswith("\\"))
+        )
+        old_imports = (
+            imports if same_parse else extract_imports(path, baseline_text, baseline_config.module_doc_roots)
+        )
+        old_targets = {
             (
                 start,
                 end,
@@ -292,13 +304,8 @@ def _check_module_imports(
                     path, spec, old_paths, baseline_config.module_doc_roots
                 ),
             )
-            for start, end, spec in extract_imports(
-                path, "\n".join(lines), baseline_config.module_doc_roots
-            )
+            for start, end, spec in old_imports
         }
-        if baseline_config is not None
-        else set()
-    )
     for start, end, spec in imports:
         target_path = resolve_target_module(path, spec, paths, config.module_doc_roots)
         if target_path is None:

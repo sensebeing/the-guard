@@ -5,13 +5,14 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import subprocess
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
-from ..git_helpers import clean_git_env, git_ok
+from ..git_helpers import clean_git_env, diff_has_content, git_ok, stream_patch_id, tree_entries_map
 from ..policy import Policy, load_policy
 from .contract import (
     CODE_EXTENSIONS,
@@ -29,7 +30,9 @@ from .contract import (
     SubmoduleChange,
 )
 from .documents import (
+    changed_document_paths,
     changed_task_blueprints,
+    contract_document_paths,
     is_architecture_contract,
     is_configured_blueprint_path,
     merge_task_blueprint_anchors,
@@ -171,12 +174,10 @@ def is_reviewable_path(
     contract_paths: set[str] | None = None,
 ) -> bool:
     cfg = config or GuardConfig()
-    if contract_paths and rel_path in contract_paths:
-        return True
     settings = cfg.review
     if (
         rel_path == ".guard/config.json"
-        or is_architecture_contract(rel_path, cfg)
+        or _is_scope_contract(rel_path, cfg, contract_paths)
         or is_configured_blueprint_path(rel_path, cfg)
     ):
         return True
@@ -212,6 +213,14 @@ def is_reviewable_path(
     )
 
 
+def _is_scope_contract(rel_path: str, config: GuardConfig, contract_paths: set[str] | None) -> bool:
+    return (
+        is_architecture_contract(rel_path, config)
+        if contract_paths is None
+        else rel_path in contract_paths
+    )
+
+
 def _classify_file_tier(
     rel_path: str,
     config: GuardConfig | None = None,
@@ -226,9 +235,7 @@ def _classify_file_tier(
         *cfg.review.get("reviewable_prefixes", []),
     )
     posix = PurePosixPath(rel_path)
-    if (contract_paths and rel_path in contract_paths) or is_architecture_contract(
-        rel_path, cfg
-    ):
+    if _is_scope_contract(rel_path, cfg, contract_paths):
         return 0
     name_low = posix.name.lower()
     if posix.name in LOCK_FILENAMES or name_low == "conftest.py":
@@ -247,19 +254,13 @@ def _is_test_or_fixture_path(rel_path: str) -> bool:
     return _classify_file_tier(rel_path) == 2
 
 
-def _compute_stable_patch_id(repo_root: Path, diff_bytes: bytes) -> str:
-    if not diff_bytes.strip():
-        return "0" * 40
-    proc = subprocess.run(
-        ["git", "patch-id", "--stable"],
-        cwd=repo_root,
-        env=clean_git_env(),
-        input=diff_bytes,
-        check=True,
-        capture_output=True,
-    )
-    out = proc.stdout.decode("ascii", errors="ignore").strip()
-    return out.split()[0] if out else "0" * 40
+def _raw_diff_records(raw_diff: str) -> Iterator[tuple[list[str], str]]:
+    for line in raw_diff.splitlines():
+        if line.startswith(":"):
+            meta, _, path = line[1:].partition("\t")
+            fields = meta.split()
+            if len(fields) >= 5 and path:
+                yield fields, path
 
 
 def _parse_raw_diff_lines(
@@ -271,13 +272,7 @@ def _parse_raw_diff_lines(
     changed_files: list[str] = []
     reviewable_files: list[str] = []
     submodules: list[SubmoduleChange] = []
-    for line in raw_diff.splitlines():
-        if not line.startswith(":"):
-            continue
-        meta, _, path = line[1:].partition("\t")
-        parts = meta.split()
-        if len(parts) < 5 or not path:
-            continue
+    for parts, path in _raw_diff_records(raw_diff):
         old_mode, new_mode, old_sha, new_sha = parts[0], parts[1], parts[2], parts[3]
         if old_mode == "160000" and new_mode == "000000":
             # Removing a gitlink is a root-repository change, not a revision
@@ -298,13 +293,7 @@ def _parse_raw_diff_lines(
 
 def _parse_raw_file_blobs(raw_diff: str) -> dict[str, tuple[str, str]]:
     blobs: dict[str, tuple[str, str]] = {}
-    for line in raw_diff.splitlines():
-        if not line.startswith(":"):
-            continue
-        meta, _, path = line[1:].partition("\t")
-        parts = meta.split()
-        if len(parts) < 5 or not path:
-            continue
+    for parts, path in _raw_diff_records(raw_diff):
         old_mode, new_mode, _, new_sha = parts[0], parts[1], parts[2], parts[3]
         if old_mode == "160000" or new_mode == "160000":
             continue
@@ -328,61 +317,15 @@ def _is_same_per_file_branch_patch(
 ) -> bool:
     """Return True only when both per-file diffs succeed, are non-empty, and share the same stable patch-id."""
     path_args = _literal_pathspecs((path,))
-    old_proc = _git(
-        repo_root,
-        "diff",
-        "--binary",
-        "--full-index",
-        old_range,
-        *path_args,
-        check=False,
-    )
-    new_proc = _git(
-        repo_root,
-        "diff",
-        "--binary",
-        "--full-index",
-        new_range,
-        *path_args,
-        check=False,
-    )
-    if old_proc.returncode != 0 or new_proc.returncode != 0:
-        return False
-    if not old_proc.stdout.strip() or not new_proc.stdout.strip():
-        return False
-    old_patch_id = _compute_stable_patch_id(repo_root, old_proc.stdout)
-    new_patch_id = _compute_stable_patch_id(repo_root, new_proc.stdout)
-    if old_patch_id == "0" * 40 or new_patch_id == "0" * 40:
-        return False
-    return old_patch_id == new_patch_id
+    old_patch_id = stream_patch_id(repo_root, ("--binary", "--full-index", old_range, *path_args), check=False)
+    new_patch_id = stream_patch_id(repo_root, ("--binary", "--full-index", new_range, *path_args), check=False)
+    return old_patch_id != "0" * 40 and old_patch_id == new_patch_id
 
 
 def _tree_entry_matches(
-    repo_root: Path, commit_sha: str, path: str, expected_mode: str, expected_sha: str
+    entry: tuple[str, str] | None, expected: tuple[str, str],
 ) -> bool:
-    """Return True only when `path` in `commit_sha` has the exact `expected_mode` and `expected_sha`."""
-    if not expected_sha:
-        return False
-    proc = _git(
-        repo_root,
-        "ls-tree",
-        "--full-tree",
-        commit_sha,
-        *_literal_pathspecs((path,)),
-        check=False,
-    )
-    if proc.returncode != 0:
-        return False
-    line = proc.stdout.decode("utf-8", errors="replace").strip()
-    if expected_mode == "000000":
-        return not line
-    if not line:
-        return False
-    meta, _, _ = line.partition("\t")
-    parts = meta.split()
-    if len(parts) < 3:
-        return False
-    return parts[0] == expected_mode and parts[2] == expected_sha
+    return bool(expected[1]) and (entry is None if expected[0] == "000000" else entry == expected)
 
 
 def _require_submodule_checkout(repo_root: Path, sub: SubmoduleChange) -> Path:
@@ -433,38 +376,22 @@ def collect_review_scope(
         raw_diff, config, contract_paths=contract_paths
     )
 
-    diff_bytes = _git(
-        repo_root,
-        "diff",
-        "--binary",
-        "--full-index",
-        "--find-renames",
-        f"{merge_base}..{head_sha}",
-    ).stdout
-    root_patch_id = _compute_stable_patch_id(repo_root, diff_bytes)
+    patch_options = ("--binary", "--full-index", "--find-renames")
+    root_patch_id = stream_patch_id(repo_root, (*patch_options, f"{merge_base}..{head_sha}"))
 
     sub_digests: list[str] = []
     for sub in sorted(submodules, key=lambda item: item.path):
         sub_repo = _require_submodule_checkout(repo_root, sub)
-        sub_diff = _git(
-            sub_repo,
-            "diff",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            f"{sub.old_sha}..{sub.new_sha}",
-            check=False,
-        )
-        if sub_diff.returncode != 0:
-            err = sub_diff.stderr.decode("utf-8", errors="replace").strip()
+        diff_args = (*patch_options, f"{sub.old_sha}..{sub.new_sha}")
+        try:
+            sub_patch_id = stream_patch_id(sub_repo, diff_args)
+            if sub_patch_id == "0" * 40 and not diff_has_content(sub_repo, diff_args):
+                sub_patch_id = f"{sub.old_sha}->{sub.new_sha}"
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
             raise RuntimeError(
-                f"Failed to read submodule '{sub.path}' diff ({sub.old_sha[:10]}..{sub.new_sha[:10]}): {err or sub_diff.returncode}"
-            )
-        sub_patch_id = (
-            _compute_stable_patch_id(sub_repo, sub_diff.stdout)
-            if sub_diff.stdout.strip()
-            else f"{sub.old_sha}->{sub.new_sha}"
-        )
+                f"Failed to read submodule '{sub.path}' diff ({sub.old_sha[:10]}..{sub.new_sha[:10]}): {err or exc.returncode}"
+            ) from exc
         sub_digests.append(f"{sub.path}:{sub_patch_id}")
 
     hasher = hashlib.sha256(f"root:{root_patch_id}\n".encode("utf-8"))
@@ -540,9 +467,12 @@ def _session_landed_in_merge_base(
         repo_root, "diff", "--raw", "--no-renames", "--no-abbrev",
         f"{session.merge_base}..{session.last_head_sha}", check=False,
     ))
+    try:
+        entries = tree_entries_map(repo_root, old_blobs, scope.merge_base)
+    except ValueError:
+        return False
     return bool(old_blobs) and all(
-        _tree_entry_matches(repo_root, scope.merge_base, path, mode, sha)
-        for path, (mode, sha) in old_blobs.items()
+        _tree_entry_matches(entries.get(path), expected) for path, expected in old_blobs.items()
     )
 
 
@@ -550,15 +480,8 @@ def _changed_anchor_entries(
     repo_root: Path, scope: ReviewScope, anchors: dict[str, tuple[str, ...]],
 ) -> dict[str, tuple[str, ...]]:
     """Keep only anchors whose resolved documents this candidate branch changes."""
-    changed = set(scope.changed_files)
-    retained: dict[str, tuple[str, ...]] = {}
-    for path, revisions in anchors.items():
-        aliases: set[str] = set()
-        for revision in dict.fromkeys((scope.merge_base, scope.head_sha)):
-            aliases.update(resolved_document_paths(repo_root, revision, (path,)))
-        if aliases & changed:
-            retained[path] = revisions
-    return retained
+    touched = changed_document_paths(repo_root, anchors.keys(), scope.merge_base, scope.head_sha, scope.changed_files)
+    return {path: revisions for path, revisions in anchors.items() if path in touched}
 
 
 def _branch_change_overlaps_scope(
@@ -607,13 +530,10 @@ def _blueprint_history_applies(
         return True
     if not _branch_change_overlaps_scope(repo_root, scope, session):
         return False
-    delta = _collect_branch_delta(repo_root, scope, session, config=config)
-    if delta is None or delta.submodule_changes:
-        return False
     # Replayed code can keep the same reviewed subject while changing its blueprint.
     paths = resolved_document_paths(repo_root, session.last_head_sha, session.task_blueprint_anchors)
     paths.update(resolved_document_paths(repo_root, scope.head_sha, session.task_blueprint_anchors))
-    return set(delta.reviewable_files).union(delta.changed_blueprints) <= paths
+    return _collect_branch_delta(repo_root, scope, session, config=config, blueprint_only_paths=paths) is not None
 
 
 def _collect_branch_delta(
@@ -622,6 +542,7 @@ def _collect_branch_delta(
     session: ReviewSessionState | None,
     *,
     config: GuardConfig | None = None,
+    blueprint_only_paths: set[str] | None = None,
 ) -> IncrementalReviewScope | None:
     """Compute verified branch delta since `session`, or return None when session continuation is inapplicable.
 
@@ -649,15 +570,23 @@ def _collect_branch_delta(
         return None
 
     retained = session.task_blueprint_anchors.keys() | scope.task_blueprint_anchors.keys()
-    contract_paths = resolved_contract_paths(repo_root, config, scope.head_sha, retained_blueprints=retained)
-    contract_paths.update(
-        resolved_contract_paths(
+    declared_contracts = contract_document_paths(config) if blueprint_only_paths is not None else set()
+
+    def has_other_reviewable_paths(paths: Iterable[str]) -> bool:
+        return blueprint_only_paths is not None and any(
+            path not in blueprint_only_paths and is_reviewable_path(path, config, contract_paths=declared_contracts)
+            for path in paths
+        )
+
+    def delta_contract_paths() -> set[str]:
+        return resolved_contract_paths(
+            repo_root, config, scope.head_sha, retained_blueprints=retained,
+        ) | resolved_contract_paths(
             repo_root,
             load_config(repo_root, revision=session.last_head_sha, allow_historical=True),
             session.last_head_sha,
             retained_blueprints=retained,
         )
-    )
 
     changed_files: list[str] = []
     reviewable_files: list[str] = []
@@ -680,8 +609,10 @@ def _collect_branch_delta(
                 f"{err or raw_proc.returncode}"
             )
         raw_diff = raw_proc.stdout.decode("utf-8", errors="replace").strip()
+        if has_other_reviewable_paths(path for _, path in _raw_diff_records(raw_diff)):
+            return None
         changed_files, reviewable_files, raw_subs = _parse_raw_diff_lines(
-            raw_diff, config, contract_paths=contract_paths
+            raw_diff, config, contract_paths=delta_contract_paths(),
         )
         inc_subs = {sub.path: sub for sub in raw_subs}
     elif _is_ancestor(repo_root, session.merge_base, scope.merge_base):
@@ -719,6 +650,10 @@ def _collect_branch_delta(
         new_blobs = _parse_raw_file_blobs(
             new_raw_proc.stdout.decode("utf-8", errors="replace")
         )
+        # New paths require no patch equivalence check to disqualify this history.
+        if has_other_reviewable_paths(new_blobs.keys() - old_blobs.keys()):
+            return None
+        contract_paths = delta_contract_paths()
         for path, (new_mode, new_sha) in new_blobs.items():
             if old_blobs.get(path) == (new_mode, new_sha):
                 continue
@@ -732,12 +667,13 @@ def _collect_branch_delta(
             changed_files.append(path)
             if is_reviewable_path(path, config, contract_paths=contract_paths):
                 reviewable_files.append(path)
-        for path, (old_mode, old_sha) in old_blobs.items():
-            if path in new_blobs:
-                continue
-            if not _tree_entry_matches(
-                repo_root, scope.head_sha, path, old_mode, old_sha
-            ):
+        previous_paths = old_blobs.keys() - new_blobs.keys()
+        try:
+            entries = tree_entries_map(repo_root, previous_paths, scope.head_sha)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        for path in previous_paths:
+            if not _tree_entry_matches(entries.get(path), old_blobs[path]):
                 changed_files.append(path)
                 if is_reviewable_path(path, config, contract_paths=contract_paths):
                     reviewable_files.append(path)
@@ -751,6 +687,10 @@ def _collect_branch_delta(
                 path=sub.path, old_sha=prev_sha, new_sha=sub.new_sha
             )
 
+    if blueprint_only_paths is not None and (
+        inc_subs or not blueprint_only_paths.issuperset(reviewable_files)
+    ):
+        return None
     changed_blueprints = changed_task_blueprints(
         repo_root,
         config,
@@ -761,6 +701,8 @@ def _collect_branch_delta(
             scope.changed_files if session.merge_base != scope.merge_base else None
         ),
     )
+    if blueprint_only_paths is not None and not blueprint_only_paths.issuperset(changed_blueprints):
+        return None
     return IncrementalReviewScope(
         base_head_sha=session.last_head_sha,
         target_head_sha=scope.head_sha,

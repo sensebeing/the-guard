@@ -6,9 +6,10 @@ import os
 import difflib
 import posixpath
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryFile
 from typing import Literal
 
 GIT_TIMEOUT_SECONDS = 30
@@ -24,6 +25,7 @@ GIT_REPO_ENV_VARS = (
     "GIT_SUPER_PREFIX",
 )
 _CAT_FILE_BATCH_SIZE = 2000
+_SNAPSHOT_GIT = ("git", "-c", "core.fsmonitor=false")
 
 
 def clean_git_env(
@@ -112,6 +114,93 @@ def git(cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str] | Non
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def stream_patch_id(repo_root: Path, diff_args: Sequence[str], *, check: bool = True) -> str:
+    """Compute a stable patch ID without buffering the binary diff in Python."""
+    diff_command = [*_SNAPSHOT_GIT, "diff", *diff_args]
+    patch_command = [*_SNAPSHOT_GIT, "patch-id", "--stable"]
+    env = clean_git_env()
+    # A file drains the producer's stderr even while the consumer is reading the patch.
+    with TemporaryFile() as diff_errors, subprocess.Popen(
+        diff_command, cwd=repo_root, env=env, stdout=subprocess.PIPE, stderr=diff_errors,
+    ) as diff:
+        try:
+            with subprocess.Popen(
+                patch_command, cwd=repo_root, env=env, stdin=diff.stdout,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ) as patch:
+                diff.stdout.close()
+                output, patch_errors = patch.communicate()
+            diff_status = diff.wait()
+        finally:
+            diff.stdout.close()
+            if diff.poll() is None:
+                diff.kill()
+        if check and patch.returncode:
+            raise subprocess.CalledProcessError(patch.returncode, patch_command, output, patch_errors)
+        if check and diff_status:
+            diff_errors.seek(0)
+            raise subprocess.CalledProcessError(diff_status, diff_command, stderr=diff_errors.read())
+        if not diff_status and not patch.returncode and output.strip():
+            return output.decode("ascii").split()[0]
+    return "0" * 40
+
+
+def diff_has_content(repo_root: Path, diff_args: Sequence[str]) -> bool:
+    """Distinguish an empty diff from non-patch output a patch-ID parser ignored."""
+    with TemporaryFile() as output:
+        subprocess.run(
+            [*_SNAPSHOT_GIT, "diff", *diff_args], cwd=repo_root, env=clean_git_env(),
+            stdout=output, stderr=subprocess.PIPE, check=True,
+        )
+        output.seek(0)
+        return any(chunk.strip() for chunk in iter(lambda: output.read(65_536), b""))
+
+
+def _list_tree_entries(
+    root: Path, revision: str, candidates: set[str] | None = None,
+) -> dict[str, tuple[str, str]]:
+    command = [*_SNAPSHOT_GIT, "ls-tree", "-z"]
+    if candidates is None:
+        command.extend(("-r", revision))
+    elif len(candidates) > 128:
+        # Include directories when testing whether a deleted file path was reused.
+        command.extend(("-r", "-t", revision))
+    else:
+        command.extend(("-t", revision, "--", *(f":(literal){path}" for path in sorted(candidates))))
+    output = git_stdout(root, command)
+    if output is None:
+        raise ValueError(f"Cannot inspect tree entries at {revision}")
+    entries = {}
+    for record in output.split("\0"):
+        metadata, separator, path = record.partition("\t")
+        if separator and (candidates is None or path in candidates):
+            mode, _, oid = metadata.split()
+            entries[path] = (mode, oid)
+    return entries
+
+
+def tree_entries_map(
+    root: Path, paths: Iterable[str], revision: str | None,
+) -> dict[str, tuple[str, str]]:
+    """Inspect candidate paths in one Git tree query, or inspect working-tree files."""
+    candidates = set(paths)
+    if revision is not None:
+        return _list_tree_entries(root, revision, candidates) if candidates else {}
+    root = root.resolve()
+    entries = {}
+    for path in sorted(candidates):
+        relative = Path(path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Path must stay inside repository: {path}")
+        resolved = resolve_changed_file(root, path)
+        if resolved is None:
+            raise ValueError(f"Path escapes repository: {path}")
+        _, target = resolved
+        if target.is_file():
+            entries[path] = ("120000" if (root / path).is_symlink() else "100644", "")
+    return entries
 
 
 def repository_path_exists(root: Path, rel_path: str, revision: str | None) -> bool:
@@ -205,15 +294,18 @@ class BaseFileReader:
         submodules: tuple[str, ...] = (),
         *,
         exact: bool = False,
+        strict_text: bool = False,
     ):
         self.root = root
         self.exact = exact
+        self.strict_text = strict_text
         self.base = base
         self.submodules = submodules
         self._base_revision: str | None = None
         self._base_checked = False
         self._renames: dict[tuple[Path, str], dict[str, str] | None] = {}
         self._entries: dict[str, BaseFileEntry] = {}
+        self._tree_blobs: dict[str, str] | None = None
         self._imported_trees: dict[str, str] | None = {} if exact else None
 
     def read(self, path: str) -> str | None:
@@ -259,19 +351,18 @@ class BaseFileReader:
         ]
         if not pending:
             return
-        listing = git_stdout(self.root, ["git", "ls-tree", "-r", "-z", revision])
-        if listing is None:
-            return
-        blobs: dict[str, str] = {}
-        for record in listing.split("\0"):
-            metadata, separator, path = record.partition("\t")
-            fields = metadata.split()
-            if separator and len(fields) == 3 and fields[0] not in {"040000", "160000"}:
-                blobs[path] = fields[2]
+        if self._tree_blobs is None:
+            try:
+                entries = _list_tree_entries(self.root, revision)
+            except ValueError:
+                return
+            self._tree_blobs = {
+                path: oid for path, (mode, oid) in entries.items() if mode != "160000"
+            }
         by_oid: dict[str, list[str]] = {}
         absent: list[str] = []
         for path in pending:
-            oid = blobs.get(path)
+            oid = self._tree_blobs.get(path)
             if oid is None:
                 absent.append(path)
             else:
@@ -335,12 +426,14 @@ class BaseFileReader:
             body_end = position + size
             if body_end >= len(data) or data[body_end : body_end + 1] != b"\n":
                 return None
-            contents[oid] = (
-                data[position:body_end]
-                .decode("utf-8", errors="replace")
-                .replace("\r\n", "\n")
-                .replace("\r", "\n")
-            )
+            body = data[position:body_end]
+            if self.strict_text:
+                try:
+                    contents[oid] = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    contents[oid] = None
+            else:
+                contents[oid] = body.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
             position = body_end + 1
         return contents
 
@@ -444,7 +537,13 @@ class BaseFileReader:
             if previous is None:
                 return BaseFileEntry("absent")
             inner = previous
-        content = git_stdout(cwd, ["git", "show", f"{revision}:{inner}"])
+        if self.strict_text:
+            try:
+                content = read_repository_file(cwd, inner, revision=revision, require_regular=True)
+            except ValueError as exc:
+                return BaseFileEntry("unavailable", detail=str(exc))
+        else:
+            content = git_stdout(cwd, ["git", "show", f"{revision}:{inner}"])
         if content is None:
             return BaseFileEntry(
                 "unavailable", detail=f"Cannot read base blob for {path}"
@@ -636,6 +735,8 @@ def read_repository_file(
 
 
 def compute_changed_lines(base_text: str, current_text: str) -> set[int]:
+    if base_text == current_text:
+        return set()
     base_lines = base_text.splitlines()
     current_lines = current_text.splitlines()
     matcher = difflib.SequenceMatcher(None, base_lines, current_lines)

@@ -68,6 +68,7 @@ from the_guard.review.runner import (
 from the_guard.config import load_config, GuardConfig
 from the_guard.git_helpers import GIT_REPO_ENV_VARS, git_stdout
 from the_guard.review.documents import (
+    _SnapshotDocuments,
     boundary_document_paths,
     changed_task_blueprints,
     existing_document_paths,
@@ -252,7 +253,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             ):
                 with patch("subprocess.run", wraps=subprocess.run) as run:
                     operation()
-                tree_calls = [call.args[0] for call in run.call_args_list if call.args[0][:2] == ["git", "ls-tree"]]
+                tree_calls = [call.args[0] for call in run.call_args_list if "ls-tree" in call.args[0]]
                 self.assertEqual(len(tree_calls), 1, tree_calls)
                 self.assertIn("-z", tree_calls[0])
                 self.assertFalse(any("config.py/" in arg for arg in tree_calls[0]))
@@ -282,11 +283,13 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
             reads: list[tuple[str, str | None]] = []
 
-            def record_read(root, path, revision=None, **kwargs):
-                reads.append((path, revision))
-                return read_document(root, path, revision, **kwargs)
+            read_snapshot_document = _SnapshotDocuments.read
 
-            with patch("the_guard.review.documents.read_document", side_effect=record_read):
+            def record_read(reader, path):
+                reads.append((path, reader.reader.base))
+                return read_snapshot_document(reader, path)
+
+            with patch.object(_SnapshotDocuments, "read", new=record_read):
                 changed = changed_task_blueprints(repo, config, previous, target, ())
 
             detected = {
@@ -301,10 +304,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             )
             self.assertFalse({path for path, _ in reads} & set(stable[1:]))
 
-            with patch("the_guard.review.documents.git_stdout", wraps=git_stdout) as tree:
+            with patch("the_guard.git_helpers.git_stdout", wraps=git_stdout) as tree:
                 self.assertEqual(existing_document_paths(repo, stable, target), set(stable))
             tree_calls = [call.args[1] for call in tree.call_args_list]
-            self.assertEqual(tree_calls, [["git", "ls-tree", "-r", "-z", target]])
+            self.assertEqual(tree_calls, [["git", "-c", "core.fsmonitor=false", "ls-tree", "-z", "-r", "-t", target]])
 
     def test_implicit_readme_and_symlink_targets_are_reviewable_contract_changes(self):
         with tempfile.TemporaryDirectory() as td:
