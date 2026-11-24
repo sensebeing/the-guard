@@ -318,6 +318,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             env = {**dict.fromkeys(GIT_REPO_ENV_VARS, "foreign"), "GIT_CONFIG_COUNT": "0"}
             with (
                 patch("the_guard.review.engine.resolve_provider_order", return_value=([("codex", "codex")], {})),
+                patch("the_guard.review.engine.record_working_provider"),
                 patch(
                     "the_guard.review.engine._invoke_provider",
                     return_value=(ReviewOutput("GO", "Reviewed", (), ""), "test-session", ""),
@@ -2640,16 +2641,79 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cfg_file = root / "review-agent.json"
-            env = {"THE_GUARD_REVIEW_CONFIG": str(cfg_file)}
+            claude = root / "claude"
+            _write_exec(claude, "#!/bin/sh\nexit 0\n")
+            env = {"HOME": str(root), "THE_GUARD_REVIEW_CONFIG": str(cfg_file)}
             probe_environment(root, env=env, priority_order=["codex", "claude"])
             original = cfg_file.read_bytes()
             files_before = set(root.iterdir())
-            with patch.object(review_provider.os, "replace", side_effect=OSError("write failed")):
-                record_working_provider(root, "claude", "/bin/claude", env)
+            with patch.object(review_provider.os, "replace", side_effect=OSError("write failed")) as replace_file:
+                record_working_provider(root, "claude", str(claude), env)
                 self.assertEqual(cfg_file.read_bytes(), original)
                 probe_environment(root, env=env, priority_order=["claude"])
                 self.assertEqual(cfg_file.read_bytes(), original)
+            self.assertEqual(replace_file.call_count, 2)
             self.assertEqual(set(root.iterdir()), files_before)
+
+    def test_provider_order_rediscovers_unusable_cached_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg_file = root / "review-agent.json"
+            codex = root / "bin/codex"
+            claude = root / "bin/claude"
+            for executable in (codex, claude):
+                _write_exec(executable, "#!/bin/sh\nexit 0\n")
+            env = {
+                "HOME": str(root),
+                "PATH": str(codex.parent),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+                "OPENAI_API_KEY": "fixture",
+                "ANTHROPIC_API_KEY": "fixture",
+            }
+            config = probe_environment(root, env=env, priority_order=["codex", "claude"])
+            stale_binaries = ("codex", str(root / "uninstalled/codex"), str(codex.parent))
+            for stale_binary in stale_binaries:
+                with self.subTest(stale_binary=stale_binary):
+                    binaries = {**config["provider_binaries"], "codex": stale_binary}
+                    cfg_file.write_text(json.dumps({**config, "provider_binaries": binaries}))
+                    ordered, _ = resolve_provider_order(root, env=env)
+                    self.assertEqual(ordered, [("codex", str(codex)), ("claude", str(claude))])
+
+                    cfg_file.write_text(json.dumps({
+                        **config, "provider_binaries": binaries,
+                        "priority_order": ["claude"], "preferred_provider": "claude",
+                    }))
+                    ordered, _ = resolve_provider_order(root, explicit_provider="codex", env=env)
+                    self.assertEqual(ordered, [("codex", str(codex)), ("claude", str(claude))])
+
+            pinned = root / "pinned/codex"
+            _write_exec(pinned, "#!/bin/sh\nexit 0\n")
+            binaries = {**config["provider_binaries"], "codex": str(pinned)}
+            cfg_file.write_text(json.dumps({**config, "provider_binaries": binaries}))
+            ordered, _ = resolve_provider_order(root, env=env)
+            self.assertEqual(ordered, [("codex", str(pinned)), ("claude", str(claude))])
+
+    def test_record_working_provider_resolves_binary_before_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "bin/codex"
+            cfg_file = root / "review-agent.json"
+            _write_exec(codex, "#!/bin/sh\nexit 0\n")
+            env = {
+                "HOME": str(root),
+                "PATH": str(codex.parent),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+            }
+            for binary in ("codex", str(root / "uninstalled/codex")):
+                with self.subTest(binary=binary):
+                    record_working_provider(root, "codex", binary, env)
+                    config = json.loads(cfg_file.read_text())
+                    self.assertEqual(config["provider_binaries"], {"codex": str(codex)})
+
+            original = cfg_file.read_bytes()
+            with patch.object(review_provider, "_find_provider_binary", return_value=None):
+                record_working_provider(root, "claude", "claude", env)
+            self.assertEqual(cfg_file.read_bytes(), original)
 
     def test_colleague_environment_check_and_fallback_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as td:
