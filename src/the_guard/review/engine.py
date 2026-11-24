@@ -265,10 +265,11 @@ def run_architecture_review(
     )
     change_causes = ()
     if session_contract_changed and prior_session is not None:
-        change_causes = contract_change_causes(
-            repo_root, scope, prior_session.last_head_sha, contract_config, policy,
-        )
-        print("[arch-review] review contract changed: " + ", ".join(change_causes), file=sys.stderr)
+        if not force:
+            change_causes = contract_change_causes(
+                repo_root, scope, prior_session.last_head_sha, contract_config, policy,
+            )
+            print("[arch-review] review contract changed: " + ", ".join(change_causes), file=sys.stderr)
         prior_session = None
 
     if force or not (receipt_contract_changed or session_contract_changed):

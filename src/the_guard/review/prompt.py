@@ -670,7 +670,7 @@ def _document_source_path(
     if len(aliases) > 1:
         modes: dict[str, str] = {}
         existing_document_paths(repo_root, aliases, revision, snapshot_modes=modes)
-        return next(alias for alias, mode in modes.items() if mode in {"100644", "100755"})
+        return next((alias for alias, mode in modes.items() if mode in {"100644", "100755"}), path)
     return path
 
 

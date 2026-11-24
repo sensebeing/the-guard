@@ -1791,6 +1791,19 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 meta_of(contracted)["full_review_reason"], "contract_changed"
             )
 
+            (repo / ".guard/config.json").write_text(
+                json.dumps({"review": {"project_title": "Renamed again"}}),
+                encoding="utf-8",
+            )
+            _git(repo, "add", ".guard/config.json")
+            _git(repo, "commit", "-m", "change reviewer contract before forced review")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                forced = run_architecture_review(repo, env=env, force=True)
+            self.assertEqual(meta_of(forced)["full_review_reason"], "force")
+            self.assertNotIn("contract_change_causes", meta_of(forced))
+            self.assertNotIn("review contract changed", stderr.getvalue())
+
     def test_run_metadata_records_provider_changed_reason(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
