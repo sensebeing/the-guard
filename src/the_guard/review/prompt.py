@@ -24,6 +24,7 @@ from .contract import (
 from .repository import (
     _classify_file_tier,
     _git,
+    _is_boundary_refresh_round,
     _is_unchanged_rebuttal_round,
     _literal_pathspecs,
     _raw_diff_records,
@@ -55,13 +56,13 @@ from .session import (
 _BULK_SCOPE_THRESHOLD = 150
 _BULK_ANCHOR_THRESHOLD = 40
 _MAX_BATCH_COMMAND_CHARS = 8_000
-MAX_PRIMARY_OWNER_DOC_CHARS = 48_000
-MAX_SECONDARY_DOC_CHARS = 24_000
-MAX_SNAPSHOT_DOCS_TOTAL_CHARS = 180_000
-_MAX_DOCUMENT_INDEX_CHARS = 2_000
+MAX_PRIMARY_OWNER_DOC_BYTES = 60_000
+MAX_SECONDARY_DOC_BYTES = 24_000
+MAX_SNAPSHOT_DOCS_TOTAL_BYTES = 180_000
+_MAX_DOCUMENT_INDEX_BYTES = 2_000
 _BATCH_READ_INSTRUCTIONS = (
-    "For multiple snapshot reads or related searches, issue parallel read-only tool calls in the same turn\n"
-    "or combine bounded `git show <target-sha>:<path>` or `git grep` reads in one read-only command.\n"
+    "Run each supplied Batch N/M command as provided. Do not split it into per-file `git diff` or `git show` calls.\n"
+    "Combine related snapshot file reads and searches in a single bounded read-only shell command.\n"
     "Scope `git ls-tree` to touched module directories and pass `-n` to `git log`.\n"
     "Bound `git diff` by the batch plan or with `-- <paths>`."
 )
@@ -418,6 +419,7 @@ def _render_prior_findings_section(
     inc_scope: IncrementalReviewScope | None = None,
     *,
     reviewer_note: str = "",
+    boundary_refresh: bool = False,
 ) -> list[str]:
     lines = [
         f"\n## Prior round {session.round_count}: {session.last_verdict} at {session.last_head_sha}",
@@ -440,6 +442,11 @@ def _render_prior_findings_section(
             )
     elif _is_unchanged_rebuttal_round(scope, session, reviewer_note):
         lines.append("HEAD unchanged: evidence-only rebuttal")
+    elif boundary_refresh:
+        lines.append(
+            "Rebased branch patch unchanged: re-verify the previously reviewed code "
+            "against the updated module boundary/contract context below."
+        )
     else:
         lines.append("Different review baseline: review the full current branch scope")
     if reviewer_note.strip():
@@ -457,26 +464,36 @@ def _render_prior_findings_section(
     return lines
 
 
+def _utf8_size(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
 def _render_document_or_index(
-    path: str, body: str, revision: str, *, max_chars: int, remaining_budget: int,
-) -> str:
-    if len(body) <= min(max_chars, remaining_budget):
+    path: str, body: str, revision: str, *, max_bytes: int, remaining_budget: int,
+) -> str | None:
+    body_size = _utf8_size(body)
+    if body_size <= min(max_bytes, remaining_budget):
         return body
     lines = body.splitlines()
     index = [
-        f"Document index ({len(body.encode('utf-8')):,} bytes, {len(lines):,} lines).",
+        f"Document index ({body_size:,} bytes, {len(lines):,} lines).",
         f"Read the complete snapshot with `git show {shlex.quote(f'{revision}:{path}')}`.",
     ]
-    available = min(_MAX_DOCUMENT_INDEX_CHARS, remaining_budget) - sum(len(line) + 1 for line in index)
+    available = min(_MAX_DOCUMENT_INDEX_BYTES, remaining_budget) - _utf8_size("\n".join(index))
+    if available < 0:
+        return None
     for number, line in enumerate(lines, start=1):
         if re.match(r"^#{1,2}\s+\S", line):
             heading = f"{number}: {line}"
-            if len(heading) + 1 > available:
-                if available > 5:
-                    index.append(heading[:available - 2] + "…")
+            encoded_heading = heading.encode("utf-8")
+            heading_size = len(encoded_heading) + 1
+            if heading_size > available:
+                prefix_bytes = available - _utf8_size("…") - 1
+                if prefix_bytes > 0:
+                    index.append(encoded_heading[:prefix_bytes].decode("utf-8", errors="ignore") + "…")
                 break
             index.append(heading)
-            available -= len(heading) + 1
+            available -= heading_size
     return "\n".join(index)
 
 
@@ -489,22 +506,28 @@ _DOCUMENT_BUDGET_NOTICE = (
 class _DocumentBudget:
     def __init__(self) -> None:
         self.sections: list[str] = []
-        self.remaining = MAX_SNAPSHOT_DOCS_TOTAL_CHARS - len(_DOCUMENT_BUDGET_NOTICE) - 2
+        self.remaining = MAX_SNAPSHOT_DOCS_TOTAL_BYTES - _utf8_size(_DOCUMENT_BUDGET_NOTICE) - 2
         self.omitted = 0
 
     def append(self, section: str) -> None:
-        size = len(section) + 1
+        size = _utf8_size(section) + 1
         if size <= self.remaining:
             self.sections.append(section)
             self.remaining -= size
         else:
             self.omitted += 1
 
-    def document(self, title: str, path: str, body: str, revision: str, max_chars: int) -> None:
+    def available_for_document(self, title: str) -> int:
+        return self.remaining - _utf8_size(title) - 2
+
+    def document(self, title: str, path: str, body: str, revision: str, max_bytes: int) -> None:
         rendered = _render_document_or_index(
-            path, body, revision, max_chars=max_chars, remaining_budget=self.remaining - len(title) - 2,
+            path, body, revision, max_bytes=max_bytes, remaining_budget=self.available_for_document(title),
         )
-        self.append(f"{title}\n{rendered}")
+        if rendered is None:
+            self.omitted += 1
+        else:
+            self.append(f"{title}\n{rendered}")
 
     def render(self) -> list[str]:
         return [*self.sections, _DOCUMENT_BUDGET_NOTICE] if self.omitted else self.sections
@@ -564,13 +587,13 @@ def _render_task_blueprint_body(
     title: str, budget: _DocumentBudget,
 ) -> None:
     path = snapshot.path
-    if snapshot.follows_symlink and len(body) > min(
-        MAX_SECONDARY_DOC_CHARS, budget.remaining - len(title) - 2,
+    if snapshot.follows_symlink and _utf8_size(body) > min(
+        MAX_SECONDARY_DOC_BYTES, budget.available_for_document(title),
     ):
         aliases: set[str] = set()
         read_document(repo_root, path, revision, loaded_paths=aliases)
         path = _document_source_path(repo_root, path, revision, aliases)
-    budget.document(title, path, body, revision, MAX_SECONDARY_DOC_CHARS)
+    budget.document(title, path, body, revision, MAX_SECONDARY_DOC_BYTES)
 
 
 def _render_task_blueprint(
@@ -615,11 +638,11 @@ class _SnapshotDocument:
     source_path: str
     title: str
     body: str
-    max_chars: int
+    max_bytes: int
     boundary_modules: frozenset[str]
 
     def render(self, budget: _DocumentBudget, revision: str) -> None:
-        budget.document(self.title, self.source_path, self.body, revision, self.max_chars)
+        budget.document(self.title, self.source_path, self.body, revision, self.max_bytes)
 
 
 @dataclass(frozen=True)
@@ -707,15 +730,20 @@ def _render_omitted_blueprints(
     bulk_pinned = pinned_deleted if len(pinned_deleted) > _BULK_ANCHOR_THRESHOLD else set()
     bulk_deleted = unpinned_deleted | bulk_pinned
     individual = {path: revisions for path, revisions in omitted.items() if path not in bulk_deleted}
+    inventory = (
+        json.dumps(individual, separators=(",", ":"))
+        if len(individual) > _BULK_ANCHOR_THRESHOLD
+        else json.dumps(individual, indent=2)
+    )
     if not bulk_deleted:
-        return heading + json.dumps(individual, indent=2)
+        return heading + inventory
 
     counts: dict[str, int] = {}
     for path in bulk_deleted:
         directory = _deletion_directory(path)
         counts[directory] = counts.get(directory, 0) + 1
     lines = [
-        heading + json.dumps(individual, indent=2),
+        heading + inventory,
         "### Deleted merge-base task blueprints",
         "Enumerate the deleted paths in each directory, apply the blueprint settings in HEAD's "
         ".guard/config.json, "
@@ -811,7 +839,7 @@ def _snapshot_context(
         documents[path] = _SnapshotDocument(
             path, _document_source_path(repo_root, path, scope.head_sha, aliases),
             f"## {title}: {path}", body,
-            MAX_PRIMARY_OWNER_DOC_CHARS if path in primary_paths else MAX_SECONDARY_DOC_CHARS,
+            MAX_PRIMARY_OWNER_DOC_BYTES if path in primary_paths else MAX_SECONDARY_DOC_BYTES,
             frozenset(owners),
         )
         if not duplicate:
@@ -1016,7 +1044,7 @@ class _PriorModuleContextUnavailable(RuntimeError):
 def _incremental_context_delta(
     context: _ReviewSnapshotContext,
     session: ReviewSessionState,
-    inc_scope: IncrementalReviewScope,
+    inc_scope: IncrementalReviewScope | None,
     *,
     receipt_contract_changed: bool,
 ) -> list[str]:
@@ -1052,7 +1080,7 @@ def _incremental_context_delta(
                     f"### Task design & architecture blueprint: {path}", budget,
                 )
     sections = budget.render()
-    if unchanged:
+    if unchanged and (inc_scope is not None or sections):
         anchors = "\n".join(f"- `{path}` @ {', '.join(revs)}" for path, revs in sorted(unchanged.items()))
         sections.append("### Unchanged task blueprint anchors (use session history)\n" + anchors)
     if budget.omitted and changes:
@@ -1067,7 +1095,7 @@ def _incremental_context_delta(
 def _render_module_context_delta(
     context: _ReviewSnapshotContext,
     session: ReviewSessionState,
-    inc_scope: IncrementalReviewScope,
+    inc_scope: IncrementalReviewScope | None,
     budget: _DocumentBudget,
 ) -> None:
     repo_root = context.repo_root
@@ -1130,7 +1158,7 @@ def _render_module_context_delta(
             doc.render(budget, head)
             loaded_sources.add(doc.source_path)
 
-    reviewed_paths = set(inc_scope.reviewable_files)
+    reviewed_paths = set(inc_scope.reviewable_files) if inc_scope is not None else set()
     for path in changed_docs:
         doc = current_docs.get(path)
         source = doc.source_path if doc else path
@@ -1160,11 +1188,14 @@ def build_incremental_review_prompt(
     policy: Policy | None = None,
     config: GuardConfig | None = None,
 ) -> str:
-    if inc_scope is None and not _is_unchanged_rebuttal_round(
+    boundary_refresh = inc_scope is None and _is_boundary_refresh_round(
+        repo_root, scope, session, receipt_contract_changed=receipt_contract_changed,
+    )
+    if inc_scope is None and not boundary_refresh and not _is_unchanged_rebuttal_round(
         scope, session, reviewer_note
     ):
         raise ValueError(
-            "Incremental review requires a verified delta or unchanged-HEAD rebuttal"
+            "Incremental review requires a verified delta or unchanged-HEAD rebuttal or boundary refresh"
         )
     config = config or load_config(repo_root, revision=scope.head_sha)
     policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
@@ -1193,14 +1224,14 @@ def build_incremental_review_prompt(
             "leaves a required consolidation incomplete."
         ),
         *_render_prior_findings_section(
-            session, scope, inc_scope, reviewer_note=reviewer_note
+            session, scope, inc_scope, reviewer_note=reviewer_note, boundary_refresh=boundary_refresh,
         ),
         "## Session Context Continuity Note\n"
         "Unchanged root instructions, policy, topology, boundary documents and task blueprints carry forward "
         "from this session. After native context compaction, recover the relevant snapshot material "
         f"with `git show {scope.head_sha}:<path>` or use the recorded revision for historical evidence.",
     ]
-    if inc_scope is not None:
+    if inc_scope is not None or boundary_refresh:
         snapshot_context = snapshot_context or _snapshot_context(
             repo_root,
             scope,
@@ -1210,10 +1241,15 @@ def build_incremental_review_prompt(
             prior_reviewed_sha=session.last_head_sha,
             task_blueprint_anchors=session.task_blueprint_anchors,
         )
-        sections.extend(_incremental_context_delta(
+        context_delta = _incremental_context_delta(
             snapshot_context, session, inc_scope,
             receipt_contract_changed=receipt_contract_changed,
-        ))
+        )
+        if boundary_refresh and not context_delta:
+            raise _PriorModuleContextUnavailable(
+                "No inspectable boundary or blueprint delta found for contract refresh"
+            )
+        sections.extend(context_delta)
     if inc_scope and inc_scope.reviewable_files:
         sections.append(
             _render_bounded_diff_section(

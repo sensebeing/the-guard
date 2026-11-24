@@ -26,14 +26,14 @@ from .prompt import (
     build_review_prompt,
 )
 from .provider import (
-    FALLBACK_COOLDOWN_SECONDS,
-    _normalize_priority_order,
+    record_provider_cooldown,
     record_working_provider,
     resolve_provider_model_config,
     resolve_provider_order,
 )
 from .repository import (
     _git,
+    _is_boundary_refresh_round,
     _is_unchanged_rebuttal_round,
     collect_incremental_scope,
     collect_review_scope,
@@ -306,7 +306,11 @@ def run_architecture_review(
         repo_root, scope, prior_session, config=contract_config
     )
     can_incremental = prior_session is not None and (
-        inc_scope is not None or _is_unchanged_rebuttal_round(scope, prior_session, eff_note)
+        inc_scope is not None
+        or _is_unchanged_rebuttal_round(scope, prior_session, eff_note)
+        or _is_boundary_refresh_round(
+            repo_root, scope, prior_session, receipt_contract_changed=receipt_contract_changed,
+        )
     )
     if force:
         if existing is not None or (can_incremental and prior_session.session_id):
@@ -416,11 +420,6 @@ def run_architecture_review(
         errors: list[str] = []
         payload = None
         chosen_provider = ""
-        primary_failed_persistently = False
-        primary_provider = candidates[0][0]
-        priority_order = _normalize_priority_order(config_payload.get("priority_order"))
-        priority_top = priority_order[0] if priority_order else ""
-        preferred_provider = config_payload.get("preferred_provider")
         forced_provider = (explicit_provider or eff_env.get("THE_GUARD_REVIEW_PROVIDER", "")).strip()
         if not forced_provider and prior_session and prior_session.session_id and inc_prompt is not None:
             candidates = sorted(candidates, key=lambda candidate: candidate[0] != prior_session.provider)
@@ -468,32 +467,16 @@ def run_architecture_review(
                             file=sys.stderr,
                         )
                         continue
-                    if provider == primary_provider and persistent:
-                        primary_failed_persistently = True
+                    if persistent and not forced_provider:
+                        record_provider_cooldown(repo_root, provider, reason=str(exc), env=eff_env)
                     print(f"[arch-review][{provider}] failed: {exc}", file=sys.stderr)
                     errors.append(f"{provider}: {exc}")
                     break
 
                 chosen_provider = provider
                 effective_mode = plan.mode
-                should_record = not forced_provider and (
-                    primary_failed_persistently
-                    or (
-                        provider == primary_provider
-                        and (
-                            not preferred_provider
-                            or (provider == priority_top and provider != preferred_provider)
-                        )
-                    )
-                )
-                if should_record:
-                    if primary_failed_persistently and priority_top and provider != priority_top:
-                        record_working_provider(
-                            repo_root, provider, binary_path, eff_env,
-                            fallback_cooldown_seconds=FALLBACK_COOLDOWN_SECONDS,
-                        )
-                    else:
-                        record_working_provider(repo_root, provider, binary_path, eff_env)
+                if not forced_provider:
+                    record_working_provider(repo_root, provider, binary_path, eff_env)
                 break
             if payload is not None:
                 break

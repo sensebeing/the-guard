@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-PROVIDERS: tuple[str, ...] = ("codex", "claude", "agy")
+PROVIDERS: tuple[str, ...] = ("codex", "agy", "claude")
 
 
 def build_agy_readonly_settings(common_dir: Path | None = None) -> str:
@@ -53,7 +53,8 @@ DEFAULT_STALL_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_RUNAWAY_SECONDS = 1800.0
 POST_EOF_WAIT_TIMEOUT_SECONDS = 15.0
 DEFAULT_INCREMENTAL_DIFF_MAX_CHARS = 24000
-AGY_MAX_ARGV_PROMPT_BYTES = 128_000
+DEFAULT_PROVIDER_COOLDOWN_SECONDS = 900.0
+DEFAULT_REVIEW_EFFORT = "high"
 MAX_REVIEWER_NOTE_CHARS = 8000
 CLAUDE_DISALLOWED_TOOLS = "Write,Edit,NotebookEdit,Task,Agent,TodoWrite"
 CLAUDE_ISOLATION_SETTINGS: str = '{"disableAllHooks":true}'

@@ -250,10 +250,10 @@ See the [core rule definitions](src/the_guard/presets/rules/architecture-simplic
 
 ## Independent review
 
-`the-guard` discovers locally available agent CLIs (`codex > claude > agy` by default) and reviews committed Git snapshots:
+`the-guard` discovers locally available agent CLIs (`codex > agy > claude` by default) and reviews committed Git snapshots:
 
 ```sh
-guard probe --priority-order codex,claude,agy
+guard probe --priority-order codex,agy,claude
 guard probe --provider-model codex=gpt-6.1-sol:high
 guard review --provider codex
 guard review --json --github-pr owner/repo#123
@@ -263,6 +263,10 @@ guard review check-push
 ```
 
 Initial reviews inspect the full changed file scope before reporting high-confidence blockers, and follow-up runs on the same branch resume the verified reviewer session to check fixes and new deltas. Review prompts bind reads to committed Git refs (`base..head`) and forbid file writes, test execution, or subagent spawning. Linked worktrees share receipts and retained sessions under the Git common directory. The local pre-push gate checks the commit Git is pushing, including object-only replays, and can carry verified `GO` evidence forward from another linked worktree when the contract and patch match or the replay introduces no reviewable delta on an advanced baseline.
+
+All providers default to `high` effort. Agy reads prompts over stdin as `stream-json`, so prompt size is independent of the OS argument limit. Persistent provider failures add a 15-minute entry to `provider_cooldowns`. During that window new reviews try non-cooled providers first in configured priority order. `guard probe --reprobe` clears cooldowns. Both `--provider` and `THE_GUARD_REVIEW_PROVIDER` set the first choice for one invocation and leave the provider configuration untouched.
+
+When a rebase keeps the branch patch identical and updates a touched module's boundary document, an eligible review session resumes with the changed document context. If the refresh lacks an inspectable delta, review starts a new full session. Snapshot document budgets count UTF-8 bytes, with 60,000 bytes for each primary owner document, 24,000 for each secondary document, and 180,000 in total.
 
 ## Configuration
 
@@ -332,7 +336,7 @@ rules:
 To suppress a specific static finding inline, add a comment with at least 8 characters of explanation:
 `# guard-exempt guard.architecture-simplicity: concrete reason here`
 
-Reviewer behavior can be configured with `THE_GUARD_REVIEW_CONFIG`, `THE_GUARD_REVIEW_PROVIDER`, `THE_GUARD_REVIEW_MODEL`, `THE_GUARD_REVIEW_EFFORT`, `THE_GUARD_REVIEW_STALL_SECONDS`, `THE_GUARD_REVIEW_HEARTBEAT_SECONDS`, `THE_GUARD_REVIEW_MAX_SECONDS`, and `THE_GUARD_REVIEW_LOG_DIR`. Provider discovery persists to `~/.config/the-guard/review-agent.json`.
+Reviewer behavior can be configured with `THE_GUARD_REVIEW_CONFIG`, `THE_GUARD_REVIEW_PROVIDER`, `THE_GUARD_REVIEW_MODEL`, `THE_GUARD_REVIEW_EFFORT`, `THE_GUARD_REVIEW_COOLDOWN_SECONDS`, `THE_GUARD_REVIEW_STALL_SECONDS`, `THE_GUARD_REVIEW_HEARTBEAT_SECONDS`, `THE_GUARD_REVIEW_MAX_SECONDS`, and `THE_GUARD_REVIEW_LOG_DIR`. Provider discovery persists to `~/.config/the-guard/review-agent.json`.
 The same directory holds updater metadata and logs by default. Legacy updater metadata in
 `~/.guard` migrates during the next update using the default state directory after any running
 legacy updater releases its lock. `THE_GUARD_STATE_DIR` and

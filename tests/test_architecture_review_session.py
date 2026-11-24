@@ -28,16 +28,17 @@ from the_guard.review.engine import (
 from the_guard.review import session
 from the_guard.review.contract import ReviewOutput, ReviewScope
 from the_guard.review.documents import resolve_scope_modules
-from the_guard.review.provider import record_working_provider
-from the_guard.review.session import ReviewResult, ReviewRunLogger
 from the_guard.review.prompt import _parse_numstat_entries, build_incremental_review_prompt
+from the_guard.review.provider import probe_environment, record_provider_cooldown, record_working_provider
 from the_guard.review.repository import (
     _collect_branch_delta,
     _is_same_per_file_branch_patch,
+    contract_change_causes,
     load_valid_receipt,
     review_logs_dir,
     compute_review_contract_digest,
 )
+from the_guard.review.session import ReviewResult, ReviewRunLogger
 from the_guard.config import GuardConfig, load_config
 from the_guard.hooks import main_push_gate
 from the_guard.policy import load_policy
@@ -707,22 +708,41 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             entries = (Path(result.log_path).parent / "index.jsonl").read_text().splitlines()
             self.assertEqual(json.loads(entries[-1])["contract_change_causes"], [".guard/config.json"])
 
-    def test_active_fallback_session_is_sticky_without_changing_global_preference(self) -> None:
+    def _add_codex_provider(self, repo: Path, env: dict[str, str]) -> Path:
+        home = Path(env["HOME"])
+        (home / ".codex").mkdir()
+        (home / ".codex/auth.json").write_text("{}")
+        _write_exec(home / ".local/bin/codex", "#!/bin/sh\nexit 0\n")
+        probe_environment(repo, env=env)
+        return Path(env["THE_GUARD_REVIEW_CONFIG"])
+
+    def test_active_session_provider_affinity_leaves_global_preference_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            repo, env, _ = self._start_module_review(Path(td))
+            repo, env, first = self._start_module_review(Path(td))
+            cfg_file = self._add_codex_provider(repo, env)
+            before = cfg_file.read_bytes()
+            self.assertEqual(json.loads(before)["preferred_provider"], "codex")
             (repo / "services/a/main.py").write_text("value = 3\n")
             _git(repo, "commit", "-am", "round 2")
-            with (
-                mock.patch("the_guard.review.engine.resolve_provider_order",
-                           return_value=([("codex", "codex"), ("claude", "claude")], {})),
-                mock.patch("the_guard.review.engine._invoke_provider",
-                           return_value=(ReviewOutput("GO", "ok", (), ""), "module-session", "")) as invoke,
-                mock.patch("the_guard.review.engine.record_working_provider") as remember,
-            ):
-                result = run_architecture_review(repo, env=env)
+            result = run_architecture_review(repo, env=env)
             self.assertEqual((result.mode, result.provider), ("incremental", "claude"))
-            self.assertEqual(invoke.call_args.kwargs["resume_session_id"], "module-session")
-            remember.assert_not_called()
+            self.assertEqual(result.session_id, first.session_id)
+            self.assertEqual(cfg_file.read_bytes(), before)
+
+    def test_successful_session_continuation_clears_provider_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, first = self._start_module_review(Path(td))
+            cfg_file = self._add_codex_provider(repo, env)
+            record_provider_cooldown(repo, "claude", reason="quota exceeded", env=env)
+            self.assertIn("claude", json.loads(cfg_file.read_bytes())["provider_cooldowns"])
+            (repo / "services/a/main.py").write_text("value = 3\n")
+            _git(repo, "commit", "-am", "round 2")
+            result = run_architecture_review(repo, env=env)
+            self.assertEqual((result.mode, result.provider), ("incremental", "claude"))
+            self.assertEqual(result.session_id, first.session_id)
+            saved = json.loads(cfg_file.read_bytes())
+            self.assertEqual(saved["preferred_provider"], "codex")
+            self.assertNotIn("provider_cooldowns", saved)
 
     def test_finishing_old_fallback_session_does_not_overwrite_recovered_provider(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -778,15 +798,15 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
     def test_transient_primary_retries_before_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, env, _ = self._start_module_review(Path(td))
+            cfg_file = self._add_codex_provider(repo, env)
+            before = cfg_file.read_bytes()
+            self.assertEqual(json.loads(before)["preferred_provider"], "codex")
             sleep = mock.Mock()
             with (
-                mock.patch("the_guard.review.engine.resolve_provider_order",
-                           return_value=([("codex", "codex"), ("claude", "claude")], {})),
                 mock.patch("the_guard.review.engine._invoke_provider", side_effect=[
                     RuntimeError("429 at capacity"), RuntimeError("503 overloaded"),
                     RuntimeError("stream disconnected"), (ReviewOutput("GO", "ok", (), ""), "", ""),
                 ]) as invoke,
-                mock.patch("the_guard.review.engine.record_working_provider") as remember,
                 redirect_stderr(StringIO()) as stderr,
             ):
                 result = run_architecture_review(repo, env=env, force=True, _sleep_fn=sleep)
@@ -795,7 +815,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                              ["codex", "codex", "codex", "claude"])
             self.assertEqual(sleep.call_args_list, [mock.call(10.0), mock.call(20.0)])
             self.assertIn("--force", stderr.getvalue())
-            remember.assert_not_called()
+            self.assertEqual(cfg_file.read_bytes(), before)
 
     def test_newly_touched_declared_module_resumes_review_with_its_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -835,7 +855,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             second = run_architecture_review(repo, env=env)
             self.assertEqual((second.verdict, second.mode), ("GO", "full"))
 
-    def test_rebased_boundary_target_change_has_bounded_diff_when_branch_has_delta(self) -> None:
+    def test_rebased_boundary_target_change_has_bounded_diff_with_or_without_branch_delta(self) -> None:
         for branch_delta in (True, False):
             with self.subTest(branch_delta=branch_delta), tempfile.TemporaryDirectory() as td:
                 repo, env, first = self._start_module_review(Path(td))
@@ -854,19 +874,67 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
 
                 second = run_architecture_review(repo, env=env)
                 meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
-                if branch_delta:
-                    self.assertEqual((second.mode, meta["full_review_reason"]), ("incremental", ""))
-                    prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
-                    update = prompt.split("## Updated Module Scope & Boundary Context", 1)[1].split("\n## ", 1)[0]
-                    self.assertIn("`services/a/CLAUDE.md`", update)
-                    diff = update.split("```diff\n", 1)[1].split("\n```", 1)[0]
-                    self.assertIn("-a original boundary\n+a upstream boundary", diff)
-                    self.assertIn("[truncated", diff)
-                    self.assertLessEqual(len(diff), 8_000)
-                else:
-                    self.assertEqual((second.mode, meta["full_review_reason"]), ("full", "no_incremental_delta"))
+                self.assertEqual((second.mode, meta["full_review_reason"]), ("incremental", ""))
+                self.assertEqual(second.session_id, first.session_id)
+                prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                update = prompt.split("## Updated Module Scope & Boundary Context", 1)[1].split("\n## ", 1)[0]
+                self.assertIn("`services/a/CLAUDE.md`", update)
+                diff = update.split("```diff\n", 1)[1].split("\n```", 1)[0]
+                self.assertIn("-a original boundary\n+a upstream boundary", diff)
+                self.assertIn("[truncated", diff)
+                self.assertLessEqual(len(diff), 8_000)
+                if not branch_delta:
+                    self.assertIn("Rebased branch patch unchanged", prompt)
+                    self.assertNotIn("## Verified incremental scope", prompt)
                     receipt = load_valid_receipt(repo, first.patch_digest)
                     self.assertEqual(receipt["head_sha"], second.head_sha)
+
+    def test_same_patch_contract_mismatch_without_inspectable_delta_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, _ = self._start_module_review(Path(td))
+            config_path = repo / ".guard/config.json"
+            config = json.loads(config_path.read_text())
+            config["review"] = {"blueprint_globs": ["docs/plan.md"]}
+            config_path.write_text(json.dumps(config))
+            (repo / "docs/plan.md").write_text("# Branch plan\n")
+            _git(repo, "add", ".guard/config.json", "docs/plan.md")
+            _git(repo, "commit", "-m", "bind a branch blueprint")
+            first = run_architecture_review(repo, env=env)
+            prior = load_review_session(repo)
+            assert prior is not None
+            self.assertIn("docs/plan.md", prior.task_blueprint_anchors)
+            save_review_session(repo, replace(prior, contract_digest="different-receipt-contract"))
+            _git(repo, "switch", "main")
+            (repo / "services/c/CLAUDE.md").write_text("unrelated change\n")
+            _git(repo, "commit", "-am", "update unrelated owner")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            rebased = collect_review_scope(repo)
+            self.assertEqual(rebased.patch_digest, first.patch_digest)
+            with self.assertRaisesRegex(RuntimeError, "No inspectable boundary or blueprint delta"):
+                build_incremental_review_prompt(repo, rebased, prior, None)
+            second = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((second.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+
+    def test_contract_change_causes_exclude_untouched_module_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _, first = self._start_module_review(Path(td))
+            _git(repo, "switch", "main")
+            (repo / "docs/a-owner.md").write_text("touched owner change\n")
+            (repo / "services/c/CLAUDE.md").write_text("unrelated change\n")
+            _git(repo, "commit", "-am", "update boundary documents")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            scope = collect_review_scope(repo)
+            config = load_config(repo, revision=scope.head_sha)
+            policy = load_policy(repo, revision=scope.head_sha, config=config)
+            self.assertEqual(
+                contract_change_causes(repo, scope, first.head_sha, config, policy),
+                ("docs/a-owner.md",),
+            )
 
     def test_root_contract_and_legacy_session_changes_force_full_review(self) -> None:
         for change in ("branch config", "root instructions", "policy detail", "legacy session", "version"):
@@ -1475,7 +1543,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     "    print('1.4.2')\n"
                     "    raise SystemExit(0)\n"
                     "args = sys.argv[1:]\n"
-                    "prompt = args[args.index('-p') + 1] if '-p' in args else ''\n"
+                    "prompt = json.loads(sys.stdin.read())['message']['content']\n"
                     "resume_id = args[args.index('--conversation') + 1] if '--conversation' in args else ''\n"
                     "calls_path = os.environ['AGY_CALLS_FILE']\n"
                     "call_idx = len(open(calls_path, encoding='utf-8').read().splitlines()) if os.path.exists(calls_path) else 0\n"
@@ -1998,6 +2066,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "if '--version' in sys.argv:\n"
                 "    print('2.1.105 (Claude Code)')\n"
                 "    raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
                 "print(json.dumps({'type': 'result', 'is_error': True, 'result': 'Prompt is too long'}))\n"
                 "raise SystemExit(1)\n",
             )
@@ -2008,6 +2077,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "if '--version' in sys.argv:\n"
                 "    print('1.4.2')\n"
                 "    raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
                 "print(json.dumps({'event': 'init', 'conversation_id': 'agy-1'}))\n"
                 "print(json.dumps({'event': 'result', 'result': {'structured_output': {\n"
                 "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'GO', 'summary': 'fallback ok', 'blocking_findings': []\n"
@@ -2020,11 +2090,12 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
             }
 
+            probe_environment(repo, env=env, priority_order=["claude", "agy"])
+            before = cfg_file.read_bytes()
             result = run_architecture_review(repo, env=env)
             self.assertEqual(result.verdict, "GO")
             self.assertEqual(result.provider, "agy")
-            saved_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-            self.assertEqual(saved_cfg["preferred_provider"], "claude")
+            self.assertEqual(cfg_file.read_bytes(), before)
 
     def test_run_metadata_records_incremental_and_resume_failure_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as td:

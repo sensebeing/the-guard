@@ -30,6 +30,8 @@ from .contract import (
     SubmoduleChange,
 )
 from .documents import (
+    architecture_document_paths,
+    boundary_document_paths,
     changed_document_paths,
     changed_task_blueprints,
     contract_document_paths,
@@ -37,6 +39,7 @@ from .documents import (
     is_configured_blueprint_path,
     merge_task_blueprint_anchors,
     normalize_task_blueprint_anchors,
+    resolve_scope_modules,
     resolved_contract_paths,
     resolved_document_paths,
 )
@@ -346,6 +349,23 @@ def _is_unchanged_rebuttal_round(
         and session.merge_base == scope.merge_base
         and session.last_head_sha == scope.head_sha
         and session.last_patch_digest == scope.patch_digest
+    )
+
+
+def _is_boundary_refresh_round(
+    repo_root: Path, scope: ReviewScope, session: ReviewSessionState | None, *,
+    receipt_contract_changed: bool,
+) -> bool:
+    return (
+        session is not None
+        and receipt_contract_changed
+        and session.last_patch_digest == scope.patch_digest
+        and session.last_head_sha != scope.head_sha
+        and (
+            session.merge_base == scope.merge_base
+            or _is_ancestor(repo_root, session.merge_base, scope.merge_base)
+        )
+        and git_ok(repo_root, ["git", "cat-file", "-e", f"{session.last_head_sha}^{{commit}}"])
     )
 
 
@@ -741,10 +761,13 @@ def previous_review_scope(
 def contract_change_causes(
     repo_root: Path, scope: ReviewScope, prior_head: str, config: GuardConfig, policy: Policy,
 ) -> tuple[str, ...]:
-    paths = resolved_document_paths(
-        repo_root, scope.head_sha, contract_document_paths(config) | {rule.details for rule in policy.rules},
-    )
-    paths.add(".guard/config.json")
+    touched, _, _ = resolve_scope_modules(repo_root, scope, config, revision=scope.head_sha)
+    declared_modules = {module["path"]: module for module in config.topology.get("modules", ())}
+    candidates = architecture_document_paths(config) | {rule.details for rule in policy.rules}
+    candidates.add(".guard/config.json")
+    for module in touched:
+        candidates.update(boundary_document_paths(declared_modules.get(module, {"path": module})))
+    paths = resolved_document_paths(repo_root, scope.head_sha, candidates)
     changed = _git(
         repo_root, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
         f"{prior_head}..{scope.head_sha}", *_literal_pathspecs(tuple(sorted(paths))), check=False,
