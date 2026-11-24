@@ -41,14 +41,17 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   `GIT_DIR` using the list from `git_helpers`. It finds `guard` on `PATH` or falls back to
   `~/.local/bin/guard` and passes the complete ref update stream.
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports to the checkout, then reloads the Git helpers and updater in dependency order. The original package remains the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
-- Review sessions persist the first reviewed head, binding task blueprint revisions and a
-  `contract_digest` covering `REVIEW_CONTRACT_VERSION`, repository configuration, policy rules,
-  root instructions, scoped architecture documents, touched-module boundary documents and
-  touched and one-hop module declarations. Routine runtime upgrades preserve existing `GO`
-  receipts when the version and repository contract match. Evidence stays valid after changes
-  limited to unrelated modules' documents, declarations and blueprint additions. Changes to a
-  touched module's contract or a one-hop neighbour's layer, role or dependency change the digest
-  and start a full review. Binding blueprint revisions persist for a valid branch baseline.
+- Review sessions retain the first reviewed head and binding task blueprint revisions.
+  Receipt reuse and carry-forward require the scoped `contract_digest`, which covers
+  `REVIEW_CONTRACT_VERSION`, repository configuration, policy rules, root instructions,
+  architecture documents, touched-module boundary documents and touched and one-hop module
+  declarations. Routine upgrades preserve `GO` receipts when the version and scoped contract
+  match. Session continuation checks the versioned root `session_contract_digest`, edits to
+  branch-touched `.guard/config.json` since the last reviewed head, and the structure of touched
+  modules and one-hop neighbours across a rebase. Incremental prompts supply updated boundary
+  documents and context for newly touched modules. Sessions saved before the root digest was
+  introduced require an exact scoped digest match to continue. A full review retains binding
+  blueprint revisions for a valid branch baseline.
 
 Without a local checkout, `guard self-update` runs `uv tool upgrade the-guard` and records the
 installed package's PEP 610 commit, package-tree digest and CLI update status.

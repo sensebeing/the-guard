@@ -14,7 +14,9 @@ from ..config import GuardConfig, load_config
 from ..git_helpers import clean_git_env
 from ..policy import Policy, load_policy
 from .contract import ReviewScope, validate_review_output
+from .documents import resolve_module_neighbours, resolve_scope_modules
 from .prompt import (
+    _PriorModuleContextUnavailable,
     _sanitize_reviewer_note,
     _snapshot_context,
     build_incremental_review_prompt,
@@ -26,6 +28,7 @@ from .provider import (
     resolve_provider_order,
 )
 from .repository import (
+    _git,
     _is_unchanged_rebuttal_round,
     collect_incremental_scope,
     collect_review_scope,
@@ -47,6 +50,8 @@ from .session import (
     ReviewResult,
     ReviewRunLogger,
     ReviewSessionState,
+    _scoped_config_payload,
+    compute_session_contract_digest,
 )
 
 
@@ -99,6 +104,51 @@ def _provider_review_plan(
     )
 
 
+def _session_contract_changed(
+    repo_root: Path,
+    scope: ReviewScope,
+    config: GuardConfig,
+    prior_session: ReviewSessionState | None,
+    *,
+    session_contract_digest: str,
+    receipt_contract_changed: bool,
+) -> bool:
+    if prior_session is None:
+        return False
+    if not prior_session.session_contract_digest:
+        return receipt_contract_changed
+    if prior_session.session_contract_digest != session_contract_digest:
+        return True
+    if ".guard/config.json" in scope.changed_files:
+        # A full review already covered config edits present at the previous head.
+        config_diff = _git(
+            repo_root, "diff", "--quiet", "--no-ext-diff", "--no-textconv",
+            f"{prior_session.last_head_sha}..{scope.head_sha}", "--", ".guard/config.json",
+            check=False,
+        )
+        if config_diff.returncode != 0:
+            return True
+    if prior_session.merge_base == scope.merge_base or not receipt_contract_changed:
+        return False
+
+    try:
+        prior_config = load_config(
+            repo_root, revision=prior_session.last_head_sha, allow_historical=True
+        )
+    except (OSError, ValueError):
+        # An unavailable historical declaration cannot establish safe continuation.
+        return True
+    touched, upstream, downstream = resolve_scope_modules(
+        repo_root, scope, config, revision=scope.head_sha
+    )
+    prior_declarations = {m["path"]: m for m in prior_config.topology.get("modules", [])}
+    prior_upstream, prior_downstream = resolve_module_neighbours(touched, prior_declarations)
+    modules = touched, upstream | prior_upstream, downstream | prior_downstream
+    return _scoped_config_payload(prior_config, scope, *modules) != _scoped_config_payload(
+        config, scope, *modules
+    )
+
+
 def run_architecture_review(
     repo_root: Path,
     *,
@@ -147,17 +197,24 @@ def run_architecture_review(
     current_contract_digest = compute_review_contract_digest(
         policy, contract_config, repo_root=repo_root, revision=scope.head_sha, scope=scope
     )
+    current_session_contract_digest = compute_session_contract_digest(
+        policy, contract_config, repo_root=repo_root, revision=scope.head_sha
+    )
     branch = current_branch_name(repo_root)
     stored_session = load_review_session(repo_root, branch)
     prior_session = None if force else stored_session
-    contract_changed = prior_session is not None and not (
-        bool(prior_session.contract_digest)
-        and prior_session.contract_digest == current_contract_digest
+    receipt_contract_changed = prior_session is not None and (
+        not prior_session.contract_digest or prior_session.contract_digest != current_contract_digest
     )
-    if contract_changed:
+    session_contract_changed = _session_contract_changed(
+        repo_root, scope, contract_config, prior_session,
+        session_contract_digest=current_session_contract_digest,
+        receipt_contract_changed=receipt_contract_changed,
+    )
+    if session_contract_changed:
         prior_session = None
 
-    if not force and not contract_changed:
+    if not (force or receipt_contract_changed or session_contract_changed):
         existing = resolve_or_carry_forward_receipt(
             repo_root,
             scope,
@@ -198,7 +255,6 @@ def run_architecture_review(
     inc_scope = collect_incremental_scope(
         repo_root, scope, prior_session, config=contract_config
     )
-    prev_head_sha = prior_session.last_head_sha if prior_session is not None else None
     full_prompt_cache: str | None = None
 
     def _get_full_prompt() -> str:
@@ -220,21 +276,25 @@ def run_architecture_review(
         inc_scope is not None
         or _is_unchanged_rebuttal_round(scope, prior_session, eff_note)
     )
-    inc_prompt = (
-        build_incremental_review_prompt(
-            repo_root,
-            scope,
-            prior_session,
-            inc_scope,
-            snapshot_context=snapshot_context,
-            reviewer_note=eff_note,
-            policy=policy,
-            config=contract_config,
-        )
-        if can_incremental and prior_session is not None
-        else None
-    )
+    inc_prompt = None
+    if can_incremental and prior_session is not None:
+        try:
+            inc_prompt = build_incremental_review_prompt(
+                repo_root,
+                scope,
+                prior_session,
+                inc_scope,
+                snapshot_context=snapshot_context,
+                receipt_contract_changed=receipt_contract_changed,
+                reviewer_note=eff_note,
+                policy=policy,
+                config=contract_config,
+            )
+        except _PriorModuleContextUnavailable:
+            prior_session = None
+            inc_scope = None
 
+    prev_head_sha = prior_session.last_head_sha if prior_session is not None else None
     resolved_session_id = ""
     log_path = ""
     effective_mode = "full"
@@ -391,6 +451,7 @@ def run_architecture_review(
             updated_at=datetime.now(UTC).isoformat(),
             initial_head_sha=initial_reviewed_sha or scope.head_sha,
             task_blueprint_anchors=snapshot_context.task_blueprint_anchors,
+            session_contract_digest=current_session_contract_digest,
         ),
     )
     if result.verdict == "GO":

@@ -91,7 +91,9 @@ def _scoped_config_payload(
         return payload
 
     def neighbour_projection(module_path: str) -> dict[str, Any]:
-        declared = declared_modules[module_path]
+        declared = declared_modules.get(module_path)
+        if declared is None:
+            return {"path": module_path, "missing": True}
         return {
             "path": module_path,
             "layer": declared.get("layer"),
@@ -132,6 +134,31 @@ def _scoped_contract_payload(
     )
 
 
+def _hash_contract(
+    policy: Policy,
+    config_payload: dict[str, Any],
+    documents: dict[str, str],
+    *,
+    include_rule_checker: bool,
+) -> str:
+    rules = [asdict(rule) for rule in policy.rules]
+    if not include_rule_checker:
+        # The existing receipt payload never included the checker field.
+        for rule in rules:
+            del rule["checker"]
+    payload = {
+        "contract_version": REVIEW_CONTRACT_VERSION,
+        "documents": documents,
+        "config": config_payload,
+        "policy": {
+            "manifest_schema": policy.schema,
+            "rules": rules,
+        },
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def compute_review_contract_digest(
     policy: Policy,
     config: GuardConfig,
@@ -154,27 +181,23 @@ def compute_review_contract_digest(
             repo_root, contract_document_paths(config), revision
         )
         config_payload = asdict(config)
-    payload = {
-        "contract_version": REVIEW_CONTRACT_VERSION,
-        "documents": documents,
-        "config": config_payload,
-        "policy": {
-            "manifest_schema": policy.schema,
-            "rules": [
-                {
-                    "id": rule.id,
-                    "severity": rule.severity,
-                    "scope": list(rule.scope),
-                    "summary": rule.summary,
-                    "details": rule.details,
-                    "detail_body": rule.detail_body,
-                }
-                for rule in policy.rules
-            ],
-        },
-    }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    return _hash_contract(policy, config_payload, documents, include_rule_checker=False)
+
+
+def compute_session_contract_digest(
+    policy: Policy,
+    config: GuardConfig,
+    *,
+    repo_root: Path | None = None,
+    revision: str | None = None,
+) -> str:
+    """Hash the review contract version and root contract for provider session continuation."""
+    config_payload = asdict(config)
+    config_payload["topology"].pop("modules", None)
+    documents = _snapshot_document_bodies(
+        repo_root, architecture_document_paths(config), revision
+    )
+    return _hash_contract(policy, config_payload, documents, include_rule_checker=True)
 
 
 def contract_digest_matches(
@@ -224,6 +247,7 @@ class ReviewSessionState:
     updated_at: str = ""
     initial_head_sha: str = ""
     task_blueprint_anchors: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    session_contract_digest: str = ""
 
 
 def worktree_session_key(worktree_path: Path, branch: str) -> str:
@@ -414,6 +438,7 @@ def _read_review_session(path: Path) -> ReviewSessionState | None:
         updated_at=updated_at,
         initial_head_sha=str(raw.get("initial_head_sha") or raw.get("last_head_sha") or ""),
         task_blueprint_anchors=normalize_task_blueprint_anchors(raw.get("task_blueprint_anchors")),
+        session_contract_digest=str(raw.get("session_contract_digest") or ""),
     )
 
 
@@ -473,6 +498,7 @@ def save_review_session(common_dir: Path, state: ReviewSessionState) -> Path:
         "last_blocking_findings": [asdict(f) for f in state.last_blocking_findings],
         "last_submodule_shas": dict(state.last_submodule_shas),
         "contract_digest": state.contract_digest,
+        "session_contract_digest": state.session_contract_digest,
         "round_count": state.round_count,
         "updated_at": state.updated_at or datetime.now(UTC).isoformat(),
     }

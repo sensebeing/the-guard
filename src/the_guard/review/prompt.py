@@ -9,6 +9,7 @@ import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
+from subprocess import CalledProcessError
 from typing import Any
 
 from ..config import GuardConfig, load_config
@@ -25,6 +26,7 @@ from .repository import (
     _is_unchanged_rebuttal_round,
     _literal_pathspecs,
     _require_submodule_checkout,
+    collect_review_scope,
 )
 from .documents import (
     TaskBlueprintSnapshot,
@@ -37,7 +39,7 @@ from .documents import (
     resolve_task_design_blueprints,
     resolved_contract_paths,
 )
-from .session import ReviewSessionState
+from .session import ReviewSessionState, _snapshot_document_bodies
 
 _ZERO_BASED_RECONCILIATION = """## Whole-Module & Blueprint Snapshot Inspection
 Inspect the whole module for each touched subsystem at the target Git snapshot. Use
@@ -360,6 +362,28 @@ def _bounded_document(body: str) -> str:
     return body[:24_000] + ("\n... [truncated]" if len(body) > 24_000 else "")
 
 
+def _resolved_document_diff(
+    path: str, from_sha: str, from_body: str | None, to_sha: str, to_body: str | None,
+) -> str:
+    return "".join(
+        line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+        for line in difflib.unified_diff(
+            (from_body or "").splitlines(keepends=True),
+            (to_body or "").splitlines(keepends=True),
+            fromfile=f"{from_sha}:{path} (resolved)" if from_body is not None else "/dev/null",
+            tofile=f"{to_sha}:{path} (resolved)" if to_body is not None else "/dev/null",
+        )
+    )
+
+
+def _bounded_document_diff(diff: str) -> str:
+    limit = 8_000
+    if len(diff) > limit:
+        suffix = "\n... [truncated, inspect the full snapshot diff]"
+        diff = diff[: limit - len(suffix)].rpartition("\n")[0] + suffix
+    return f"```diff\n{diff.rstrip()}\n```"
+
+
 def _render_task_blueprint_diff(
     repo_root: Path, snapshot: TaskBlueprintSnapshot,
     from_sha: str, from_body: str, to_sha: str, to_body: str | None,
@@ -368,14 +392,8 @@ def _render_task_blueprint_diff(
         return "[DELETED AT HEAD]"
     if snapshot.follows_symlink:
         # Git records the link itself. Compare the resolved committed bodies.
-        diff = "".join(
-            line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
-            for line in difflib.unified_diff(
-                from_body.splitlines(keepends=True),
-                to_body.splitlines(keepends=True),
-                fromfile=f"{from_sha}:{snapshot.path} (resolved)",
-                tofile=f"{to_sha}:{snapshot.path} (resolved)",
-            )
+        diff = _resolved_document_diff(
+            snapshot.path, from_sha, from_body, to_sha, to_body
         )
     else:
         diff = _git(
@@ -390,11 +408,7 @@ def _render_task_blueprint_diff(
             f"{from_sha}..{to_sha}",
             *_literal_pathspecs((snapshot.path,)),
         ).stdout.decode("utf-8", errors="replace")
-    limit = 8_000
-    if len(diff) > limit:
-        suffix = "\n... [truncated, inspect the full snapshot diff]"
-        diff = diff[: limit - len(suffix)].rpartition("\n")[0] + suffix
-    return f"```diff\n{diff.rstrip()}\n```"
+    return _bounded_document_diff(diff)
 
 
 def _render_task_blueprint(
@@ -757,6 +771,66 @@ def build_review_prompt(
     return "\n".join(sections)
 
 
+class _PriorModuleContextUnavailable(RuntimeError):
+    """An incremental prompt cannot verify the previously reviewed module context."""
+
+
+def _updated_module_context(
+    repo_root: Path,
+    scope: ReviewScope,
+    session: ReviewSessionState,
+    inc_scope: IncrementalReviewScope | None,
+    config: GuardConfig,
+) -> list[str]:
+    prior_head = session.last_head_sha
+    modes: dict[str, str] = {}
+    touched, _, _ = resolve_scope_modules(repo_root, scope, config, snapshot_modes=modes)
+    declarations = {module["path"]: module for module in config.topology.get("modules", [])}
+    paths = {
+        path
+        for module in touched
+        for path in boundary_document_paths(declarations.get(module, {"path": module}))
+    }
+    try:
+        prior_config = load_config(repo_root, revision=prior_head, allow_historical=True)
+        previous_scope = collect_review_scope(
+            repo_root, main_branch=session.merge_base, head_ref=prior_head, config=prior_config
+        )
+        previous_touched, _, _ = resolve_scope_modules(repo_root, previous_scope, prior_config)
+        prior_bodies = _snapshot_document_bodies(repo_root, paths, prior_head)
+    except (OSError, RuntimeError, ValueError, CalledProcessError) as exc:
+        raise _PriorModuleContextUnavailable(str(exc)) from exc
+
+    newly_touched_modules = sorted(touched - previous_touched)
+    bodies = _snapshot_document_bodies(repo_root, paths, scope.head_sha, snapshot_modes=modes)
+    changed_boundary_docs = sorted(
+        path for path in prior_bodies.keys() | bodies.keys() if prior_bodies.get(path) != bodies.get(path)
+    )
+    if not (newly_touched_modules or changed_boundary_docs):
+        return []
+
+    sections = ["## Updated Module Scope & Boundary Context"]
+    if newly_touched_modules:
+        sections.extend([
+            "Newly touched modules. Inspect each whole module against its latest boundary reference and declared topology below.",
+            *(f"- `{module}`" for module in newly_touched_modules),
+        ])
+    if changed_boundary_docs:
+        sections.extend([
+            "Changed boundary documents. Use the current snapshot references below.",
+            *(f"- `{path}`" for path in changed_boundary_docs),
+        ])
+    if session.merge_base != scope.merge_base and inc_scope is not None:
+        diff = "".join(
+            _resolved_document_diff(path, prior_head, prior_bodies.get(path), scope.head_sha, bodies.get(path))
+            for path in changed_boundary_docs
+            if path not in inc_scope.reviewable_files
+        )
+        if diff:
+            sections.extend(["Boundary diff outside the verified branch delta:", _bounded_document_diff(diff)])
+    return sections
+
+
 def build_incremental_review_prompt(
     repo_root: Path,
     scope: ReviewScope,
@@ -764,6 +838,7 @@ def build_incremental_review_prompt(
     inc_scope: IncrementalReviewScope | None,
     *,
     snapshot_context: _ReviewSnapshotContext | None = None,
+    receipt_contract_changed: bool = False,
     reviewer_note: str = "",
     policy: Policy | None = None,
     config: GuardConfig | None = None,
@@ -776,6 +851,10 @@ def build_incremental_review_prompt(
         )
     config = config or load_config(repo_root, revision=scope.head_sha)
     policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
+    updated_module_context = (
+        _updated_module_context(repo_root, scope, session, inc_scope, config)
+        if receipt_contract_changed else []
+    )
     if snapshot_context is None:
         snapshot_context = _snapshot_context(
             repo_root,
@@ -810,6 +889,7 @@ def build_incremental_review_prompt(
         *_render_prior_findings_section(
             session, scope, inc_scope, reviewer_note=reviewer_note
         ),
+        *updated_module_context,
         *snapshot_context.sections,
         *_render_policy_sections(policy),
     ]
