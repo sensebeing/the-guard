@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,12 +47,13 @@ def build_agy_readonly_settings(common_dir: Path | None = None) -> str:
 
 CONFIG_SCHEMA = "the-guard-agent-config/v1"
 # Bump only for breaking changes to review semantics, prompts, scope, or output schema.
-REVIEW_CONTRACT_VERSION = "v1"
+REVIEW_CONTRACT_VERSION = "v2"
 DEFAULT_HEARTBEAT_SECONDS = 15.0
-DEFAULT_STALL_TIMEOUT_SECONDS = 900.0
-DEFAULT_MAX_RUNAWAY_SECONDS = 3600.0
+DEFAULT_STALL_TIMEOUT_SECONDS = 600.0
+DEFAULT_MAX_RUNAWAY_SECONDS = 1800.0
 POST_EOF_WAIT_TIMEOUT_SECONDS = 15.0
 DEFAULT_INCREMENTAL_DIFF_MAX_CHARS = 24000
+AGY_MAX_ARGV_PROMPT_BYTES = 128_000
 MAX_REVIEWER_NOTE_CHARS = 8000
 CLAUDE_DISALLOWED_TOOLS = "Write,Edit,NotebookEdit,Task,Agent,TodoWrite"
 CLAUDE_ISOLATION_SETTINGS: str = '{"disableAllHooks":true}'
@@ -257,11 +260,20 @@ REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+def build_review_output_schema(allowed_rule_ids: Sequence[str] | None = None) -> dict[str, Any]:
+    schema = deepcopy(REVIEW_OUTPUT_SCHEMA)
+    if allowed_rule_ids:
+        finding = schema["properties"]["blocking_findings"]["items"]
+        finding["properties"]["rule_id"]["enum"] = sorted(set(allowed_rule_ids))
+    return schema
+
+
 def validate_review_output(
     data: object,
     *,
     expected_head_sha: str | None = None,
     allow_implicit_origin: bool = False,
+    allowed_rule_ids: Sequence[str] | None = None,
 ) -> ReviewOutput:
     """Validate the canonical JSON payload accepted by review consumers."""
     if not isinstance(data, dict) or not {"verdict", "summary"} <= data.keys():
@@ -291,12 +303,20 @@ def validate_review_output(
         for key in ("rule_id", "file", "issue", "required_fix"):
             if not isinstance(finding[key], str) or not finding[key].strip():
                 raise ValueError(f"Blocking finding requires nonempty {key}")
+        rule_id = finding["rule_id"]
+        if allowed_rule_ids and rule_id not in allowed_rule_ids:
+            raise ValueError(
+                f"Unknown blocking finding rule_id {rule_id!r}; expected one of: "
+                + ", ".join(sorted(set(allowed_rule_ids)))
+            )
         line = finding["line"]
         if type(line) is not int or line < 1:
             raise ValueError("Blocking finding line must be a positive integer")
         if finding["finding_origin"] not in allowed_origins:
             raise ValueError("Invalid finding_origin")
         parsed_findings.append(BlockingFinding(**finding))
+    if data["verdict"] == "NO-GO" and not parsed_findings:
+        raise ValueError("NO-GO verdict must include at least one blocking finding")
     verdict = "NO-GO" if parsed_findings else data["verdict"]
     return ReviewOutput(verdict, data["summary"], tuple(parsed_findings), reviewed_head_sha)
 
@@ -312,6 +332,8 @@ def verify_reviewed_head_sha(reported: object, expected: str | None) -> str:
         or not expected.lower().startswith(normalized)
     ):
         raise RuntimeError(
-            f"reviewer audited mismatched HEAD snapshot (expected={expected[:12]}, reported={normalized[:12]})"
+            f"reviewer audited mismatched HEAD snapshot (expected={expected}, "
+            f"reported={normalized[:64]}, expected_length={len(expected)}, "
+            f"reported_length={len(normalized)})"
         )
     return normalized

@@ -15,16 +15,17 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .contract import (
+    AGY_MAX_ARGV_PROMPT_BYTES,
     CLAUDE_DISALLOWED_TOOLS,
     CLAUDE_ISOLATION_SETTINGS,
     DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_MAX_RUNAWAY_SECONDS,
     DEFAULT_STALL_TIMEOUT_SECONDS,
     POST_EOF_WAIT_TIMEOUT_SECONDS,
-    REVIEW_OUTPUT_SCHEMA,
     ReviewScope,
     ReviewTimeoutError,
     build_agy_readonly_settings,
+    build_review_output_schema,
     CODEX_DISABLED_FEATURES,
     ReviewOutput,
     validate_review_output,
@@ -668,6 +669,22 @@ def _is_persistent_provider_failure(exc: Exception) -> bool:
     return any(marker in msg for marker in persistent_markers)
 
 
+def _is_transient_provider_failure(exc: Exception) -> bool:
+    if isinstance(exc, ReviewTimeoutError) or _is_persistent_provider_failure(exc):
+        return False
+    message = str(exc).lower()
+    if any(marker in message for marker in (
+        "input_too_large", "prompt is too long", "argument list too long", "exceeds safe argv limit",
+    )):
+        return False
+    return bool(re.search(r"\b(?:429|502|503|529)\b", message)) or any(
+        marker in message for marker in (
+            "at capacity", "rate limit", "stream disconnected", "overloaded",
+            "temporarily unavailable", "connection reset",
+        )
+    )
+
+
 def _build_provider_env(env: dict[str, str]) -> dict[str, str]:
     child_env = {
         **env,
@@ -693,8 +710,17 @@ def _invoke_provider(
     reviewer_note: str = "",
     model: str = "",
     effort: str = "",
+    allowed_rule_ids: Sequence[str] | None = None,
+    contract_change_causes: tuple[str, ...] = (),
 ) -> tuple[ReviewOutput, str, str]:
-    schema_str = json.dumps(REVIEW_OUTPUT_SCHEMA, separators=(",", ":"))
+    if provider == "agy":
+        prompt_bytes = len(prompt.encode("utf-8"))
+        if prompt_bytes > AGY_MAX_ARGV_PROMPT_BYTES:
+            raise RuntimeError(
+                f"agy prompt of {prompt_bytes} UTF-8 bytes exceeds safe argv limit "
+                f"of {AGY_MAX_ARGV_PROMPT_BYTES} bytes"
+            )
+    schema_str = json.dumps(build_review_output_schema(allowed_rule_ids), separators=(",", ":"))
     child_env = _build_provider_env(env)
 
     common_dir = git_common_dir(repo_root)
@@ -714,6 +740,7 @@ def _invoke_provider(
         prev_head_sha=prev_head_sha,
         reviewer_note=reviewer_note,
         full_review_reason=full_review_reason,
+        contract_change_causes=contract_change_causes,
         env=env,
     )
     initial_session_id = (
@@ -746,7 +773,8 @@ def _invoke_provider(
                     f"{provider} exited {rc}: {_provider_failure_detail(out, err)}"
                 )
             verdict_payload = validate_review_output(
-                _extract_verdict_json(out), expected_head_sha=scope.head_sha, allow_implicit_origin=True
+                _extract_verdict_json(out), expected_head_sha=scope.head_sha,
+                allow_implicit_origin=True, allowed_rule_ids=allowed_rule_ids,
             )
             observed_session_id = _extract_session_id_from_stream(out)
             _verify_session_continuation(
@@ -805,7 +833,8 @@ def _invoke_provider(
                 finally:
                     out_file.unlink(missing_ok=True)
                 verdict_payload = validate_review_output(
-                    _extract_verdict_json(raw), expected_head_sha=scope.head_sha, allow_implicit_origin=True
+                    _extract_verdict_json(raw), expected_head_sha=scope.head_sha,
+                    allow_implicit_origin=True, allowed_rule_ids=allowed_rule_ids,
                 )
                 observed_session_id = _extract_session_id_from_stream(out)
                 _verify_session_continuation(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from dataclasses import asdict
@@ -115,7 +116,17 @@ def _run_review(args: argparse.Namespace, root: Path) -> int:
                     "blocking_findings": [],
                     "reviewed_head_sha": scope.head_sha,
                 }
-            output = validate_review_output(data)
+            revision = data.get("reviewed_head_sha") if isinstance(data, dict) else None
+            allowed_rule_ids = None
+            if isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{7,40}", revision.strip()):
+                try:
+                    publish_policy = load_policy(root, revision=revision.strip())
+                except (OSError, ValueError):
+                    # An external review may be published without the target checkout.
+                    pass
+                else:
+                    allowed_rule_ids = tuple(rule.id for rule in publish_policy.rules)
+            output = validate_review_output(data, allowed_rule_ids=allowed_rule_ids)
             receipt = publish_github_pr_review(
                 args.pr, verdict=output.verdict, summary=output.summary,
                 findings=output.blocking_findings, commit_id=output.reviewed_head_sha,

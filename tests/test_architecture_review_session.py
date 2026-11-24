@@ -51,6 +51,15 @@ GATE_CLI = REPO_ROOT / "bin/guard"
 
 
 class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
+    def test_rule_scope_projects_global_paths_and_glob_descendants(self) -> None:
+        applies = session.rule_applies_to_modules
+        self.assertTrue(applies({}, set()))
+        self.assertTrue(applies({"scope_prefixes": []}, set()))
+        self.assertTrue(applies({"scope_prefixes": [""]}, set()))
+        self.assertTrue(applies({"scope_prefixes": ["services/a/"]}, {"services/a/module"}))
+        self.assertTrue(applies({"scope_prefixes": ["services/[ab]/internal/*.py"]}, {"services/a"}))
+        self.assertFalse(applies({"scope_prefixes": ["services/[ab]/internal/*.py"]}, {"services/c"}))
+
     def test_object_only_push_carries_review_from_linked_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -480,7 +489,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             _git(linked, "commit", "-am", "Tighten blueprint")
             tightened = run_architecture_review(linked, reviewer_fn=lambda _: {
                 "verdict": "NO-GO", "summary": "Retirement missing", "blocking_findings": [{
-                    "rule_id": "guard.service-boundaries", "file": "app.py", "line": 1,
+                    "rule_id": "guard.single-source-of-truth", "file": "app.py", "line": 1,
                     "issue": "The old write path remains", "required_fix": "Remove it",
                 }],
             })
@@ -589,14 +598,17 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
         repo, _ = self._init_repo(tmp)
         _git(repo, "switch", "main")
         (repo / ".guard").mkdir()
-        (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": [
-            {"path": "services/a", "role": "feature owner", "dependencies": ["services/b"]},
-            {"path": "services/b", "role": "dependency owner"},
-            {
-                "path": "services/c", "role": "other owner",
-                "dependencies": ["services/a"] if with_downstream else [],
-            },
-        ]}}))
+        (repo / ".guard/config.json").write_text(json.dumps({"topology": {
+            "modules": [
+                {"path": "services/a", "role": "feature owner", "dependencies": ["services/b"]},
+                {"path": "services/b", "role": "dependency owner"},
+                {
+                    "path": "services/c", "role": "other owner",
+                    "dependencies": ["services/a"] if with_downstream else [],
+                },
+            ],
+            "retired_tables": [{"tables": ["c_only"], "scope_prefixes": ["services/c"]}],
+        }}))
         for module in ("a", "b", "c"):
             directory = repo / "services" / module
             directory.mkdir(parents=True)
@@ -658,7 +670,9 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
             self.assertIn("## Updated Module Scope & Boundary Context", prompt)
             self.assertIn("`services/a/CLAUDE.md`", prompt)
-            self.assertIn("## Boundary reference: services/a/CLAUDE.md\na revised boundary", prompt)
+            self.assertIn("See the verified incremental scope", prompt)
+            self.assertNotIn("## Boundary reference: services/a/CLAUDE.md", prompt)
+            self.assertEqual(prompt.count("+a revised boundary"), 1)
             saved = load_review_session(repo)
             self.assertEqual(saved.round_count, 2)
             self.assertTrue(saved.session_contract_digest)
@@ -666,6 +680,96 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertNotEqual(prior.contract_digest, saved.contract_digest)
             receipt = load_valid_receipt(repo, second.patch_digest)
             self.assertEqual(receipt["contract_digest"], saved.contract_digest)
+
+    def test_owned_config_edits_continue_but_neighbour_edits_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, _ = self._start_module_review(Path(td))
+            path = repo / ".guard/config.json"
+            config = json.loads(path.read_text())
+            config["topology"]["modules"][0]["role"] = "updated feature owner"
+            config["topology"]["retired_tables"].append(
+                {"tables": ["obsolete"], "scope_prefixes": ["services/a"]},
+            )
+            path.write_text(json.dumps(config, indent=2))
+            _git(repo, "commit", "-am", "Update the touched owner contract")
+            result = run_architecture_review(repo, env=env)
+            self.assertEqual(result.mode, "incremental")
+            config["topology"]["modules"][1]["role"] = "updated neighbour"
+            path.write_text(json.dumps(config, indent=2))
+            _git(repo, "commit", "-am", "Update a neighbour contract")
+            with redirect_stderr(StringIO()) as stderr:
+                result = run_architecture_review(repo, env=env)
+            self.assertEqual(result.mode, "full")
+            self.assertIn(".guard/config.json", stderr.getvalue())
+            meta = json.loads(Path(result.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual(meta["contract_change_causes"], [".guard/config.json"])
+            entries = (Path(result.log_path).parent / "index.jsonl").read_text().splitlines()
+            self.assertEqual(json.loads(entries[-1])["contract_change_causes"], [".guard/config.json"])
+
+    def test_active_fallback_session_is_sticky_without_changing_global_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, _ = self._start_module_review(Path(td))
+            (repo / "services/a/main.py").write_text("value = 3\n")
+            _git(repo, "commit", "-am", "round 2")
+            with (
+                mock.patch("the_guard.review.engine.resolve_provider_order",
+                           return_value=([("codex", "codex"), ("claude", "claude")], {})),
+                mock.patch("the_guard.review.engine._invoke_provider",
+                           return_value=(ReviewOutput("GO", "ok", (), ""), "module-session", "")) as invoke,
+                mock.patch("the_guard.review.engine.record_working_provider") as remember,
+            ):
+                result = run_architecture_review(repo, env=env)
+            self.assertEqual((result.mode, result.provider), ("incremental", "claude"))
+            self.assertEqual(invoke.call_args.kwargs["resume_session_id"], "module-session")
+            remember.assert_not_called()
+
+    def test_run_index_rotates_atomically_and_retains_four_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env = {"THE_GUARD_REVIEW_LOG_DIR": str(root / "logs")}
+
+            def finish_run() -> Path:
+                logger = ReviewRunLogger(
+                    root, worktree_path=root, branch="topic", provider="codex", mode="full",
+                    merge_base="a" * 40, head_sha="b" * 40, patch_digest="c" * 64,
+                    reviewable_file_count=1, prompt="Snapshot", env=env,
+                )
+                logger.finish(status="completed")
+                return logger.meta_path
+
+            first = finish_run()
+            index = first.parent / "index.jsonl"
+            backup = index.with_name("index.jsonl.1")
+            backup.write_text("old backup")
+            old_index = b"x" * (2 * 1024 * 1024)
+            index.write_bytes(old_index)
+            with mock.patch.object(session, "MAX_RETAINED_RUN_LOGS", 4):
+                recent = [finish_run() for _ in range(5)]
+            self.assertEqual(backup.read_bytes(), old_index)
+            self.assertEqual(len(index.read_text().splitlines()), 5)
+            self.assertEqual(set(first.parent.glob("*.meta.json")), set(recent[-4:]))
+
+    def test_transient_primary_retries_before_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, _ = self._start_module_review(Path(td))
+            sleep = mock.Mock()
+            with (
+                mock.patch("the_guard.review.engine.resolve_provider_order",
+                           return_value=([("codex", "codex"), ("claude", "claude")], {})),
+                mock.patch("the_guard.review.engine._invoke_provider", side_effect=[
+                    RuntimeError("429 at capacity"), RuntimeError("503 overloaded"),
+                    RuntimeError("stream disconnected"), (ReviewOutput("GO", "ok", (), ""), "", ""),
+                ]) as invoke,
+                mock.patch("the_guard.review.engine.record_working_provider") as remember,
+                redirect_stderr(StringIO()) as stderr,
+            ):
+                result = run_architecture_review(repo, env=env, force=True, _sleep_fn=sleep)
+            self.assertEqual(result.provider, "claude")
+            self.assertEqual([call.args[0] for call in invoke.call_args_list],
+                             ["codex", "codex", "codex", "claude"])
+            self.assertEqual(sleep.call_args_list, [mock.call(10.0), mock.call(20.0)])
+            self.assertIn("--force", stderr.getvalue())
+            remember.assert_not_called()
 
     def test_newly_touched_declared_module_resumes_review_with_its_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -679,6 +783,8 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             update = prompt.split("## Updated Module Scope & Boundary Context", 1)[1].split("\n## ", 1)[0]
             self.assertIn("`services/c`", update)
             self.assertNotIn("`services/a`", update)
+            self.assertIn('"role": "other owner"', update)
+            self.assertIn('"c_only"', update)
             self.assertIn("## Boundary reference: services/c/CLAUDE.md\nc original boundary", prompt)
 
     def test_missing_historical_submodule_checkout_falls_back_to_full_review(self) -> None:
@@ -737,35 +843,49 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     self.assertEqual(receipt["head_sha"], second.head_sha)
 
     def test_root_contract_and_legacy_session_changes_force_full_review(self) -> None:
-        for change in ("branch config", "root instructions", "policy detail", "legacy session"):
+        for change in ("branch config", "root instructions", "policy detail", "legacy session", "version"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
                 repo, env, _ = self._start_module_review(Path(td))
-                if change == "legacy session":
+                if change in {"legacy session", "version"}:
                     session_path = next((repo / ".git/the-guard-sessions").glob("*.json"))
                     payload = json.loads(session_path.read_text())
-                    payload.pop("session_contract_digest", None)
+                    if change == "legacy session":
+                        payload.pop("session_contract_digest", None)
+                    else:
+                        payload["session_contract_digest"] = "old-version-digest"
                     session_path.write_text(json.dumps(payload))
                 document, content = {
                     "branch config": (".guard/config.json", "\n"),
                     "root instructions": ("AGENTS.md", "\nClarify architecture responsibilities.\n"),
                     "policy detail": ("docs/standards/rules/single-source-of-truth.md", "\nOne writer.\n"),
                     "legacy session": ("docs/a-owner.md", "\nClarify ownership.\n"),
+                    "version": ("README.md", "\nOperational note.\n"),
                 }[change]
                 path = repo / document
-                path.write_text(path.read_text() + content)
+                if change == "branch config":
+                    config = json.loads(path.read_text())
+                    config["review"] = {"project_title": "New project title"}
+                    path.write_text(json.dumps(config))
+                else:
+                    path.write_text(path.read_text() + content)
                 (repo / "services/a/main.py").write_text("value = 3\n")
                 _git(repo, "commit", "-am", "review contract change")
 
                 second = run_architecture_review(repo, env=env)
                 meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
                 self.assertEqual((second.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+                self.assertEqual(
+                    meta["contract_change_causes"],
+                    ["contract_version_or_legacy" if change == "version" else document],
+                )
                 if change == "branch config":
                     reviewed = load_review_session(repo)
                     path.write_text(path.read_text() + "\n")
+                    (repo / "services/a/main.py").write_text("value = 4\n")
                     _git(repo, "commit", "-am", "edit the already reviewed configuration")
                     third = run_architecture_review(repo, env=env)
                     meta = json.loads(Path(third.log_path.replace(".events.jsonl", ".meta.json")).read_text())
-                    self.assertEqual((third.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+                    self.assertEqual((third.mode, meta["full_review_reason"]), ("incremental", ""))
                     saved = load_review_session(repo)
                     self.assertEqual(saved.contract_digest, reviewed.contract_digest)
                     self.assertEqual(saved.session_contract_digest, reviewed.session_contract_digest)
@@ -820,6 +940,14 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             # An unrelated module's boundary document lands on main and the branch rebases.
             _git(repo, "switch", "main")
             (repo / "services/c/CLAUDE.md").write_text("c boundary tightened\n")
+            config_path = repo / ".guard/config.json"
+            config = json.loads(config_path.read_text())
+            config["topology"].update(
+                retired_tables=[{"tables": ["retired_elsewhere"], "scope_prefixes": ["services/c"]}],
+                forbidden_patterns=[{"literal_or_regex": "never_here", "scope_prefixes": ["services/c*"]}],
+                forbidden_imports=[{"imports": ["elsewhere"], "scope_prefixes": ["services/c"]}],
+            )
+            config_path.write_text(json.dumps(config))
             _git(repo, "commit", "-am", "advance unrelated module contract")
             _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
             _git(repo, "switch", "topic")
@@ -838,6 +966,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 prior.contract_digest,
             )
             self.assertIsNotNone(resolve_or_carry_forward_receipt(repo, rebased))
+            prompt = build_review_prompt(repo, rebased)
+            self.assertNotIn("retired_elsewhere", prompt)
+            self.assertNotIn("never_here", prompt)
+            self.assertNotIn('"elsewhere"', prompt)
 
             (repo / "services/a/main.py").write_text("value = 3\n")
             _git(repo, "commit", "-am", "round 2")
@@ -1151,7 +1283,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "        'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                 "        'summary': 'dead shell remained',\n"
                 "        'blocking_findings': [{\n"
-                "            'rule_id': 'guard.code-organization',\n"
+                "            'rule_id': 'guard.single-source-of-truth',\n"
                 "            'file': 'services/catalog/readers.py',\n"
                 "            'line': 1,\n"
                 "            'issue': 'dead shell read_qualification_obligations',\n"
@@ -1282,7 +1414,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(list(log_dir.glob("deleted-*.meta.json")), [])
             self.assertEqual(len(list(log_dir.glob("*.meta.json"))), 30)
             for idx in range(12):
-                expected = idx >= 4
+                expected = idx >= 8
                 for suffix in (".meta.json", ".prompt.md", ".events.jsonl"):
                     self.assertEqual(
                         (log_dir / f"retention-{idx:03d}{suffix}").exists(), expected
@@ -1329,7 +1461,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     "        'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                     "        'summary': 'legacy shell',\n"
                     "        'blocking_findings': [{\n"
-                    "            'rule_id': 'guard.code-organization',\n"
+                    "            'rule_id': 'guard.single-source-of-truth',\n"
                     "            'file': 'services/catalog/readers.py',\n"
                     "            'line': 1,\n"
                     "            'issue': 'legacy_fn is dead',\n"
@@ -1519,7 +1651,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 "            'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                 "            'summary': 'suspected missing migration',\n"
                 "            'blocking_findings': [{\n"
-                "                'rule_id': 'guard.data-modeling',\n"
+                "                'rule_id': 'guard.single-source-of-truth',\n"
                 "                'file': 'services/catalog/service.py',\n"
                 "                'line': 1,\n"
                 "                'issue': 'thought legacy table still existed',\n"
