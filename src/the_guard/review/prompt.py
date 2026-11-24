@@ -693,12 +693,19 @@ def _render_omitted_blueprints(
     if len(omitted) <= _BULK_ANCHOR_THRESHOLD:
         return heading + json.dumps(omitted, indent=2)
 
-    bulk_deleted = {
+    unchanged_deleted = {
         snapshot.path for snapshot in snapshots
-        if snapshot.head_body is None and snapshot.in_merge_base
-        and snapshot.path not in pinned_paths and omitted.get(snapshot.path) == (scope.merge_base,)
+        if snapshot.path in omitted
+        and snapshot.head_body is None
+        and snapshot.in_merge_base
+        and not snapshot.follows_symlink
         and not snapshot.reviewed_revisions
+        and set(omitted[snapshot.path]).issubset({scope.merge_base, *pinned_paths.get(snapshot.path, ())})
     }
+    unpinned_deleted = unchanged_deleted - pinned_paths.keys()
+    pinned_deleted = unchanged_deleted - unpinned_deleted
+    bulk_pinned = pinned_deleted if len(pinned_deleted) > _BULK_ANCHOR_THRESHOLD else set()
+    bulk_deleted = unpinned_deleted | bulk_pinned
     individual = {path: revisions for path, revisions in omitted.items() if path not in bulk_deleted}
     if not bulk_deleted:
         return heading + json.dumps(individual, indent=2)
@@ -714,6 +721,14 @@ def _render_omitted_blueprints(
         ".guard/config.json, "
         f"and inspect their Anchor 0 bodies and references at {scope.merge_base}.",
     ]
+    prior_revisions = sorted({
+        revision for path in bulk_pinned for revision in omitted[path] if revision != scope.merge_base
+    })
+    if prior_revisions:
+        lines.append(
+            f"For the grouped blueprints, content at recorded prior revisions {', '.join(prior_revisions)} "
+            f"matched their Anchor 0 bodies at {scope.merge_base}."
+        )
     for directory, count in sorted(counts.items()):
         command = _deletion_command(repo_root, scope.merge_base, scope.head_sha, directory, "--name-only")
         lines.append(f"{directory}/: {count} deleted task blueprints. `{command}`")
