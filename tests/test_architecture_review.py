@@ -10,7 +10,7 @@ import fcntl
 import io
 import json
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 import subprocess
 import sys
@@ -55,12 +55,16 @@ from the_guard.review.repository import (
     is_reviewable_path,
     load_valid_receipt,
 )
-from the_guard.review.contract import CODEX_DISABLED_FEATURES, ReviewOutput, verify_reviewed_head_sha
+from the_guard.review.contract import (
+    CODEX_DISABLED_FEATURES, BlockingFinding, ReviewOutput, ReviewTimeoutError, build_review_output_schema,
+    validate_review_output, verify_reviewed_head_sha,
+)
 from the_guard.review.runner import (
     _build_provider_cmd,
     _build_provider_env,
     _invoke_provider,
     _is_persistent_provider_failure,
+    _is_transient_provider_failure,
     _provider_failure_detail,
     _run_streaming_cmd,
     _summarize_stream_line,
@@ -86,9 +90,78 @@ from architecture_review_support import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE_CLI = REPO_ROOT / "bin/guard"
 BLUEPRINT_REVIEW = {"blueprint_globs": ["*.md"]}
+OPEN_WORK = BlockingFinding(
+    "guard.single-source-of-truth", "app.py", 1, "Duplicate owner", "Use the canonical owner",
+)
 
 
 class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
+    def test_output_rule_whitelist_and_nonempty_no_go(self) -> None:
+        allowed = ("peq.owner", "peq.scope", "peq.owner")
+        schema = build_review_output_schema(allowed)
+        rule_schema = schema["properties"]["blocking_findings"]["items"]["properties"]["rule_id"]
+        self.assertEqual(rule_schema["enum"], ["peq.owner", "peq.scope"])
+        self.assertNotIn("enum", build_review_output_schema()["properties"]["blocking_findings"]
+                         ["items"]["properties"]["rule_id"])
+        data = {"verdict": "NO-GO", "summary": "Owner defect", "reviewed_head_sha": "a" * 40,
+                "blocking_findings": []}
+        with self.assertRaisesRegex(ValueError, "at least one blocking finding"):
+            validate_review_output(data, allowed_rule_ids=allowed)
+        data["blocking_findings"].append({
+            "rule_id": "guard.owner", "file": "app.py", "line": 1, "issue": "Duplicate owner",
+            "required_fix": "Use the owner", "finding_origin": "initial_full_scope",
+        })
+        with self.assertRaisesRegex(ValueError, "Unknown blocking finding rule_id"):
+            validate_review_output(data, allowed_rule_ids=allowed)
+        data["blocking_findings"][0]["rule_id"] = "peq.owner"
+        self.assertEqual(validate_review_output(data, allowed_rule_ids=allowed).verdict, "NO-GO")
+
+    def test_provider_failure_classes_and_argv_preflight(self) -> None:
+        for marker in ("429", "at capacity", "rate limit", "stream disconnected", "overloaded",
+                       "temporarily unavailable", "502", "503", "529", "connection reset"):
+            self.assertTrue(_is_transient_provider_failure(RuntimeError(marker)))
+        for marker in ("input_too_large", "prompt is too long", "argument list too long",
+                       "exceeds safe argv limit", "unauthorized"):
+            self.assertFalse(_is_transient_provider_failure(RuntimeError(f"429 {marker}")))
+        self.assertFalse(_is_transient_provider_failure(ReviewTimeoutError("503 timeout")))
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            scope = collect_review_scope(repo)
+            with patch("the_guard.review.runner.subprocess.Popen") as popen:
+                with self.assertRaisesRegex(RuntimeError, "128002.*exceeds safe argv limit.*128000"):
+                    _invoke_provider("agy", "agy", "é" * 64_001, repo, {}, scope=scope)
+                popen.assert_not_called()
+            self.assertFalse(list(repo.glob(".git/**/index.jsonl")))
+
+    def test_sha_mismatch_exposes_suffix_difference_and_lengths(self) -> None:
+        expected = "a" * 39 + "b"
+        with self.assertRaises(RuntimeError) as error:
+            verify_reviewed_head_sha("a" * 70, expected)
+        self.assertIn(expected, str(error.exception))
+        self.assertIn("a" * 64, str(error.exception))
+        self.assertNotIn("a" * 65, str(error.exception))
+        self.assertIn("40", str(error.exception))
+        self.assertIn("70", str(error.exception))
+
+    def test_prompt_names_only_manifest_rules_with_the_configured_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "app.py")
+            _git(repo, "commit", "-m", "Review the application")
+            scope = collect_review_scope(repo)
+            original = load_policy(repo, revision=scope.head_sha)
+            rule = original.rules[0]
+            policy = replace(original, rules=(replace(rule, id="peq.service-boundaries"),))
+            prompt = build_review_prompt(
+                repo, scope, policy=policy, config=GuardConfig(rule_id_prefix="peq."),
+            )
+            self.assertIn("apply `peq.service-boundaries`", prompt)
+            self.assertIn("Allowed rule_id values: peq.service-boundaries.", prompt)
+            for missing in ("guard.service-boundaries", "guard.single-source-of-truth",
+                            "guard.test-case-quality", "peq.test-case-quality"):
+                self.assertNotIn(missing, prompt)
+
     def test_checkout_runtime_provenance_ignores_hook_git_dir(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -363,14 +436,17 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             (repo / "docs/blueprint.md").write_text("DIRTY BLUEPRINT")
             prompts = [build_review_prompt(repo, scope), build_incremental_review_prompt(
                 repo, scope, session, None, reviewer_note="Verify the same committed owner evidence")]
+            full, rebuttal = prompts
+            self.assertIn("## Root architecture & agent instructions: AGENTS.md", full)
+            context = full.split("## Root architecture & agent instructions: AGENTS.md", 1)[1].split("## Architecture blueprint:", 1)[0]
+            self.assertIn("ROOT SINGLE OWNER BLUEPRINT", context)
+            self.assertNotIn("schema: the-guard-policy/v1", context)
+            self.assertNotIn("<!-- the-guard-policy:start -->", context)
+            self.assertIn("DECLARED ARCHITECTURE CONTENT", full)
+            for skipped in ("ROOT SINGLE OWNER BLUEPRINT", "DECLARED ARCHITECTURE CONTENT",
+                            "## Blocking policy", "## Verified incremental scope"):
+                self.assertNotIn(skipped, rebuttal)
             for prompt in prompts:
-                self.assertIn("## Root architecture & agent instructions: AGENTS.md", prompt)
-                # It also occurs in the branch diff, so inspect the context section specifically.
-                context = prompt.split("## Root architecture & agent instructions: AGENTS.md", 1)[1].split("## Architecture blueprint:", 1)[0]
-                self.assertIn("ROOT SINGLE OWNER BLUEPRINT", context)
-                self.assertNotIn("schema: the-guard-policy/v1", context)
-                self.assertNotIn("<!-- the-guard-policy:start -->", context)
-                self.assertIn("DECLARED ARCHITECTURE CONTENT", prompt)
                 self.assertNotIn("DIRTY ROOT PROSE", prompt)
                 self.assertNotIn("DIRTY BLUEPRINT", prompt)
                 self.assertNotIn("## Boundary reference: AGENTS.md", prompt)
@@ -491,9 +567,18 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 )
                 for mode, prompt in zip(("full", "incremental"), prompts):
                     with self.subTest(mode=mode):
-                        self.assertIn(plan_section, prompt)
-                        self.assertIn(anchor_section, prompt)
-                        self.assertLess(prompt.index(anchor_section), prompt.index(plan_section))
+                        if mode == "full":
+                            self.assertIn(plan_section, prompt)
+                            self.assertIn(anchor_section, prompt)
+                            self.assertLess(prompt.index(anchor_section), prompt.index(plan_section))
+                        else:
+                            self.assertIn(f"`{plan}` @ {session.initial_head_sha}", prompt)
+                            self.assertNotIn(plan_body, prompt)
+                            if source == "note":
+                                self.assertIn("Committed Anchor-0 audit", prompt)
+                            else:
+                                self.assertIn(f"`{anchor}` @ {scope.merge_base}", prompt)
+                                self.assertNotIn("Committed Anchor-0 audit", prompt)
                         self.assertNotIn("DIRTY PLAN", prompt)
                         self.assertNotIn("DIRTY ANCHOR", prompt)
                         self.assertIn(
@@ -592,7 +677,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
     def test_first_reviewed_blueprint_survives_later_rounds_and_provider_restarts(self):
         plan = "docs/consolidation-plan.md"
-        no_go = ReviewOutput("NO-GO", "Outbox still live", (), "")
+        no_go = ReviewOutput("NO-GO", "Outbox still live", (OPEN_WORK,), "")
         for change in ("incremental", "force", "provider", "contract", "delete"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
                 repo, _ = self._init_repo(Path(td), review=BLUEPRINT_REVIEW)
@@ -649,17 +734,22 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     if change == "delete":
                         self.assertNotIn(plan, collect_review_scope(repo).changed_files)
 
-                for prompt in (second_prompt, third_prompt):
+                if expected_mode == "full":
                     self.assertIn(
                         "## Prior reviewed branch blueprint (@ "
                         f"{first.head_sha[:12]}): {plan}\nRetire the outbox.",
-                        prompt,
+                        second_prompt,
                     )
-                    self.assertIn(
-                        "[DELETED AT HEAD]" if change == "delete" else
-                        "-Retire the outbox.\n+Defer outbox retirement.",
-                        prompt,
-                    )
+                else:
+                    self.assertNotIn("## Prior reviewed branch blueprint", second_prompt)
+                self.assertIn(
+                    "[DELETED AT HEAD]" if change == "delete" else
+                    "-Retire the outbox.\n+Defer outbox retirement.",
+                    second_prompt,
+                )
+                self.assertIn(f"`{plan}` @ {first.head_sha}", third_prompt)
+                self.assertNotIn("Retire the outbox.", third_prompt)
+                self.assertNotIn("[DELETED AT HEAD]", third_prompt)
 
     def test_later_reviewed_blueprints_survive_classification_changes_and_deletion(self):
         plan = "docs/consolidation-plan.md"
@@ -677,7 +767,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
                 def reviewer(prompt):
                     prompts.append(prompt)
-                    return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": []}
+                    return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": [asdict(OPEN_WORK)]}
 
                 (repo / "app.py").write_text("value = 1\n")
                 _git(repo, "add", "app.py")
@@ -735,7 +825,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
             def reviewer(prompt):
                 prompts.append(prompt)
-                return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": []}
+                return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": [asdict(OPEN_WORK)]}
 
             (repo / merged_plan).write_text(original + "Begin consolidation.\n")
             (repo / branch_plan).write_text(original)
@@ -1069,7 +1159,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertIn("-Retire the outbox.\n+Defer outbox retirement.", prompt)
 
             def reviewer(_):
-                return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": []}
+                return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": [asdict(OPEN_WORK)]}
 
             second = run_architecture_review(repo, reviewer_fn=reviewer)
             (repo / "docs/task-plan.md").unlink()
@@ -1145,12 +1235,12 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                             "`git show <target-sha>:<path>`", "`git grep <pattern> <target-sha> -- <module>`",
                             "schema and migrations", "writers", "lifecycle transitions", "readers",
                             "outside the changed lines", "immutable Anchor 0", "prior reviewed branch blueprints",
-                            "Blocking policy below",
+                            "Blocking policy.",
                         ):
                             self.assertIn(evidence, section)
                         policy_heading = "### guard.architecture-simplicity [backend]\n"
                         before_rule, separator, rule_and_rest = prompt.partition(policy_heading)
-                        if configured:
+                        if configured and mode == "full":
                             self.assertEqual(separator, policy_heading)
                             self.assertIn("## Blocking policy", before_rule)
                             rule_body = preset.split("\n---\n", 1)[1].strip()
@@ -1159,6 +1249,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                                 self.assertIn(obligation, rule_body)
                         else:
                             self.assertFalse(separator)
+                            if mode == "incremental":
+                                self.assertNotIn("## Blocking policy", prompt)
                         outside_rule = " ".join(before_rule.split()).replace("Anchor-0", "Anchor 0").replace("`", "")
                         for obligation in (*obligations, "block surviving dual persistence"):
                             self.assertNotIn(
@@ -1780,6 +1872,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             recent = homes_root / "recent"
             for home in (keep, active, stale, recent):
                 home.mkdir()
+                (home / "tmp").mkdir()
+                (home / "tmp/extracted").write_text("temporary")
+                (home / "sessions").mkdir()
 
             with (active / ".review.lock").open("w") as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -1792,8 +1887,11 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
                 self.assertFalse(stale.exists())
                 self.assertTrue((active / ".review.lock").is_file())
+                self.assertTrue((active / "tmp/extracted").is_file())
                 self.assertTrue(keep.is_dir())
                 self.assertTrue(recent.is_dir())
+                self.assertFalse((recent / "tmp").exists())
+                self.assertTrue((recent / "sessions").is_dir())
 
             _prune_isolated_codex_homes(homes_root, keep.name, now=now)
             self.assertFalse(active.exists())
@@ -1883,10 +1981,17 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             )
             def materialize(env):
                 with isolated_codex_home(common_dir, worktree_path=tmp / "worktree", branch="main", env=env) as home:
+                    (home / "tmp").mkdir()
+                    (home / "tmp/extracted").write_text("temporary")
+                    (home / "sessions").mkdir(exist_ok=True)
+                    (home / "state.sqlite").write_text("persistent")
                     return home
 
             target = materialize({"CODEX_HOME": str(src_home)})
             self.assertEqual(target.parent, common_dir / "the-guard-codex-homes")
+            self.assertFalse((target / "tmp").exists())
+            self.assertTrue((target / "sessions").is_dir())
+            self.assertTrue((target / "state.sqlite").is_file())
             other_source = tmp / "other-codex"
             other_source.mkdir()
             (other_source / "auth.json").write_text("other", encoding="utf-8")
@@ -2107,7 +2212,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     "summary": "read path lock",
                     "blocking_findings": [
                         {
-                            "rule_id": "guard.database-query-efficiency",
+                            "rule_id": "guard.single-source-of-truth",
                             "file": "services/catalog/app.py",
                             "line": 1,
                             "issue": "lock in GET",
@@ -2214,7 +2319,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "        'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'verdict': 'NO-GO',\n"
                 "        'summary': 'duplicate query in handler',\n"
                 "        'blocking_findings': [{\n"
-                "            'rule_id': 'guard.database-query-efficiency',\n"
+                "            'rule_id': 'guard.single-source-of-truth',\n"
                 "            'file': 'services/b/handler.py',\n"
                 "            'line': 1,\n"
                 "            'issue': 'dup read',\n"
@@ -2724,7 +2829,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             repo, _ = self._init_repo(Path(td))
             (repo / "services/a").mkdir(parents=True)
             (repo / "services/b").mkdir(parents=True)
-            (repo / "docs/architecture.md").write_text("SNAPSHOT ARCHITECTURE\n" + "x" * 25_000)
+            (repo / "docs/architecture.md").write_text("# SNAPSHOT ARCHITECTURE\n" + "x" * 25_000)
             (repo / "services/a/README.md").write_text("A OWNER")
             (repo / "services/b/README.md").write_text("B OWNER")
             config = {"topology": {"layers": {"core": [], "plugin": ["core"]}, "modules": [
@@ -2754,8 +2859,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(prompt.count("## Root architecture & agent instructions: AGENTS.md"), 1)
             self.assertEqual(prompt.count("## Boundary reference: services/a/README.md"), 1)
             self.assertNotIn("## Boundary reference: services/b/README.md", prompt)
-            self.assertIn("... [truncated]", prompt)
-            self.assertNotIn("x" * 24_001, prompt)
+            self.assertIn(f"git show {scope.head_sha}:docs/architecture.md", prompt)
+            self.assertIn("1: # SNAPSHOT ARCHITECTURE", prompt)
+            self.assertNotIn("x" * 100, prompt)
             self.assertIn("## Architectural & Layer Boundary Integrity", prompt)
             self.assertNotIn("## Unbound Module Topology Guidance", prompt)
 

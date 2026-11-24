@@ -38,7 +38,7 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   and publication. `repository` owns Git scope, patch identity, receipt carry-forward and
   fsmonitor-isolated snapshot Git calls. `documents` owns review document inventory and binding
   blueprint selection, batching regular-file reads and following safe snapshot symlinks.
-  `session` owns local evidence persistence.
+  `session` owns scoped contract hashes, rule scope projection and local evidence persistence.
   `provider` owns CLI discovery and configuration. `runner` owns process execution, stdin prompt
   delivery and provider stream decoding. `prompt` owns snapshot-bound instructions and groups
   bulk deletions into directory inspection commands while listing active files and pinned anchors.
@@ -48,15 +48,16 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   `GIT_DIR` using the list from `git_helpers`. It finds `guard` on `PATH` or falls back to
   `~/.local/bin/guard` and passes the complete ref update stream.
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports to the checkout, then reloads the Git helpers and updater in dependency order. The original package remains the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
-- Review sessions retain the first reviewed head and binding task blueprint revisions.
+- Review Contract `v2` retains the first reviewed head and binding task blueprint revisions.
   Receipt reuse and carry-forward require the scoped `contract_digest`, which covers
   `REVIEW_CONTRACT_VERSION`, repository configuration, policy rules, root instructions,
   architecture documents, touched-module boundary documents and touched and one-hop module
   declarations. Routine upgrades preserve `GO` receipts when the version and scoped contract
-  match. Session continuation checks the versioned root `session_contract_digest`, edits to
-  branch-touched `.guard/config.json` since the last reviewed head, and the structure of touched
-  modules and one-hop neighbours across a rebase. Incremental prompts supply updated boundary
-  documents and context for newly touched modules. Sessions saved before the root digest was
+  match. Scoped retired-table, forbidden-pattern and forbidden-import rules affect receipts for
+  the applicable modules. The session digest covers global rules and root contracts. Branch
+  configuration edits can resume when the changed declarations and scoped rules belong to
+  currently or previously touched modules. A rebase also checks touched modules and one-hop
+  neighbours. Sessions saved before the root digest was
   introduced require an exact scoped digest match to continue. A full review retains binding
   blueprint revisions for a valid branch baseline.
 
@@ -73,30 +74,35 @@ entry discovered in `.codex/config.toml` layers up to the active worktree's Git 
 literal names that contain dots. The isolated Codex home omits user MCP configuration, and a
 linked worktree uses its own project configuration layers.
 
-Iterative fix-and-re-review rounds rerun plain `guard review`; the stored session resumes
-incrementally. `--force` is reserved for discarding a corrupted session or an explicit cold
-re-audit and is recorded as that run's `full_review_reason`. Provider prompts reach Claude over
-standard input, so prompts are not bounded by the OS argv limit that raised `E2BIG` near 1 MB;
-`agy -p` requires its prompt as the flag value, and `codex exec` already read the prompt from
-standard input. Every `repository` snapshot Git call injects `-c core.fsmonitor=false`, so a
-wedged or cross-version worktree `fsmonitor--daemon` cannot stall review. Full runs record the
+Iterative fix-and-re-review rounds rerun plain `guard review`. An eligible incremental review
+prefers its current session provider and preserves the global engine preference. Transient
+failures retry twice with 10- and 20-second backoff before failover. The retry count (up to three)
+and backoff are configurable through `THE_GUARD_REVIEW_TRANSIENT_RETRIES` and
+`THE_GUARD_REVIEW_RETRY_BACKOFF_SECONDS`. The default stall and runaway limits are 600 and 1800
+seconds. `--force` starts a full review and prints a warning when it bypasses reusable evidence.
+Claude and Codex receive prompts on stdin. Agy receives its prompt as an argument and rejects
+inputs over 128,000 UTF-8 bytes before launching. Every `repository` snapshot Git call injects
+`-c core.fsmonitor=false`, so a wedged worktree fsmonitor cannot stall review. Full runs record the
 objective cause in bounded run metadata as `full_review_reason`: `force`, `no_prior_session`,
 `contract_changed`, `no_incremental_delta`, `provider_changed`, `missing_session_id` or
-`resume_failed`; incremental runs record an empty value. The field is observational only and
-does not change receipt, carry-forward or invalidation semantics.
+`resume_failed`. Contract invalidation also records up to five changed contract paths in
+`contract_change_causes`. Log retention protects the four most recent runs per active worktree
+alongside the global target of 30 runs. `index.jsonl` rotates at 2 MiB with a single backup.
+Isolated Codex homes remove `tmp/` and retain active session data.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
 Discovery reports observed structure; it never grants ownership or changes declared constraints.
 Review reads committed snapshots. Only the local workflow writes receipts, logs and configuration.
 
-Review prompts retain the complete module/layer map and load declared boundary documents for
-touched modules from the reviewed snapshot (24,000 characters per document). Legacy adapter
-coupling never authorizes introducing or deepening a declared core boundary violation.
-
-`guard review` always loads root manifest prose (without its policy YAML), declared
-`architecture_docs`, and existing `ARCHITECTURE.md` / `docs/architecture.md` from the
-reviewed commit. Full, batched and incremental reviews map changes to these contracts
-before examining hunks. Missing boundary declarations do not count as loaded evidence.
+Full prompts read the committed root manifest prose, architecture blueprints and touched
+module boundaries. Root instructions, root `ARCHITECTURE.md` and touched module
+`AGENTS.md` / `CLAUDE.md` have priority with a 48,000-character per-file limit. Other reference
+documents have a 24,000-character limit. The document section has a 180,000-character budget.
+Oversized documents use a heading index with line numbers and a snapshot read command.
+Incremental prompts send prior findings, rebuttal evidence, the verified change, and new or
+changed boundary and blueprint context. An unchanged-head rebuttal uses the session history.
+The manifest supplies the allowed finding IDs for prompts, output schemas and verdict validation.
+A `NO-GO` verdict requires at least one blocking finding.
 
 `review.blueprint_globs` defaults to an empty array. When configured, `review/documents` selects
 matching Markdown blueprints and discovers matching one-hop references from Markdown changed in the branch, reading

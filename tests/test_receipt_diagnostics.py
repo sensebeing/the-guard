@@ -14,7 +14,7 @@ from the_guard.hooks import main_push_gate
 from the_guard.policy import load_policy
 from the_guard.review import session
 from the_guard.review.cli import main as review_main
-from the_guard.review.contract import ReviewScope
+from the_guard.review.contract import REVIEW_CONTRACT_VERSION, ReviewScope
 from the_guard.review.engine import run_architecture_review
 from the_guard.review.repository import (
     collect_review_scope,
@@ -96,12 +96,12 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
             cases = (
                 ("legacy accepted", legacy, 0, ()),
                 ("same version and contract", {
-                    **receipt, "review_contract_version": "v1",
+                    **receipt, "review_contract_version": REVIEW_CONTRACT_VERSION,
                     "guard_tree_digest": old_tree, "guard_sha": different_sha,
                 }, 0, ()),
                 ("absent", None, 2, ("missing review receipt for pushed range", scope.patch_digest[:12])),
                 ("same version and changed contract", {
-                    **receipt, "review_contract_version": "v1", "contract_digest": old_contract,
+                    **receipt, "review_contract_version": REVIEW_CONTRACT_VERSION, "contract_digest": old_contract,
                     "guard_tree_digest": old_tree, "guard_sha": different_sha,
                 }, 2, (
                     "review contract changed", old_contract[:12], contract[:12],
@@ -111,7 +111,7 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
                     **receipt, "review_contract_version": "v0", "contract_digest": old_contract,
                     "guard_package_dir": old_path,
                 }, 2, (
-                    "runtime mismatch", "review_contract_version=v0", "review_contract_version=v1",
+                    "runtime mismatch", "review_contract_version=v0", f"review_contract_version={REVIEW_CONTRACT_VERSION}",
                     old_path, str(package_dir), "guard self-update", "guard review",
                 )),
                 ("legacy runtime tree drift", {
@@ -164,7 +164,7 @@ class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
                         self.assertIn("VERIFIED", cli_stdout.getvalue())
                     if "review contract changed" in expected:
                         self.assertNotIn("runtime mismatch", cli_stderr.getvalue())
-            self.assertEqual(receipt.get("review_contract_version"), "v1")
+            self.assertEqual(receipt.get("review_contract_version"), REVIEW_CONTRACT_VERSION)
 
     def test_runtime_sha_uses_only_matching_update_metadata(self) -> None:
         with TemporaryDirectory() as tmp:

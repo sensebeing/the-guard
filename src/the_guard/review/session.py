@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath
 from typing import IO, Any
 
 from ..auto_update import (
@@ -38,10 +40,12 @@ SESSION_SCHEMA = "the-guard-session/v1"
 LOG_META_SCHEMA = "the-guard-log-meta/v1"
 UTC = timezone.utc
 MAX_RETAINED_RUN_LOGS = 30
-MAX_RETAINED_LOGS_PER_WORKTREE = 8
+MAX_RETAINED_LOGS_PER_WORKTREE = 4
+MAX_INDEX_LOG_BYTES = 2 * 1024 * 1024
 MAX_RETAINED_SESSIONS = 12
 MAX_RETAINED_RECEIPTS = 200
 _LOGGER = logging.getLogger(__name__)
+_SCOPED_RULE_KEYS = ("retired_tables", "forbidden_patterns", "forbidden_imports")
 
 
 def _snapshot_document_bodies(
@@ -69,6 +73,65 @@ def _snapshot_document_bodies(
     return documents
 
 
+def rule_applies_to_modules(rule: Mapping[str, Any], modules: Collection[str]) -> bool:
+    prefixes = tuple(prefix.rstrip("/") for prefix in rule.get("scope_prefixes", ()))
+    return not prefixes or "" in prefixes or any(
+        _scope_overlaps_module(prefix, module) for prefix in prefixes for module in modules
+    )
+
+
+def _scope_overlaps_module(prefix: str, module: str) -> bool:
+    if module == prefix or module.startswith(prefix + "/") or prefix.startswith(module + "/"):
+        return True
+    if not any(character in prefix for character in "*?["):
+        return False
+    # A glob can name a descendant of the module or match one of its ancestors.
+    return (
+        fnmatchcase(module, prefix)
+        or any(fnmatchcase(str(parent), prefix) for parent in PurePosixPath(module).parents)
+        or any(fnmatchcase(module, str(parent)) for parent in PurePosixPath(prefix).parents)
+    )
+
+
+def _rule_entries(topology: Mapping[str, Any], key: str) -> Collection[dict[str, Any]]:
+    entries = topology.get(key, ())
+    return (entries,) if isinstance(entries, dict) else entries
+
+
+def scoped_topology_rules(
+    topology: Mapping[str, Any], modules: Collection[str],
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        key: [rule for rule in _rule_entries(topology, key) if rule_applies_to_modules(rule, modules)]
+        for key in _SCOPED_RULE_KEYS
+    }
+
+
+def config_changes_outside_modules(
+    prior: GuardConfig, current: GuardConfig, owned: set[str],
+) -> bool:
+    def outside_projection(config: GuardConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+        topology = config.topology
+        outside = {
+            module["path"]: module for module in topology.get("modules", [])
+            if module["path"] not in owned
+        }
+
+        def is_owned(rule: Mapping[str, Any]) -> bool:
+            prefixes = rule.get("scope_prefixes", ())
+            return bool(prefixes) and not rule_applies_to_modules(rule, outside.keys()) and all(
+                rule_applies_to_modules({"scope_prefixes": (prefix,)}, owned) for prefix in prefixes
+            )
+
+        rules = {
+            key: [rule for rule in _rule_entries(topology, key) if not is_owned(rule)]
+            for key in _SCOPED_RULE_KEYS
+        }
+        return outside, rules
+
+    return outside_projection(prior) != outside_projection(current)
+
+
 def _scoped_config_payload(
     config: GuardConfig,
     scope: ReviewScope,
@@ -89,6 +152,8 @@ def _scoped_config_payload(
             for module in modules
         ]
         return payload
+
+    topology.update(scoped_topology_rules(topology, touched))
 
     def neighbour_projection(module_path: str) -> dict[str, Any]:
         declared = declared_modules.get(module_path)
@@ -194,6 +259,7 @@ def compute_session_contract_digest(
     """Hash the review contract version and root contract for provider session continuation."""
     config_payload = asdict(config)
     config_payload["topology"].pop("modules", None)
+    config_payload["topology"].update(scoped_topology_rules(config_payload["topology"], ()))
     documents = _snapshot_document_bodies(
         repo_root, architecture_document_paths(config), revision
     )
@@ -541,6 +607,7 @@ class ReviewRunLogger:
         prev_head_sha: str | None = None,
         reviewer_note: str = "",
         full_review_reason: str = "",
+        contract_change_causes: tuple[str, ...] = (),
         env: dict[str, str] | None = None,
     ) -> None:
         self.worktree = str(worktree_path.resolve())
@@ -556,10 +623,11 @@ class ReviewRunLogger:
         self.prev_head_sha = prev_head_sha or ""
         self.reviewer_note = reviewer_note.strip()
         self.full_review_reason = full_review_reason
+        self.contract_change_causes = contract_change_causes
         self.started_at = datetime.now(UTC).isoformat()
         self._start_mono = time.monotonic()
 
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
         self.run_id = (
             f"{ts}-{os.getpid()}-{head_sha[:10]}-{patch_digest[:8]}-{provider}-{mode}"
         )
@@ -649,9 +717,14 @@ class ReviewRunLogger:
         )
         try:
             index_path = self.log_dir / "index.jsonl"
-            with index_path.open("a", encoding="utf-8") as fp:
-                fp.write(json.dumps(meta, ensure_ascii=False) + "\n")
-            self._prune_old_runs()
+            with index_path.with_suffix(".lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                with suppress(FileNotFoundError):
+                    if index_path.stat().st_size >= MAX_INDEX_LOG_BYTES:
+                        os.replace(index_path, index_path.with_name("index.jsonl.1"))
+                with index_path.open("a", encoding="utf-8") as fp:
+                    fp.write(json.dumps(meta, ensure_ascii=False) + "\n")
+                self._prune_old_runs()
         except OSError:
             pass
         return self.events_path
@@ -744,6 +817,8 @@ class ReviewRunLogger:
             "events_file": str(self.events_path),
             "meta_file": str(self.meta_path),
         }
+        if self.contract_change_causes:
+            payload["contract_change_causes"] = list(self.contract_change_causes)
         try:
             serialized = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
             self.meta_path.write_text(serialized, encoding="utf-8")

@@ -268,6 +268,7 @@ class TaskBlueprintSnapshot:
     follows_symlink: bool = False
     in_merge_base: bool = False
     reviewed_revisions: tuple[tuple[str, str], ...] = ()
+    prior_body: str | None = None
 
     @property
     def has_modifications(self) -> bool:
@@ -373,6 +374,7 @@ def resolve_task_design_blueprints(
         commit for commit in verified_revisions.values() if commit != base_sha
     )
     initial_commit = verified_revisions.get(initial_reviewed_sha)
+    prior_commit = verified_revisions.get(prior_reviewed_sha)
 
     excluded_set = set(excluded_paths)
     excluded = operational_ledgers | (excluded_set - anchors.keys())
@@ -452,12 +454,13 @@ def resolve_task_design_blueprints(
                     follows_symlink=any(
                         modes_by_revision[rev].get(path) == "120000"
                         for rev in (
-                            baseline_sha, *(rev for rev, _ in reviewed_revisions), head_sha,
+                            baseline_sha, *(rev for rev, _ in reviewed_revisions), prior_commit, head_sha,
                         )
                         if rev is not None
                     ),
                     in_merge_base=baseline_sha is not None and baseline_sha == base_sha,
                     reviewed_revisions=tuple(reviewed_revisions),
+                    prior_body=read_body(path, prior_commit) if prior_commit is not None else None,
                 )
             )
         return snapshots

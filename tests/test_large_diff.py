@@ -13,11 +13,16 @@ from architecture_review_support import ArchitectureReviewTestCase, _git
 from the_guard import git_helpers
 from the_guard.config import load_config
 from the_guard.review.documents import resolve_task_design_blueprints
-from the_guard.review.prompt import _render_scope_manifest_section, build_review_prompt
+from the_guard.review.prompt import (
+    _render_scope_manifest_section, build_incremental_review_prompt, build_review_prompt,
+)
+from the_guard.review.engine import run_architecture_review
 from the_guard.review.repository import (
     _collect_branch_delta,
     _session_landed_in_merge_base,
     collect_review_scope,
+    collect_incremental_scope,
+    load_review_session,
 )
 from the_guard.review.session import ReviewSessionState
 from the_guard.topology import check_contract_drift, run_topology_guard
@@ -51,6 +56,59 @@ class LargeDiffTests(ArchitectureReviewTestCase):
             return real_run(args, *rest, **kwargs)
 
         return patch("subprocess.run", new=record)
+
+    def test_full_budget_keeps_owner_body_and_indexes_secondary_only_once(self):
+        self.write(".guard/config.json", json.dumps({"topology": {"modules": [
+            {"path": "service", "role": "owner", "boundary_docs": ["docs/large.md"]},
+        ]}}).encode())
+        self.write("service/AGENTS.md", b"# Owner\n" + b"A" * 42_000 + b"\nOWNER END\n")
+        self.write("docs/large.md", b"# Reference\n" + b"B" * 33_000 + b"\n## Late section\n")
+        self.commit("Declare large boundary documents")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.write("service/app.py", b"value = 1\n")
+        head = self.commit("Review the owner")
+        scope = collect_review_scope(self.repo)
+        full = build_review_prompt(self.repo, scope)
+        assert "OWNER END" in full
+        assert "B" * 100 not in full
+        assert "3: ## Late section" in full
+        assert f"git show {head}:docs/large.md" in full
+
+        run_architecture_review(self.repo, reviewer_fn=lambda _: {
+            "verdict": "GO", "summary": "Reviewed owner", "blocking_findings": [],
+        })
+        session = load_review_session(self.repo)
+        self.write("service/app.py", b"value = 2\n")
+        self.commit("Refine the owner")
+        scope = collect_review_scope(self.repo)
+        delta = collect_incremental_scope(self.repo, scope, session)
+        incremental = build_incremental_review_prompt(self.repo, scope, session, delta)
+        assert "## Blocking policy" not in incremental
+        assert "## Boundary reference" not in incremental
+        assert "## Declared topology" not in incremental
+        assert "## Session Context Continuity Note" in incremental
+        assert len(incremental) < len(full) * 0.2
+
+    def test_snapshot_budget_indexes_documents_after_primary_bodies(self):
+        self.write("ARCHITECTURE.md", b"# Architecture\n" + b"P" * 42_000)
+        modules = [{"path": f"service{index}", "role": "owner"} for index in range(5)]
+        self.write(".guard/config.json", json.dumps({"topology": {"modules": modules}}).encode())
+        for module in modules:
+            path = module["path"]
+            self.write(f"{path}/AGENTS.md", f"# {path}\n".encode() + b"A" * 42_000 + b"\nOWNER END\n")
+            self.write(f"{path}/README.md", b"# Reference\n" + b"R" * 20_000)
+        self.commit("Declare owners and reference documents")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        for module in modules:
+            self.write(f"{module['path']}/app.py", b"value = 1\n")
+        head = self.commit("Review all owners")
+        prompt = build_review_prompt(self.repo, collect_review_scope(self.repo))
+        documents = prompt.split("## Root architecture & agent instructions", 1)[1].split("## Blocking policy", 1)[0]
+        assert len(documents) <= 180_000
+        assert documents.count("OWNER END") == 3
+        assert "P" * 42_000 in documents
+        assert f"git show {head}:service4/AGENTS.md" in documents
+        assert f"git show {head}:service0/README.md" in documents
 
     def test_batch_reader_reuses_tree_across_preloads(self):
         reader = git_helpers.BaseFileReader(self.repo, "HEAD", exact=True)

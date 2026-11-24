@@ -17,12 +17,19 @@ full review. Routine fixes and automatic upgrades preserve existing `GO` receipt
 version and scoped repository contract match.
 Updater state and reviewer discovery default to `~/.config/the-guard`. The updater migrates
 legacy metadata on first default-path use and retains one rotated 512 KiB log backup.
-Review prompts reach `claude` over standard input so prompt size is not bounded by the OS argv
-limit (`agy -p` requires its prompt as the flag value). Snapshot Git reads run with
+Review Contract `v2` sends the verified delta, prior findings and changed boundary or blueprint
+context when resuming. Full prompts prioritize owner documents and use heading indexes with
+committed read commands for oversized documents. Findings use manifest rule IDs, and a
+`NO-GO` verdict requires a concrete blocking finding.
+
+An eligible session resumes with its existing provider. Transient provider failures retry with
+bounded backoff before failover. Claude reads prompts on stdin. Agy checks the prompt against
+its argument size limit before launching. Snapshot Git reads run with
 `-c core.fsmonitor=false`, so a wedged or cross-version worktree fsmonitor daemon cannot stall
 them. Each run's `.meta.json` and `index.jsonl` record `full_review_reason` when the run is full:
 `force`, `no_prior_session`, `contract_changed`, `no_incremental_delta`, `provider_changed`,
-`missing_session_id` or `resume_failed`; incremental runs record an empty value.
+`missing_session_id` or `resume_failed`. Contract invalidation records `contract_change_causes`.
+`index.jsonl` rotates at 2 MiB, and isolated Codex homes clear `tmp/` while retaining sessions.
 
 ## Daily loop
 
@@ -55,7 +62,8 @@ Read the full module/layer map and each touched module's `role`, `dependencies` 
 legacy coupling exists. Owners may be directories or single files. Keep their declarations and
 boundary docs synchronized with responsibility changes. Review reads root agent instructions,
 `topology.architecture_docs` and detected root blueprints from the committed snapshot, alongside
-touched boundaries; changes to these documents invalidate prior evidence.
+touched boundaries. Root contract changes require a full review. Changes to a touched module's
+boundary can resume with updated evidence.
 Task blueprint discovery runs when `review.blueprint_globs` is configured. It selects matching
 Markdown paths and excludes `review.operational_ledgers`, which defaults to `["CHANGELOG.md"]`.
 Branch-wide `guard check` / `guard topology check` block newly broken document declarations and

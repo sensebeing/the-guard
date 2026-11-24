@@ -169,11 +169,10 @@ def _prune_isolated_codex_homes(
             reverse=True,
         )
         for index, (mtime, item) in enumerate(dirs):
-            if (
-                index < MAX_RETAINED_SESSIONS - 1
-                and current_time - mtime <= ISOLATED_CODEX_HOME_MAX_AGE_SECONDS
-            ):
-                continue
+            expired = (
+                index >= MAX_RETAINED_SESSIONS - 1
+                or current_time - mtime > ISOLATED_CODEX_HOME_MAX_AGE_SECONDS
+            )
             lock_path = item / ".review.lock"
             try:
                 lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
@@ -184,7 +183,12 @@ def _prune_isolated_codex_homes(
                     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     continue
-                shutil.rmtree(item, ignore_errors=True)
+                if expired:
+                    shutil.rmtree(item, ignore_errors=True)
+                elif (item / "tmp").is_dir():
+                    shutil.rmtree(item / "tmp", ignore_errors=True)
+                    with contextlib.suppress(OSError):
+                        os.utime(item, (item.stat().st_atime, mtime))
             finally:
                 os.close(lock_fd)
     finally:
@@ -228,6 +232,7 @@ def isolated_codex_home(
     gc_path = homes_root / ".gc.lock"
     gc_fd = os.open(gc_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
     review_fd: int | None = None
+    review_locked = False
     try:
         fcntl.flock(gc_fd, fcntl.LOCK_EX)
         target_home = homes_root / codex_isolation_scope_key(worktree_path, branch, env)
@@ -242,6 +247,7 @@ def isolated_codex_home(
         _prune_isolated_codex_homes(homes_root, keep_name=target_home.name, gc_fd=gc_fd)
         fcntl.flock(gc_fd, fcntl.LOCK_UN)
         fcntl.flock(review_fd, fcntl.LOCK_EX)
+        review_locked = True
         if not target_home.is_dir():
             raise RuntimeError("Codex isolation home was pruned while acquiring its lock")
         source_home = codex_home_dir(env)
@@ -306,7 +312,9 @@ def isolated_codex_home(
         yield target_home
     finally:
         if review_fd is not None:
-            fcntl.flock(review_fd, fcntl.LOCK_UN)
+            if review_locked:
+                shutil.rmtree(target_home / "tmp", ignore_errors=True)
+                fcntl.flock(review_fd, fcntl.LOCK_UN)
             os.close(review_fd)
         try:
             fcntl.flock(gc_fd, fcntl.LOCK_UN)

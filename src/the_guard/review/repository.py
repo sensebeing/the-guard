@@ -727,6 +727,33 @@ def collect_incremental_scope(
     return delta if (delta is not None and delta.has_changes) else None
 
 
+def previous_review_scope(
+    repo_root: Path, session: ReviewSessionState,
+) -> tuple[ReviewScope, GuardConfig]:
+    revision = session.last_head_sha
+    config = load_config(repo_root, revision=revision, allow_historical=True)
+    scope = collect_review_scope(
+        repo_root, main_branch=session.merge_base, head_ref=revision, config=config,
+    )
+    return scope, config
+
+
+def contract_change_causes(
+    repo_root: Path, scope: ReviewScope, prior_head: str, config: GuardConfig, policy: Policy,
+) -> tuple[str, ...]:
+    paths = resolved_document_paths(
+        repo_root, scope.head_sha, contract_document_paths(config) | {rule.details for rule in policy.rules},
+    )
+    paths.add(".guard/config.json")
+    changed = _git(
+        repo_root, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
+        f"{prior_head}..{scope.head_sha}", *_literal_pathspecs(tuple(sorted(paths))), check=False,
+    )
+    if changed.returncode == 0 and changed.stdout:
+        return tuple(changed.stdout.decode("utf-8", errors="replace").rstrip("\0").split("\0", 5)[:5])
+    return ("contract_version_or_legacy",)
+
+
 def review_anchor_session(
     repo_root: Path,
     scope: ReviewScope,
