@@ -13,7 +13,7 @@ from typing import Any
 from ..config import GuardConfig, load_config
 from ..policy import Policy, load_policy
 from .contract import ReviewScope, validate_review_output
-from .documents import resolve_scope_modules
+from .documents import resolve_module_neighbours, resolve_scope_modules
 from .prompt import (
     _PriorModuleContextUnavailable,
     _sanitize_reviewer_note,
@@ -137,7 +137,12 @@ def _session_contract_changed(
     except (OSError, ValueError):
         # An unavailable historical declaration cannot establish safe continuation.
         return True
-    modules = resolve_scope_modules(repo_root, scope, config, revision=scope.head_sha)
+    touched, upstream, downstream = resolve_scope_modules(
+        repo_root, scope, config, revision=scope.head_sha
+    )
+    prior_declarations = {m["path"]: m for m in prior_config.topology.get("modules", [])}
+    prior_upstream, prior_downstream = resolve_module_neighbours(touched, prior_declarations)
+    modules = touched, upstream | prior_upstream, downstream | prior_downstream
     return _scoped_config_payload(prior_config, scope, *modules) != _scoped_config_payload(
         config, scope, *modules
     )

@@ -34,7 +34,18 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   `engine` composes review and continuation. These modules do not implement product policy semantics.
 - `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows.
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports to the checkout, then reloads the Git helpers and updater in dependency order. The original package remains the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
-- Review sessions persist the first reviewed head, the binding revisions of task blueprints already reviewed, and a contract digest covering reviewer code, configuration, policy rules, root instructions and the reviewed scope's architecture documents, touched-module boundary documents and touched/one-hop module declarations. Unrelated modules' documents, declarations and blueprint additions do not invalidate that evidence; changes to a touched module's contract or a one-hop neighbour's layer, role or dependency do. A digest change starts a fresh full review while preserving the binding blueprint revisions for a valid branch baseline. Codex isolation homes trust the worktree and common repository root, and provider stream decoding combines stderr with structured stdout errors so quota or auth failures reach sticky failover.
+- Review sessions retain the first reviewed head and the binding revisions of reviewed task
+  blueprints. Receipt reuse and carry-forward require the complete scoped `contract_digest`,
+  which covers reviewer code, configuration, policy rules, global architecture documents,
+  touched-module boundary documents and touched and one-hop module declarations. Session
+  continuation checks `session_contract_digest`, changes since the last reviewed head when the
+  branch touches `.guard/config.json`, and the structure of touched modules and their one-hop
+  neighbours before and after a rebase. Incremental prompts supply updated boundary documents
+  and context for newly touched modules. Sessions saved without a root digest require an exact
+  scoped digest match to continue. A full review retains binding blueprint revisions for a valid
+  branch baseline. Codex isolation homes trust the worktree and common repository root, and
+  provider stream decoding combines stderr with structured stdout errors so quota or auth failures
+  reach sticky failover.
 
 For both `codex exec` and `codex exec resume`, static reviews disable each `[mcp_servers]`
 entry discovered in `.codex/config.toml` layers up to the active worktree's Git root. A single

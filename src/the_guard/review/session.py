@@ -93,7 +93,7 @@ def _scoped_config_payload(
     def neighbour_projection(module_path: str) -> dict[str, Any]:
         declared = declared_modules.get(module_path)
         if declared is None:
-            return {"path": module_path}
+            return {"path": module_path, "missing": True}
         return {
             "path": module_path,
             "layer": declared.get("layer"),

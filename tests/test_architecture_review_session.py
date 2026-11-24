@@ -583,14 +583,19 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertIsNotNone(saved)
             self.assertTrue(saved.contract_digest)
 
-    def _start_module_review(self, tmp: Path) -> tuple[Path, dict[str, str], ReviewResult]:
+    def _start_module_review(
+        self, tmp: Path, *, with_downstream: bool = False
+    ) -> tuple[Path, dict[str, str], ReviewResult]:
         repo, _ = self._init_repo(tmp)
         _git(repo, "switch", "main")
         (repo / ".guard").mkdir()
         (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": [
             {"path": "services/a", "role": "feature owner", "dependencies": ["services/b"]},
             {"path": "services/b", "role": "dependency owner"},
-            {"path": "services/c", "role": "other owner"},
+            {
+                "path": "services/c", "role": "other owner",
+                "dependencies": ["services/a"] if with_downstream else [],
+            },
         ]}}))
         for module in ("a", "b", "c"):
             directory = repo / "services" / module
@@ -771,9 +776,12 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             ("services/b", "full", "contract_changed"),
             ("services/c", "incremental", ""),
             ("services/new", "full", "contract_changed"),
+            ("remove downstream", "full", "contract_changed"),
         ):
             with self.subTest(module=module), tempfile.TemporaryDirectory() as td:
-                repo, env, _ = self._start_module_review(Path(td))
+                repo, env, _ = self._start_module_review(
+                    Path(td), with_downstream=module == "remove downstream"
+                )
                 _git(repo, "switch", "main")
                 path = repo / ".guard/config.json"
                 config = json.loads(path.read_text())
@@ -783,6 +791,9 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     (repo / module).mkdir()
                     (repo / module / "main.py").write_text("value = 1\n")
                     _git(repo, "add", module)
+                elif module == "remove downstream":
+                    modules[:] = [item for item in modules if item["path"] != "services/c"]
+                    _git(repo, "rm", "-r", "services/c")
                 else:
                     next(item for item in modules if item["path"] == module)["role"] = "updated owner"
                 if module == "services/c":

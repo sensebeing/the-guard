@@ -92,6 +92,24 @@ def _boundary_alias_owners(
     return owners
 
 
+def resolve_module_neighbours(
+    touched: set[str], declared_modules: Mapping[str, dict]
+) -> tuple[set[str], set[str]]:
+    """Return one-hop dependencies and dependants outside the touched set."""
+    upstream = {
+        dependency
+        for module in touched
+        for dependency in declared_modules.get(module, {}).get("dependencies", ())
+        if dependency not in touched and dependency in declared_modules
+    }
+    downstream = {
+        path
+        for path, declaration in declared_modules.items()
+        if path not in touched and bool(set(declaration.get("dependencies", ())) & touched)
+    }
+    return upstream, downstream
+
+
 def resolve_scope_modules(
     repo_root: Path,
     scope: ReviewScope,
@@ -118,17 +136,7 @@ def resolve_scope_modules(
     touched.update(
         _boundary_alias_owners(repo_root, rev, declared_modules, changed_paths, modes)
     )
-    upstream = {
-        dependency
-        for module in touched
-        for dependency in declared_modules.get(module, {}).get("dependencies", ())
-        if dependency not in touched and dependency in declared_modules
-    }
-    downstream = {
-        path
-        for path, declaration in declared_modules.items()
-        if path not in touched and bool(set(declaration.get("dependencies", ())) & touched)
-    }
+    upstream, downstream = resolve_module_neighbours(touched, declared_modules)
     return touched, upstream, downstream
 
 
