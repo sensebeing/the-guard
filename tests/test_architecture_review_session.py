@@ -28,7 +28,7 @@ from the_guard.review.engine import (
 from the_guard.review import session
 from the_guard.review.contract import ReviewOutput, ReviewScope
 from the_guard.review.documents import resolve_scope_modules
-from the_guard.review.session import ReviewRunLogger
+from the_guard.review.session import ReviewResult, ReviewRunLogger
 from the_guard.review.prompt import _parse_numstat_entries, build_incremental_review_prompt
 from the_guard.review.repository import (
     _collect_branch_delta,
@@ -583,61 +583,232 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertIsNotNone(saved)
             self.assertTrue(saved.contract_digest)
 
-    def test_unrelated_module_contract_changes_allow_incremental_rebase_continuation(self) -> None:
+    def _start_module_review(self, tmp: Path) -> tuple[Path, dict[str, str], ReviewResult]:
+        repo, _ = self._init_repo(tmp)
+        _git(repo, "switch", "main")
+        (repo / ".guard").mkdir()
+        (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": [
+            {"path": "services/a", "role": "feature owner", "dependencies": ["services/b"]},
+            {"path": "services/b", "role": "dependency owner"},
+            {"path": "services/c", "role": "other owner"},
+        ]}}))
+        for module in ("a", "b", "c"):
+            directory = repo / "services" / module
+            directory.mkdir(parents=True)
+            (directory / "main.py").write_text("value = 1\n")
+            (directory / "CLAUDE.md").write_text(f"{module} original boundary\n")
+        (repo / "services/a/CLAUDE.md").unlink()
+        (repo / "services/a/CLAUDE.md").symlink_to("../../docs/a-owner.md")
+        (repo / "docs/a-owner.md").write_text("a original boundary\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "declare baseline modules")
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(repo, "switch", "topic")
+        _git(repo, "rebase", "main")
+        (repo / "services/a/main.py").write_text("value = 2\n")
+        _git(repo, "commit", "-am", "round 1")
+
+        fake_home = tmp / "home"
+        (fake_home / ".claude").mkdir(parents=True)
+        fake_bin = fake_home / ".local/bin"
+        _write_exec(
+            fake_bin / "claude",
+            "#!/usr/bin/env python3\n"
+            "import json, subprocess, sys\n"
+            "if '--version' in sys.argv:\n"
+            "    print('2.0.0')\n"
+            "    raise SystemExit(0)\n"
+            "sys.stdin.read()\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'module-session'}))\n"
+            "print(json.dumps({'type': 'result', 'result': {'structured_output': {\n"
+            "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+            "    'verdict': 'GO', 'summary': 'module review', 'blocking_findings': []\n"
+            "}}}))\n",
+        )
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "HOME": str(fake_home),
+            "THE_GUARD_REVIEW_CONFIG": str(fake_home / ".config/the-guard/review-agent.json"),
+            "THE_GUARD_REVIEW_LOG_DIR": str(tmp / "logs"),
+        }
+        first = run_architecture_review(repo, env=env)
+        self.assertEqual((first.mode, first.verdict, first.session_id), ("full", "GO", "module-session"))
+        return repo, env, first
+
+    def test_boundary_fix_resumes_review_and_replaces_receipt_contract(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            repo, _ = self._init_repo(tmp)
+            repo, env, first = self._start_module_review(Path(td))
+            prior = load_review_session(repo)
+            old_receipt = load_valid_receipt(repo, first.patch_digest)
+            self.assertEqual(old_receipt["contract_digest"], prior.contract_digest)
+
+            document = repo / "services/a/CLAUDE.md"
+            document.unlink()
+            document.write_text("a revised boundary\n")
+            _git(repo, "commit", "-am", "clarify owner during review")
+            self.assertIsNone(resolve_or_carry_forward_receipt(repo, collect_review_scope(repo)))
+
+            second = run_architecture_review(repo, env=env)
+            self.assertEqual((second.mode, second.provider), ("incremental", "claude"))
+            prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+            self.assertIn("## Updated Module Scope & Boundary Context", prompt)
+            self.assertIn("`services/a/CLAUDE.md`", prompt)
+            self.assertIn("## Boundary reference: services/a/CLAUDE.md\na revised boundary", prompt)
+            saved = load_review_session(repo)
+            self.assertEqual(saved.round_count, 2)
+            self.assertTrue(saved.session_contract_digest)
+            self.assertEqual(prior.session_contract_digest, saved.session_contract_digest)
+            self.assertNotEqual(prior.contract_digest, saved.contract_digest)
+            receipt = load_valid_receipt(repo, second.patch_digest)
+            self.assertEqual(receipt["contract_digest"], saved.contract_digest)
+
+    def test_newly_touched_declared_module_resumes_review_with_its_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, _ = self._start_module_review(Path(td))
+            (repo / "services/c/main.py").write_text("value = 2\n")
+            _git(repo, "commit", "-am", "extend fix to another owner")
+
+            second = run_architecture_review(repo, env=env)
+            self.assertEqual(second.mode, "incremental")
+            prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+            update = prompt.split("## Updated Module Scope & Boundary Context", 1)[1].split("\n## ", 1)[0]
+            self.assertIn("`services/c`", update)
+            self.assertNotIn("`services/a`", update)
+            self.assertIn("## Boundary reference: services/c/CLAUDE.md\nc original boundary", prompt)
+
+    def test_missing_historical_submodule_checkout_falls_back_to_full_review(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, _ = self._start_module_review(Path(td))
             _git(repo, "switch", "main")
-            (repo / ".guard").mkdir()
-            (repo / ".guard/config.json").write_text(json.dumps({"topology": {"modules": [
-                {"path": "services/a", "layer": "domain", "role": "feature owner"},
-                {"path": "services/b", "layer": "domain", "role": "other owner"},
-            ]}}))
-            for module in ("a", "b"):
-                (repo / f"services/{module}").mkdir(parents=True)
-                (repo / f"services/{module}/main.py").write_text("value = 1\n")
-                (repo / f"services/{module}/CLAUDE.md").write_text(f"{module} boundary\n")
-            _git(repo, "add", ".")
-            _git(repo, "commit", "-m", "declare modules")
+            path = "services/library"
+            _git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-b", "main", str(repo.parent / "origin.git"), path)
+            _git(repo, "commit", "-m", "register library submodule")
             _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
             _git(repo, "switch", "topic")
             _git(repo, "rebase", "main")
-            (repo / "services/a/main.py").write_text("value = 2\n")
-            _git(repo, "commit", "-am", "round 1")
+            library = repo / path
+            _git(library, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "advance library")
+            _git(repo, "commit", "-am", "review library update")
+            first = run_architecture_review(repo, env=env, force=True)
+            self.assertEqual(first.verdict, "GO")
 
-            fake_home = tmp / "home"
-            (fake_home / ".claude").mkdir(parents=True)
-            fake_claude = tmp / "bin/claude"
-            fake_claude.parent.mkdir()
-            fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            fake_claude.chmod(0o755)
-            cfg_file = fake_home / ".config/the-guard/review-agent.json"
-            cfg_file.parent.mkdir(parents=True)
-            cfg_file.write_text(json.dumps({
-                "schema": "the-guard-agent-config/v1",
-                "priority_order": ["claude"],
-                "preferred_provider": "claude",
-                "available_providers": ["claude"],
-                "provider_binaries": {"claude": str(fake_claude)},
-            }), encoding="utf-8")
-            env = {
-                "PATH": f"{fake_claude.parent}:/usr/bin:/bin",
-                "HOME": str(fake_home),
-                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
-            }
+            _git(repo, "rm", "-f", path)
+            (repo / "docs/a-owner.md").write_text("a revised boundary\n")
+            _git(repo, "commit", "-am", "remove the library and clarify the boundary")
+            second = run_architecture_review(repo, env=env)
+            self.assertEqual((second.verdict, second.mode), ("GO", "full"))
 
-            with mock.patch(
-                "the_guard.review.engine._invoke_provider",
-                return_value=(ReviewOutput("GO", "round 1", (), ""), "sess-a", ""),
-            ):
-                first = run_architecture_review(repo, env=env)
-            self.assertEqual((first.mode, first.session_id), ("full", "sess-a"))
+    def test_rebased_boundary_target_change_has_bounded_diff_when_branch_has_delta(self) -> None:
+        for branch_delta in (True, False):
+            with self.subTest(branch_delta=branch_delta), tempfile.TemporaryDirectory() as td:
+                repo, env, first = self._start_module_review(Path(td))
+                _git(repo, "switch", "main")
+                (repo / "docs/a-owner.md").write_text("a upstream boundary\n" + "more detail\n" * 1_000)
+                _git(repo, "commit", "-am", "advance the resolved boundary document upstream")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                rebased = collect_review_scope(repo)
+                self.assertEqual(rebased.patch_digest, first.patch_digest)
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, rebased))
+                if branch_delta:
+                    (repo / "services/a/main.py").write_text("value = 3\n")
+                    _git(repo, "commit", "-am", "round 2")
+
+                second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                if branch_delta:
+                    self.assertEqual((second.mode, meta["full_review_reason"]), ("incremental", ""))
+                    prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                    update = prompt.split("## Updated Module Scope & Boundary Context", 1)[1].split("\n## ", 1)[0]
+                    self.assertIn("`services/a/CLAUDE.md`", update)
+                    diff = update.split("```diff\n", 1)[1].split("\n```", 1)[0]
+                    self.assertIn("-a original boundary\n+a upstream boundary", diff)
+                    self.assertIn("[truncated", diff)
+                    self.assertLessEqual(len(diff), 8_000)
+                else:
+                    self.assertEqual((second.mode, meta["full_review_reason"]), ("full", "no_incremental_delta"))
+                    receipt = load_valid_receipt(repo, first.patch_digest)
+                    self.assertEqual(receipt["head_sha"], second.head_sha)
+
+    def test_root_contract_and_legacy_session_changes_force_full_review(self) -> None:
+        for change in ("branch config", "root instructions", "policy detail", "legacy session"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
+                repo, env, _ = self._start_module_review(Path(td))
+                if change == "legacy session":
+                    session_path = next((repo / ".git/the-guard-sessions").glob("*.json"))
+                    payload = json.loads(session_path.read_text())
+                    payload.pop("session_contract_digest", None)
+                    session_path.write_text(json.dumps(payload))
+                document, content = {
+                    "branch config": (".guard/config.json", "\n"),
+                    "root instructions": ("AGENTS.md", "\nClarify architecture responsibilities.\n"),
+                    "policy detail": ("docs/standards/rules/single-source-of-truth.md", "\nOne writer.\n"),
+                    "legacy session": ("docs/a-owner.md", "\nClarify ownership.\n"),
+                }[change]
+                path = repo / document
+                path.write_text(path.read_text() + content)
+                (repo / "services/a/main.py").write_text("value = 3\n")
+                _git(repo, "commit", "-am", "review contract change")
+
+                second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                self.assertEqual((second.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+                if change == "branch config":
+                    reviewed = load_review_session(repo)
+                    path.write_text(path.read_text() + "\n")
+                    _git(repo, "commit", "-am", "edit the already reviewed configuration")
+                    third = run_architecture_review(repo, env=env)
+                    meta = json.loads(Path(third.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                    self.assertEqual((third.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+                    saved = load_review_session(repo)
+                    self.assertEqual(saved.contract_digest, reviewed.contract_digest)
+                    self.assertEqual(saved.session_contract_digest, reviewed.session_contract_digest)
+
+    def test_rebase_only_invalidates_for_related_module_declarations(self) -> None:
+        for module, mode, reason in (
+            ("services/a", "full", "contract_changed"),
+            ("services/b", "full", "contract_changed"),
+            ("services/c", "incremental", ""),
+            ("services/new", "full", "contract_changed"),
+        ):
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as td:
+                repo, env, _ = self._start_module_review(Path(td))
+                _git(repo, "switch", "main")
+                path = repo / ".guard/config.json"
+                config = json.loads(path.read_text())
+                modules = config["topology"]["modules"]
+                if module == "services/new":
+                    modules.append({"path": module, "role": "new caller", "dependencies": ["services/a"]})
+                    (repo / module).mkdir()
+                    (repo / module / "main.py").write_text("value = 1\n")
+                    _git(repo, "add", module)
+                else:
+                    next(item for item in modules if item["path"] == module)["role"] = "updated owner"
+                if module == "services/c":
+                    # Force a receipt mismatch so this also exercises projection of the historical config.
+                    (repo / "docs/a-owner.md").write_text("a updated boundary\n")
+                path.write_text(json.dumps(config))
+                _git(repo, "commit", "-am", "change a module declaration upstream")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                (repo / "services/a/main.py").write_text("value = 3\n")
+                _git(repo, "commit", "-am", "round 2")
+
+                second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                self.assertEqual((second.mode, meta["full_review_reason"]), (mode, reason))
+
+    def test_unrelated_module_contract_changes_allow_incremental_rebase_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, first = self._start_module_review(Path(td))
             prior = load_review_session(repo)
             assert prior is not None
 
             # An unrelated module's boundary document lands on main and the branch rebases.
             _git(repo, "switch", "main")
-            (repo / "services/b/CLAUDE.md").write_text("b boundary tightened\n")
+            (repo / "services/c/CLAUDE.md").write_text("c boundary tightened\n")
             _git(repo, "commit", "-am", "advance unrelated module contract")
             _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
             _git(repo, "switch", "topic")
@@ -659,14 +830,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
 
             (repo / "services/a/main.py").write_text("value = 3\n")
             _git(repo, "commit", "-am", "round 2")
-            with mock.patch(
-                "the_guard.review.engine._invoke_provider",
-                return_value=(ReviewOutput("GO", "round 2", (), ""), "sess-a", ""),
-            ) as invoke:
-                second = run_architecture_review(repo, env=env)
-            self.assertEqual((second.mode, second.session_id), ("incremental", "sess-a"))
-            self.assertEqual(invoke.call_args.kwargs["mode"], "incremental")
-            self.assertEqual(invoke.call_args.kwargs["resume_session_id"], "sess-a")
+            second = run_architecture_review(repo, env=env)
+            self.assertEqual((second.mode, second.verdict), ("incremental", "GO"))
+            meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual(meta["resume_session_id"], first.session_id)
 
     def test_contract_digest_changes_when_repository_config_changes(self) -> None:
         """A policy/config change must produce a new digest and invalidate old continuation evidence."""
