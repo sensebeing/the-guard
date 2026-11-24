@@ -40,8 +40,8 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   blueprint selection, batching regular-file reads and following safe snapshot symlinks.
   `session` owns scoped contract hashes, rule scope projection and local evidence persistence.
   `provider` owns CLI discovery and configuration. `runner` owns process execution, stdin prompt
-  delivery and provider stream decoding. `prompt` owns snapshot-bound instructions and groups
-  bulk deletions into directory inspection commands while listing active files and pinned anchors.
+  delivery and provider stream decoding. `prompt` owns snapshot-bound instructions, individual
+  blueprint revision indexes, and directory inspection commands for eligible bulk deletions.
   `engine` composes review and continuation. These modules do not implement product policy semantics.
 - `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows. The managed
   `pre-push` hook resolves the push worktree before clearing repository selectors such as
@@ -118,10 +118,14 @@ distinct reviewed body. Inline previews include the bounded baseline body and a 
 from that baseline to each subsequent distinct reviewed revision. Any reviewed body that differs
 from HEAD also includes a bounded diff to HEAD or a deletion marker. Symlink-backed blueprints
 compare resolved bodies.
-The prompt indexes revisions outside the inline previews. For bulk deletions it groups omitted
-merge-base-only blueprints by directory with commands to recover their paths. The stored anchor
-history retains every applicable revision and survives provider restarts, verified rebases, and
-changes to discovery settings.
+The prompt indexes revisions outside the inline previews. For bulk deletions it groups eligible
+merge-base blueprints by directory with commands to recover their paths. Pinned deletions join
+the group when their eligible count exceeds the bulk threshold and their recorded bodies match
+Anchor 0. The prompt lists the distinct prior revisions for those grouped pins once and states
+that their bodies matched Anchor 0. Small pinned sets, symlink-backed blueprints, blueprints
+present at HEAD or absent from the merge base, and blueprints with distinct reviewed bodies
+keep individual revision entries. The stored anchor history retains every applicable revision
+and survives provider restarts, verified rebases, and changes to discovery settings.
 `review.operational_ledgers` excludes explicit repository-relative paths from discovery and
 defaults to `["CHANGELOG.md"]`. A `GO` receipt records the review contract digest and the
 blueprint revisions it covered. Reuse requires coverage of the applicable retained revisions
