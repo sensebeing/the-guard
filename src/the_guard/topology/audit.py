@@ -373,6 +373,7 @@ def check_contract_drift(
         current = repository_path(root, path)
         return current.read_text(errors="replace") if current.is_file() else None
 
+    module_paths = list(modules)
     candidates = {
         m
         for m in modules
@@ -396,10 +397,17 @@ def check_contract_drift(
         )
         if deleted is None:
             raise ValueError("Cannot inspect deleted module files against baseline")
-    for path in {*changed_files, *filter(None, deleted.split("\0"))}:
-        owner = owner_module(path, list(modules))
-        if owner is None:
-            continue
+    changed_owned = [
+        path
+        for path in {*changed_files, *filter(None, deleted.split("\0"))}
+        if owner_module(path, module_paths) is not None
+    ]
+    if available:
+        reader.preload(changed_owned)
+    if snapshot_reader is not None:
+        snapshot_reader.preload(changed_owned)
+    for path in changed_owned:
+        owner = owner_module(path, module_paths)
         text = read_current(path)
         if not available or reader.read(path) != text:
             candidates.add(owner)
@@ -419,18 +427,40 @@ def check_contract_drift(
             for p in ([directory] if directory.is_file() else source_files(directory))
             if not p.is_symlink()
         }
-    files = [
+    # Only these source languages can carry deterministic module import edges.
+    if scan_all_callers:
+        import_candidates = [
+            p
+            for p in sorted(inventory)
+            if Path(p).suffix in DETERMINISTIC_IMPORT_EXTENSIONS
+        ]
+    else:
+        import_candidates = [
+            p
+            for p in sorted(inventory)
+            if not is_excluded_topology_path(p)
+            and owner_module(p, module_paths) in tightened
+            and Path(p).suffix in DETERMINISTIC_IMPORT_EXTENSIONS
+        ]
+    # Stale evidence reports candidate modules only, and inert files carry no imports.
+    evidence_candidates = [
         p
         for p in sorted(inventory)
         if not is_excluded_topology_path(p)
-        and owner_module(p, list(modules)) in scan_modules
-        and "\x00" not in (read_current(p) or "")
-    ]
-    # Only retirement permissions apply to callers outside active owner scopes.
-    import_paths = sorted(inventory) if scan_all_callers else [
-        p for p in files if owner_module(p, list(modules)) in tightened
+        and owner_module(p, module_paths) in candidates
+        and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
     ]
     baseline_has_retirements = any(m.get("retired", False) for m in old_modules.values())
+    if snapshot_reader is not None:
+        snapshot_reader.preload([*import_candidates, *evidence_candidates])
+    if baseline_has_retirements:
+        reader.preload(import_candidates)
+    if scan_all_callers:
+        import_paths = import_candidates
+    else:
+        import_paths = [
+            p for p in import_candidates if "\x00" not in (read_current(p) or "")
+        ]
     for path in import_paths:
         text = read_current(path)
         if text is None or "\x00" in text:
@@ -452,14 +482,27 @@ def check_contract_drift(
     old_observed: dict[str, set[str]] = {}
     baseline_files: list[str] = []
     if baseline and candidates:
+        baseline_candidates = [
+            p
+            for p in sorted(
+                _snapshot_paths(root, base, candidates, recursive=True, files_only=True)
+            )
+            if owner_module(p, module_paths) in candidates
+            and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
+        ]
+        reader.preload(baseline_candidates)
         baseline_files = [
-            p for p in sorted(_snapshot_paths(root, base, candidates, recursive=True, files_only=True))
+            p
+            for p in baseline_candidates
             if "\x00" not in (reader.read(p) or "")
         ]
         old_observed, _ = _dependency_evidence(baseline, baseline_files, reader.read)
+    stale_files = [
+        p for p in evidence_candidates if "\x00" not in (read_current(p) or "")
+    ]
     _, stale = _dependency_evidence(
         config,
-        files,
+        stale_files,
         read_current,
         coverage_files=baseline_files,
     )

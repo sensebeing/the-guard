@@ -6,11 +6,13 @@ import os
 import difflib
 import posixpath
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 GIT_TIMEOUT_SECONDS = 30
+_CAT_FILE_BATCH_SIZE = 2000
 
 
 def submodule_paths(repo_root: Path, *, revision: str | None = None) -> tuple[str, ...]:
@@ -200,7 +202,122 @@ class BaseFileReader:
             self._entries[path] = self._read_entry(path)
         return self._entries[path]
 
-    def _read_entry(self, path: str) -> BaseFileEntry:
+    def preload(self, paths: Iterable[str]) -> None:
+        """Batch base-snapshot lookups that ``_read_entry`` resolves tree-side.
+
+        One recursive tree listing maps paths to blob ids, and bounded
+        ``git cat-file --batch`` chunks read the unique blobs. Submodules,
+        imported trees and rename inference keep their per-path fallback, and
+        unreadable history stays uncached so the fallback fails closed.
+        """
+        pending = [
+            path
+            for path in dict.fromkeys(paths)
+            if path not in self._entries
+            and owning_submodule(path, self.submodules) is None
+        ]
+        if not pending:
+            return
+        revision = self._resolve_base_revision()
+        if revision is None:
+            return
+        if self._imported_trees is None:
+            try:
+                self._imported_trees = imported_submodule_trees(self.root, self.base)
+            except RuntimeError:
+                return
+        imported = tuple(self._imported_trees)
+        pending = [
+            path for path in pending if owning_submodule(path, imported) is None
+        ]
+        if not pending:
+            return
+        listing = git_stdout(self.root, ["git", "ls-tree", "-r", "-z", revision])
+        if listing is None:
+            return
+        blobs: dict[str, str] = {}
+        for record in listing.split("\0"):
+            metadata, separator, path = record.partition("\t")
+            fields = metadata.split()
+            if separator and len(fields) == 3 and fields[0] not in {"040000", "160000"}:
+                blobs[path] = fields[2]
+        by_oid: dict[str, list[str]] = {}
+        absent: list[str] = []
+        for path in pending:
+            oid = blobs.get(path)
+            if oid is None:
+                absent.append(path)
+            else:
+                by_oid.setdefault(oid, []).append(path)
+        if self.exact:
+            for path in absent:
+                self._entries[path] = BaseFileEntry("absent")
+        oids = list(by_oid)
+        for start in range(0, len(oids), _CAT_FILE_BATCH_SIZE):
+            chunk = oids[start : start + _CAT_FILE_BATCH_SIZE]
+            contents = self._batch_contents(chunk)
+            for oid in chunk:
+                content = None if contents is None else contents[oid]
+                for path in by_oid[oid]:
+                    self._entries[path] = (
+                        BaseFileEntry("present", content=content)
+                        if content is not None
+                        else BaseFileEntry(
+                            "unavailable", detail=f"Cannot read base blob for {path}"
+                        )
+                    )
+
+    def _batch_contents(self, oids: list[str]) -> dict[str, str | None] | None:
+        """Read exact blob bodies without splitting them on embedded newlines."""
+        try:
+            completed = subprocess.run(
+                ["git", "cat-file", "--batch"],
+                cwd=self.root,
+                input="".join(f"{oid}\n" for oid in oids).encode(),
+                capture_output=True,
+                env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
+                check=False,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        data = completed.stdout
+        contents: dict[str, str | None] = {}
+        position = 0
+        for oid in oids:
+            header_end = data.find(b"\n", position)
+            if header_end < 0:
+                return None
+            fields = data[position:header_end].split(b" ")
+            position = header_end + 1
+            if len(fields) == 2 and fields[1] == b"missing":
+                contents[oid] = None
+                continue
+            if (
+                len(fields) != 3
+                or fields[0] != oid.encode()
+                or fields[1] != b"blob"
+            ):
+                return None
+            try:
+                size = int(fields[2])
+            except ValueError:
+                return None
+            body_end = position + size
+            if body_end >= len(data) or data[body_end : body_end + 1] != b"\n":
+                return None
+            contents[oid] = (
+                data[position:body_end]
+                .decode("utf-8", errors="replace")
+                .replace("\r\n", "\n")
+                .replace("\r", "\n")
+            )
+            position = body_end + 1
+        return contents
+
+    def _resolve_base_revision(self) -> str | None:
         if not self._base_checked:
             value = git_stdout(
                 self.root,
@@ -214,7 +331,10 @@ class BaseFileReader:
             )
             self._base_revision = value.strip() if value else None
             self._base_checked = True
-        if self._base_revision is None:
+        return self._base_revision
+
+    def _read_entry(self, path: str) -> BaseFileEntry:
+        if self._resolve_base_revision() is None:
             return BaseFileEntry(
                 "unavailable", detail=f"Base commit {self.base!r} is unavailable"
             )
