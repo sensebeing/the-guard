@@ -2650,10 +2650,20 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
 
             ordered, _ = resolve_provider_order(repo, env=env)
             self.assertEqual([provider for provider, _ in ordered], ["agy", "claude", "codex"])
-            with patch.object(review_provider, "datetime", wraps=datetime) as clock:
+            with (
+                patch.object(review_provider, "datetime", wraps=datetime) as clock,
+                patch.dict(os.environ, env, clear=True),
+                contextlib.redirect_stdout(io.StringIO()) as probe_output,
+            ):
                 clock.now.return_value = expiry
-                ordered, _ = resolve_provider_order(repo, env=env)
+                ordered, effective = resolve_provider_order(repo, env=env)
+                self.assertEqual(review_main(["probe", "--repo-root", str(repo)]), 0)
             self.assertEqual([provider for provider, _ in ordered], ["codex", "agy", "claude"])
+            self.assertEqual(effective["preferred_provider"], "codex")
+            self.assertNotIn("provider_cooldowns", effective)
+            probed_after_expiry = json.loads(probe_output.getvalue())
+            self.assertEqual(probed_after_expiry["preferred_provider"], "codex")
+            self.assertNotIn("provider_cooldowns", probed_after_expiry)
             self.assertEqual(json.loads(cfg_file.read_text(encoding="utf-8")), persisted)
             reset = subprocess.run(
                 [sys.executable, str(GATE_CLI), "probe", "--repo-root", str(repo), "--reprobe"],
@@ -2718,10 +2728,11 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 {"explicit_provider": "claude"},
                 {"env": {**env, "THE_GUARD_REVIEW_PROVIDER": "claude"}},
             ):
-                forced, _ = resolve_provider_order(repo, **{"env": env, **overrides})
+                forced, effective = resolve_provider_order(repo, **{"env": env, **overrides})
                 self.assertEqual(
                     [provider for provider, _ in forced], ["claude", "agy", "codex"]
                 )
+                self.assertEqual(effective["preferred_provider"], "agy")
 
             record_working_provider(repo, "claude", str(fake_bin / "claude"), env=env)
             ordered, _ = resolve_provider_order(repo, env=env)
@@ -2858,7 +2869,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 })
                 ordered, saved = resolve_provider_order(tmp, env=env)
                 self.assertEqual([provider for provider, _ in ordered], ["codex", "agy", "claude"])
-                self.assertEqual(saved["preferred_provider"], "codex")
+                self.assertEqual(saved["preferred_provider"], "")
+                self.assertEqual(json.loads(config_file.read_bytes())["preferred_provider"], "codex")
                 self.assertEqual(saved["provider_cooldowns"]["codex"]["until"],
                                  (now + timedelta(minutes=15)).isoformat())
                 record_working_provider(tmp, "agy", str(bin_dir / "agy"), env=env)

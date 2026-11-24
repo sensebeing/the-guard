@@ -30,7 +30,7 @@ from the_guard.review.contract import ReviewOutput, ReviewScope
 from the_guard.review.documents import resolve_scope_modules
 from the_guard.review.session import ReviewResult, ReviewRunLogger
 from the_guard.review.prompt import _parse_numstat_entries, build_incremental_review_prompt
-from the_guard.review.provider import probe_environment
+from the_guard.review.provider import probe_environment, record_provider_cooldown
 from the_guard.review.repository import (
     _collect_branch_delta,
     _is_same_per_file_branch_patch,
@@ -708,22 +708,41 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             entries = (Path(result.log_path).parent / "index.jsonl").read_text().splitlines()
             self.assertEqual(json.loads(entries[-1])["contract_change_causes"], [".guard/config.json"])
 
-    def test_active_fallback_session_is_sticky_without_changing_global_preference(self) -> None:
+    def _add_codex_provider(self, repo: Path, env: dict[str, str]) -> Path:
+        home = Path(env["HOME"])
+        (home / ".codex").mkdir()
+        (home / ".codex/auth.json").write_text("{}")
+        _write_exec(home / ".local/bin/codex", "#!/bin/sh\nexit 0\n")
+        probe_environment(repo, env=env)
+        return Path(env["THE_GUARD_REVIEW_CONFIG"])
+
+    def test_active_session_provider_affinity_leaves_global_preference_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            repo, env, _ = self._start_module_review(Path(td))
+            repo, env, first = self._start_module_review(Path(td))
+            cfg_file = self._add_codex_provider(repo, env)
+            before = cfg_file.read_bytes()
+            self.assertEqual(json.loads(before)["preferred_provider"], "codex")
             (repo / "services/a/main.py").write_text("value = 3\n")
             _git(repo, "commit", "-am", "round 2")
-            with (
-                mock.patch("the_guard.review.engine.resolve_provider_order",
-                           return_value=([("codex", "codex"), ("claude", "claude")], {})),
-                mock.patch("the_guard.review.engine._invoke_provider",
-                           return_value=(ReviewOutput("GO", "ok", (), ""), "module-session", "")) as invoke,
-                mock.patch("the_guard.review.engine.record_working_provider") as remember,
-            ):
-                result = run_architecture_review(repo, env=env)
+            result = run_architecture_review(repo, env=env)
             self.assertEqual((result.mode, result.provider), ("incremental", "claude"))
-            self.assertEqual(invoke.call_args.kwargs["resume_session_id"], "module-session")
-            remember.assert_not_called()
+            self.assertEqual(result.session_id, first.session_id)
+            self.assertEqual(cfg_file.read_bytes(), before)
+
+    def test_successful_session_continuation_clears_provider_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, first = self._start_module_review(Path(td))
+            cfg_file = self._add_codex_provider(repo, env)
+            record_provider_cooldown(repo, "claude", reason="quota exceeded", env=env)
+            self.assertIn("claude", json.loads(cfg_file.read_bytes())["provider_cooldowns"])
+            (repo / "services/a/main.py").write_text("value = 3\n")
+            _git(repo, "commit", "-am", "round 2")
+            result = run_architecture_review(repo, env=env)
+            self.assertEqual((result.mode, result.provider), ("incremental", "claude"))
+            self.assertEqual(result.session_id, first.session_id)
+            saved = json.loads(cfg_file.read_bytes())
+            self.assertEqual(saved["preferred_provider"], "codex")
+            self.assertNotIn("provider_cooldowns", saved)
 
     def test_run_index_rotates_atomically_and_retains_four_logs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -754,15 +773,15 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
     def test_transient_primary_retries_before_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, env, _ = self._start_module_review(Path(td))
+            cfg_file = self._add_codex_provider(repo, env)
+            before = cfg_file.read_bytes()
+            self.assertEqual(json.loads(before)["preferred_provider"], "codex")
             sleep = mock.Mock()
             with (
-                mock.patch("the_guard.review.engine.resolve_provider_order",
-                           return_value=([("codex", "codex"), ("claude", "claude")], {})),
                 mock.patch("the_guard.review.engine._invoke_provider", side_effect=[
                     RuntimeError("429 at capacity"), RuntimeError("503 overloaded"),
                     RuntimeError("stream disconnected"), (ReviewOutput("GO", "ok", (), ""), "", ""),
                 ]) as invoke,
-                mock.patch("the_guard.review.engine.record_working_provider") as remember,
                 redirect_stderr(StringIO()) as stderr,
             ):
                 result = run_architecture_review(repo, env=env, force=True, _sleep_fn=sleep)
@@ -771,7 +790,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                              ["codex", "codex", "codex", "claude"])
             self.assertEqual(sleep.call_args_list, [mock.call(10.0), mock.call(20.0)])
             self.assertIn("--force", stderr.getvalue())
-            remember.assert_not_called()
+            self.assertEqual(cfg_file.read_bytes(), before)
 
     def test_newly_touched_declared_module_resumes_review_with_its_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -420,8 +420,6 @@ def run_architecture_review(
         errors: list[str] = []
         payload = None
         chosen_provider = ""
-        primary_failed_persistently = False
-        primary_provider = candidates[0][0]
         forced_provider = (explicit_provider or eff_env.get("THE_GUARD_REVIEW_PROVIDER", "")).strip()
         if not forced_provider and prior_session and prior_session.session_id and inc_prompt is not None:
             candidates = sorted(candidates, key=lambda candidate: candidate[0] != prior_session.provider)
@@ -471,15 +469,13 @@ def run_architecture_review(
                         continue
                     if persistent and not forced_provider:
                         record_provider_cooldown(repo_root, provider, reason=str(exc), env=eff_env)
-                        if provider == primary_provider:
-                            primary_failed_persistently = True
                     print(f"[arch-review][{provider}] failed: {exc}", file=sys.stderr)
                     errors.append(f"{provider}: {exc}")
                     break
 
                 chosen_provider = provider
                 effective_mode = plan.mode
-                if not forced_provider and (provider == primary_provider or primary_failed_persistently):
+                if not forced_provider:
                     record_working_provider(repo_root, provider, binary_path, eff_env)
                 break
             if payload is not None:

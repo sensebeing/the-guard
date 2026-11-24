@@ -523,6 +523,7 @@ def resolve_provider_order(
     priority = _normalize_priority_order(payload.get("priority_order"))
     binaries = _provider_binaries(payload)
     ordered: list[tuple[str, str]] = []
+    cooldowns: dict[str, dict[str, str]] = {}
     if priority and not reprobe:
         cooldowns = _active_cooldowns(payload.get("provider_cooldowns"), datetime.now(UTC))
         for prov in sorted(priority, key=cooldowns.__contains__):
@@ -537,6 +538,13 @@ def resolve_provider_order(
         )
         binaries = _provider_binaries(payload)
         ordered = [(prov, binaries[prov]) for prov in payload["available_providers"]]
+        cooldowns = {}
+    preferred = next((provider for provider, _ in ordered if provider not in cooldowns), "")
+    effective = {**payload, "preferred_provider": preferred}
+    if cooldowns:
+        effective["provider_cooldowns"] = cooldowns
+    else:
+        effective.pop("provider_cooldowns", None)
     if forced in PROVIDERS:
         forced_bin = binaries.get(forced) or _find_provider_binary(forced, eff_env)
         if forced_bin:
@@ -544,7 +552,7 @@ def resolve_provider_order(
                 (forced, forced_bin),
                 *[item for item in ordered if item[0] != forced],
             ]
-    return ordered, payload
+    return ordered, effective
 
 
 def record_working_provider(
