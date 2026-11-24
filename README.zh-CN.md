@@ -246,10 +246,10 @@ Martian 的 50 个 PR 汇总结果如下：
 
 ## 独立架构审查
 
-`the-guard` 自动探测本机可用的 Agent CLI（默认优先级：`codex > claude > agy`），并基于已提交的 Git 快照执行审查：
+`the-guard` 自动探测本机可用的 Agent CLI（默认顺序为 `codex > agy > claude`），并基于已提交的 Git 快照执行审查：
 
 ```sh
-guard probe --priority-order codex,claude,agy
+guard probe --priority-order codex,agy,claude
 guard probe --provider-model codex=gpt-6.1-sol:high
 guard review --provider codex
 guard review --json --github-pr owner/repo#123
@@ -258,7 +258,11 @@ guard review run --force
 guard review check-push
 ```
 
-首次审查会读完变更范围内的全部文件批次，一次性列出所有高置信度阻塞项；同一分支后续复审会续接已验证的审查会话，核查前序问题是否解决以及新增差异。审查提示词将读取范围限制在已提交的 Git 快照（`base..head`），禁止审查会话写文件、跑测试或派发子 Agent。审查回执（`the-guard-receipt/v1`）按 Git stable patch ID 与补丁摘要保存在 `.git/the-guard-receipts/` 下，分支 rebase 到最新 `main` 且补丁内容等价时会自动复用。
+首次审查会读完变更范围内的全部文件批次，一次性列出所有高置信度阻塞项。同一分支后续复审会续接已验证的审查会话，核查前序问题是否解决以及新增差异。审查提示词将读取范围限制在已提交的 Git 快照（`base..head`），禁止审查会话写文件、跑测试或派发子 Agent。审查回执（`the-guard-receipt/v1`）按 Git stable patch ID 与补丁摘要保存在 `.git/the-guard-receipts/` 下。分支 rebase 后，契约与补丁均匹配时可复用回执。
+
+三种引擎的默认推理力度都是 `high`。Agy 通过标准输入接收 `stream-json` 提示词，提示词大小不受命令行参数长度限制。引擎发生持久故障时，`provider_cooldowns` 默认记录 15 分钟的冷却期。新审查按配置顺序优先尝试未冷却的引擎，`guard probe --reprobe` 可清空冷却记录。`--provider` 和 `THE_GUARD_REVIEW_PROVIDER` 只调整当次调用的首选顺序，不写入引擎配置。
+
+分支 rebase 后补丁相同、触达模块的边界文档有更新时，符合续接条件的会话会增量复核文档差异。若无法提供可核查的差异，则重新执行全量审查。快照文档按 UTF-8 字节计量，主要责任文档单份上限为 60,000 字节，其他文档单份上限为 24,000 字节，总预算为 180,000 字节。
 
 ## 配置参考
 
@@ -318,7 +322,7 @@ rules:
 确需在代码中豁免某处静态检查时，可添加不少于 8 个字符的具体原因说明：
 `# guard-exempt guard.architecture-simplicity: concrete reason here`
 
-审查参数可通过环境变量 `THE_GUARD_REVIEW_CONFIG`、`THE_GUARD_REVIEW_PROVIDER`、`THE_GUARD_REVIEW_MODEL`、`THE_GUARD_REVIEW_EFFORT`、`THE_GUARD_REVIEW_STALL_SECONDS`、`THE_GUARD_REVIEW_HEARTBEAT_SECONDS`、`THE_GUARD_REVIEW_MAX_SECONDS` 与 `THE_GUARD_REVIEW_LOG_DIR` 覆盖，提供者探测结果默认保存在 `~/.config/the-guard/review-agent.json`。
+审查参数可通过环境变量 `THE_GUARD_REVIEW_CONFIG`、`THE_GUARD_REVIEW_PROVIDER`、`THE_GUARD_REVIEW_MODEL`、`THE_GUARD_REVIEW_EFFORT`、`THE_GUARD_REVIEW_COOLDOWN_SECONDS`、`THE_GUARD_REVIEW_STALL_SECONDS`、`THE_GUARD_REVIEW_HEARTBEAT_SECONDS`、`THE_GUARD_REVIEW_MAX_SECONDS` 与 `THE_GUARD_REVIEW_LOG_DIR` 覆盖，提供者探测结果默认保存在 `~/.config/the-guard/review-agent.json`。
 自动更新的状态和日志也默认保存在 `~/.config/the-guard`。更新器下次使用默认目录运行时会迁移旧状态。更新日志达到 512 KiB 时轮转，并保留一份备份。
 
 `review.blueprint_globs` 默认为空，可通过仓库相对路径模式启用任务蓝图发现。`review.operational_ledgers` 指定发现时排除的文件，默认为 `["CHANGELOG.md"]`。已审阅的蓝图在发现配置变更后仍保留修订历史。标为 `retired: true` 的模块路径只允许删除文件，并禁止声明依赖与外部导入。模块退役时也会检查仓库中未变更的调用方。

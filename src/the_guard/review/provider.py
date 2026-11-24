@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -13,7 +14,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,12 @@ from .contract import (
     CODEX_RELATIVE_PATH_CONFIG_KEYS,
     CODEX_ROUTING_CONFIG_KEYS,
     CONFIG_SCHEMA,
+    DEFAULT_PROVIDER_COOLDOWN_SECONDS,
+    DEFAULT_REVIEW_EFFORT,
     PROVIDERS,
 )
 from .repository import git_common_dir
-from .session import MAX_RETAINED_SESSIONS, UTC, worktree_session_key
+from .session import MAX_RETAINED_SESSIONS, worktree_session_key
 
 ISOLATED_CODEX_HOME_MAX_AGE_SECONDS = 24 * 3600
 
@@ -364,11 +367,56 @@ def _normalize_provider_models(raw: Any) -> dict[str, dict[str, str]]:
 def _load_config(cfg_path: Path) -> dict[str, Any]:
     try:
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return (
         data if isinstance(data, dict) and data.get("schema") == CONFIG_SCHEMA else {}
     )
+
+
+def _active_cooldowns(raw: Any, now: datetime) -> dict[str, dict[str, str]]:
+    if not isinstance(raw, dict):
+        return {}
+    active = {}
+    for provider, entry in raw.items():
+        if provider not in PROVIDERS or not isinstance(entry, dict):
+            continue
+        until, reason = entry.get("until"), entry.get("reason")
+        if not isinstance(until, str) or not isinstance(reason, str):
+            continue
+        try:
+            expiry = datetime.fromisoformat(until)
+        except ValueError:
+            continue
+        if expiry.tzinfo is not None and expiry > now:
+            active[provider] = {"until": until, "reason": reason}
+    return active
+
+
+def _cooldown_expiry(now: datetime, env: dict[str, str]) -> datetime:
+    try:
+        seconds = float(env.get("THE_GUARD_REVIEW_COOLDOWN_SECONDS", str(DEFAULT_PROVIDER_COOLDOWN_SECONDS)))
+        if math.isfinite(seconds) and seconds > 0:
+            return now + timedelta(seconds=seconds)
+    except (ValueError, OverflowError):
+        pass
+    return now + timedelta(seconds=DEFAULT_PROVIDER_COOLDOWN_SECONDS)
+
+
+@contextlib.contextmanager
+def _provider_config_lock(cfg_path: Path):
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = cfg_path.with_name(f".{cfg_path.name}.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _write_provider_config(cfg_path: Path, payload: dict[str, Any]) -> None:
+    _write_snapshot(cfg_path, (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
 def resolve_provider_model_config(
@@ -383,8 +431,10 @@ def resolve_provider_model_config(
     model = eff_env.get("THE_GUARD_REVIEW_MODEL", "").strip() or settings.get(
         "model", ""
     )
-    effort = eff_env.get("THE_GUARD_REVIEW_EFFORT", "").strip() or settings.get(
-        "effort", ""
+    effort = (
+        eff_env.get("THE_GUARD_REVIEW_EFFORT", "").strip()
+        or settings.get("effort", "")
+        or DEFAULT_REVIEW_EFFORT
     )
     return model, effort
 
@@ -398,7 +448,21 @@ def probe_environment(
 ) -> dict[str, Any]:
     eff_env = dict(os.environ if env is None else env)
     cfg_path = _config_file_path(repo_root, eff_env)
-    existing = _load_config(cfg_path)
+    payload: dict[str, Any] | None = None
+    with contextlib.suppress(OSError), _provider_config_lock(cfg_path):
+        payload = _probe_provider_config(_load_config(cfg_path), eff_env, priority_order, provider_models)
+        _write_provider_config(cfg_path, payload)
+    if payload is None:
+        return _probe_provider_config(_load_config(cfg_path), eff_env, priority_order, provider_models)
+    return payload
+
+
+def _probe_provider_config(
+    existing: dict[str, Any],
+    env: dict[str, str],
+    priority_order: list[str] | None = None,
+    provider_models: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
     order = _normalize_priority_order(
         existing.get("priority_order") if priority_order is None else priority_order
     )
@@ -412,11 +476,11 @@ def probe_environment(
     available: list[str] = []
     binaries: dict[str, str] = {}
     for provider in order:
-        binary = _find_provider_binary(provider, eff_env)
+        binary = _find_provider_binary(provider, env)
         if (
             binary
-            and _has_provider_credentials(provider, eff_env)
-            and _verify_binary_runs(binary, eff_env)
+            and _has_provider_credentials(provider, env)
+            and _verify_binary_runs(binary, env)
         ):
             available.append(provider)
             binaries[provider] = binary
@@ -431,14 +495,17 @@ def probe_environment(
     }
     if models:
         payload["provider_models"] = models
-    try:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-    except OSError:
-        pass
     return payload
+
+
+def _provider_binaries(payload: dict[str, Any]) -> dict[str, str]:
+    raw = payload.get("provider_binaries")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        provider: path for provider, path in raw.items()
+        if provider in PROVIDERS and isinstance(path, str)
+    }
 
 
 def resolve_provider_order(
@@ -452,39 +519,24 @@ def resolve_provider_order(
     forced = (explicit_provider or eff_env.get("THE_GUARD_REVIEW_PROVIDER", "")).strip()
     cfg_path = _config_file_path(repo_root, eff_env)
 
-    cached = {} if reprobe else _load_config(cfg_path)
-    priority = _normalize_priority_order(cached.get("priority_order"))
+    payload = _load_config(cfg_path)
+    priority = _normalize_priority_order(payload.get("priority_order"))
+    binaries = _provider_binaries(payload)
     ordered: list[tuple[str, str]] = []
-    if priority:
-        preferred = str(cached.get("preferred_provider") or "")
-        binaries = (
-            cached.get("provider_binaries")
-            if isinstance(cached.get("provider_binaries"), dict)
-            else {}
-        )
-        order = (
-            [preferred, *[p for p in priority if p != preferred]]
-            if preferred in priority
-            else priority
-        )
-        for prov in order:
+    if priority and not reprobe:
+        cooldowns = _active_cooldowns(payload.get("provider_cooldowns"), datetime.now(UTC))
+        for prov in sorted(priority, key=cooldowns.__contains__):
             bin_path = binaries.get(prov) or _find_provider_binary(prov, eff_env)
-            if (
-                isinstance(bin_path, str)
-                and os.access(bin_path, os.X_OK)
-                and _has_provider_credentials(prov, eff_env)
-            ):
+            if bin_path and os.access(bin_path, os.X_OK) and _has_provider_credentials(prov, eff_env):
                 ordered.append((prov, bin_path))
-    payload = cached
     if not ordered:
-        payload = probe_environment(repo_root, eff_env)
-    binaries = payload.get("provider_binaries", {})
-    if not ordered:
-        ordered = [
-            (prov, binaries[prov])
-            for prov in payload.get("available_providers", [])
-            if prov in binaries
-        ]
+        payload = (
+            _probe_provider_config(payload, eff_env)
+            if forced
+            else probe_environment(repo_root, eff_env)
+        )
+        binaries = _provider_binaries(payload)
+        ordered = [(prov, binaries[prov]) for prov in payload["available_providers"]]
     if forced in PROVIDERS:
         forced_bin = binaries.get(forced) or _find_provider_binary(forced, eff_env)
         if forced_bin:
@@ -498,32 +550,59 @@ def resolve_provider_order(
 def record_working_provider(
     repo_root: Path, provider: str, binary_path: str, env: dict[str, str] | None = None
 ) -> None:
+    _record_provider_result(repo_root, provider, binary_path=binary_path, env=env)
+
+
+def record_provider_cooldown(
+    repo_root: Path, provider: str, *, reason: str, env: dict[str, str] | None = None,
+) -> None:
+    _record_provider_result(repo_root, provider, reason=reason, env=env)
+
+
+def _record_provider_result(
+    repo_root: Path,
+    provider: str,
+    *,
+    env: dict[str, str] | None,
+    binary_path: str | None = None,
+    reason: str = "",
+) -> None:
     eff_env = dict(os.environ if env is None else env)
     cfg_path = _config_file_path(repo_root, eff_env)
-    existing = _load_config(cfg_path)
-    avail = [provider]
-    bins = {provider: binary_path}
-    if existing:
-        avail = _normalize_priority_order(existing.get("available_providers"))
-        if provider not in avail:
-            avail.insert(0, provider)
-        bins = {**dict(existing.get("provider_binaries") or {}), provider: binary_path}
-    data = {
-        "schema": CONFIG_SCHEMA,
-        "priority_order": _normalize_priority_order(existing.get("priority_order"))
-        or list(PROVIDERS),
-        "preferred_provider": provider,
-        "available_providers": avail,
-        "provider_binaries": bins,
-        "probed_at": datetime.now(UTC).isoformat(),
-    }
-    models = _normalize_provider_models(existing.get("provider_models"))
-    if models:
-        data["provider_models"] = models
-    try:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    with contextlib.suppress(OSError), _provider_config_lock(cfg_path):
+        existing = _load_config(cfg_path)
+        now = datetime.now(UTC)
+        cooldowns = _active_cooldowns(existing.get("provider_cooldowns"), now)
+        order = _normalize_priority_order(existing.get("priority_order")) or list(PROVIDERS)
+        available = _normalize_priority_order(existing.get("available_providers"))
+        binaries = _provider_binaries(existing)
+        if binary_path is None:
+            cooldowns[provider] = {
+                "until": _cooldown_expiry(now, eff_env).isoformat(),
+                "reason": reason[:160],
+            }
+            fallback = available[0] if available else ""
+        else:
+            cooldowns.pop(provider, None)
+            binaries[provider] = binary_path
+            if provider not in available:
+                available.append(provider)
+            fallback = provider
+        preferred = next(
+            (candidate for candidate in order if candidate in available and candidate not in cooldowns),
+            fallback,
         )
-    except OSError:
-        pass
+        data = {
+            **existing,
+            "schema": CONFIG_SCHEMA,
+            "priority_order": order,
+            "preferred_provider": preferred,
+            "available_providers": available,
+            "provider_binaries": binaries,
+        }
+        if cooldowns:
+            data["provider_cooldowns"] = cooldowns
+        else:
+            data.pop("provider_cooldowns", None)
+        if data != existing:
+            _write_provider_config(cfg_path, {**data, "probed_at": now.isoformat()})

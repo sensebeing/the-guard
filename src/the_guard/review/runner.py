@@ -15,7 +15,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .contract import (
-    AGY_MAX_ARGV_PROMPT_BYTES,
     CLAUDE_DISALLOWED_TOOLS,
     CLAUDE_ISOLATION_SETTINGS,
     DEFAULT_HEARTBEAT_SECONDS,
@@ -253,6 +252,12 @@ def _structured_provider_errors(stdout_text: str) -> list[str]:
             )
         elif event.get("type") == "error":
             message = str(event.get("message") or "")
+        elif (
+            event.get("event") == "result"
+            and isinstance(event.get("result"), dict)
+            and str(event["result"].get("status") or "").upper() == "ERROR"
+        ):
+            message = str(event["result"].get("error") or "")
         else:
             continue
         message = message.strip()
@@ -519,7 +524,6 @@ def _run_streaming_cmd(
 def _build_provider_cmd(
     provider: str,
     binary_path: str,
-    prompt: str,
     schema_str: str,
     schema_file: Path | None = None,
     out_file: Path | None = None,
@@ -532,19 +536,17 @@ def _build_provider_cmd(
     disabled_mcp_servers: Sequence[str] = (),
 ) -> list[str]:
     if provider == "agy":
-        # `agy -p` consumes the following token as its prompt value and never reads
-        # stdin, so the prompt must stay in argv for this provider.
         cmd = [
             binary_path,
-            "-p",
-            prompt,
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
             "--mode",
             "plan",
             "--sandbox",
             "--settings",
             build_agy_readonly_settings(common_dir),
-            "--output-format",
-            "stream-json",
             "--json-schema",
             schema_str,
         ]
@@ -674,7 +676,7 @@ def _is_transient_provider_failure(exc: Exception) -> bool:
         return False
     message = str(exc).lower()
     if any(marker in message for marker in (
-        "input_too_large", "prompt is too long", "argument list too long", "exceeds safe argv limit",
+        "input_too_large", "prompt is too long", "argument list too long",
     )):
         return False
     return bool(re.search(r"\b(?:429|502|503|529)\b", message)) or any(
@@ -695,6 +697,10 @@ def _build_provider_env(env: dict[str, str]) -> dict[str, str]:
     return child_env
 
 
+def _encode_agy_stream_prompt(prompt: str) -> str:
+    return json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+
+
 def _invoke_provider(
     provider: str,
     binary_path: str,
@@ -713,13 +719,6 @@ def _invoke_provider(
     allowed_rule_ids: Sequence[str] | None = None,
     contract_change_causes: tuple[str, ...] = (),
 ) -> tuple[ReviewOutput, str, str]:
-    if provider == "agy":
-        prompt_bytes = len(prompt.encode("utf-8"))
-        if prompt_bytes > AGY_MAX_ARGV_PROMPT_BYTES:
-            raise RuntimeError(
-                f"agy prompt of {prompt_bytes} UTF-8 bytes exceeds safe argv limit "
-                f"of {AGY_MAX_ARGV_PROMPT_BYTES} bytes"
-            )
     schema_str = json.dumps(build_review_output_schema(allowed_rule_ids), separators=(",", ":"))
     child_env = _build_provider_env(env)
 
@@ -751,7 +750,6 @@ def _invoke_provider(
         cmd = _build_provider_cmd(
             provider,
             binary_path,
-            prompt,
             schema_str,
             session_id=initial_session_id or None,
             resume_session_id=resume_session_id,
@@ -765,15 +763,21 @@ def _invoke_provider(
                 cmd,
                 cwd=repo_root,
                 env=child_env,
-                stdin_text=prompt if provider == "claude" else None,
+                stdin_text=_encode_agy_stream_prompt(prompt) if provider == "agy" else prompt,
                 run_logger=run_logger,
             )
             if rc != 0:
                 raise RuntimeError(
                     f"{provider} exited {rc}: {_provider_failure_detail(out, err)}"
                 )
+            try:
+                verdict = _extract_verdict_json(out)
+            except ValueError as exc:
+                if provider == "agy" and _structured_provider_errors(out):
+                    raise RuntimeError(f"{provider} failed: {_provider_failure_detail(out, err)}") from exc
+                raise
             verdict_payload = validate_review_output(
-                _extract_verdict_json(out), expected_head_sha=scope.head_sha,
+                verdict, expected_head_sha=scope.head_sha,
                 allow_implicit_origin=True, allowed_rule_ids=allowed_rule_ids,
             )
             observed_session_id = _extract_session_id_from_stream(out)
@@ -808,7 +812,6 @@ def _invoke_provider(
                     cmd = _build_provider_cmd(
                         provider,
                         binary_path,
-                        prompt,
                         schema_str,
                         schema_file=schema_file,
                         out_file=out_file,

@@ -39,7 +39,7 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   fsmonitor-isolated snapshot Git calls. `documents` owns review document inventory and binding
   blueprint selection, batching regular-file reads and following safe snapshot symlinks.
   `session` owns scoped contract hashes, rule scope projection and local evidence persistence.
-  `provider` owns CLI discovery and configuration. `runner` owns process execution, stdin prompt
+  `provider` owns CLI discovery, priority and cooldowns. `runner` owns process execution, stdin prompt
   delivery and provider stream decoding. `prompt` owns snapshot-bound instructions, individual
   blueprint revision indexes, and directory inspection commands for eligible bulk deletions.
   `engine` composes review and continuation. These modules do not implement product policy semantics.
@@ -66,7 +66,7 @@ installed package's PEP 610 commit, package-tree digest and CLI update status.
 
 Provider processes receive an environment cleared of inherited Git repository selectors.
 Codex isolation homes trust the worktree and common repository root, and provider stream decoding
-combines stderr with structured stdout errors so quota or auth failures reach sticky failover.
+combines stderr with structured stdout errors so quota or auth failures trigger provider cooldowns.
 
 For both `codex exec` and `codex exec resume`, static reviews disable each `[mcp_servers]`
 entry discovered in `.codex/config.toml` layers up to the active worktree's Git root. A single
@@ -75,18 +75,24 @@ literal names that contain dots. The isolated Codex home omits user MCP configur
 linked worktree uses its own project configuration layers.
 
 Iterative fix-and-re-review rounds rerun plain `guard review`. An eligible incremental review
-prefers its current session provider and preserves the global engine preference. Transient
-failures retry twice with 10- and 20-second backoff before failover. The retry count (up to three)
+prefers its current session provider. New reviews follow `priority_order`, which defaults to
+`codex > agy > claude`. Persistent failures defer providers using `provider_cooldowns` for
+15 minutes by default. The TTL is configurable through `THE_GUARD_REVIEW_COOLDOWN_SECONDS`.
+Providers still in cooldown follow the active choices and become eligible in their original
+order at expiration. `guard probe --reprobe` clears cooldowns. `--provider` and
+`THE_GUARD_REVIEW_PROVIDER` set the first choice for one invocation and leave the provider
+configuration untouched. Transient failures retry twice with 10- and 20-second backoff before
+failover. The retry count (up to three)
 and backoff are configurable through `THE_GUARD_REVIEW_TRANSIENT_RETRIES` and
 `THE_GUARD_REVIEW_RETRY_BACKOFF_SECONDS`. The default stall and runaway limits are 600 and 1800
 seconds. `--force` starts a full review and prints a warning when it bypasses reusable evidence.
-Claude and Codex receive prompts on stdin. Agy receives its prompt as an argument and rejects
-inputs over 128,000 UTF-8 bytes before launching. Every `repository` snapshot Git call injects
+All providers receive prompts on stdin and default to `high` effort. Agy receives a
+`stream-json` user event and resumes via `--conversation`. Every `repository` snapshot Git call injects
 `-c core.fsmonitor=false`, so a wedged worktree fsmonitor cannot stall review. Full runs record the
 objective cause in bounded run metadata as `full_review_reason`: `force`, `no_prior_session`,
 `contract_changed`, `no_incremental_delta`, `provider_changed`, `missing_session_id` or
-`resume_failed`. Contract invalidation also records up to five changed contract paths in
-`contract_change_causes`. Log retention protects the four most recent runs per active worktree
+`resume_failed`. Contract invalidation records up to five changed paths relevant to the branch
+contract in `contract_change_causes`. Log retention protects the four most recent runs per active worktree
 alongside the global target of 30 runs. `index.jsonl` rotates at 2 MiB with a single backup.
 Isolated Codex homes remove `tmp/` and retain active session data.
 
@@ -96,11 +102,13 @@ Review reads committed snapshots. Only the local workflow writes receipts, logs 
 
 Full prompts read the committed root manifest prose, architecture blueprints and touched
 module boundaries. Root instructions, root `ARCHITECTURE.md` and touched module
-`AGENTS.md` / `CLAUDE.md` have priority with a 48,000-character per-file limit. Other reference
-documents have a 24,000-character limit. The document section has a 180,000-character budget.
+`AGENTS.md` / `CLAUDE.md` have priority with a 60,000 UTF-8 byte per-file limit. Other reference
+documents have a 24,000 UTF-8 byte limit. The document section has a 180,000 UTF-8 byte budget.
 Oversized documents use a heading index with line numbers and a snapshot read command.
 Incremental prompts send prior findings, rebuttal evidence, the verified change, and new or
-changed boundary and blueprint context. An unchanged-head rebuttal uses the session history.
+changed boundary and blueprint context. A same-patch rebase with updated touched boundaries
+resumes when the verified session can inspect the document delta. An unchanged-head rebuttal
+uses the session history.
 The manifest supplies the allowed finding IDs for prompts, output schemas and verdict validation.
 A `NO-GO` verdict requires at least one blocking finding.
 

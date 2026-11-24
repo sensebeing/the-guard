@@ -14,7 +14,7 @@ from the_guard import git_helpers
 from the_guard.config import load_config
 from the_guard.review.documents import resolve_task_design_blueprints
 from the_guard.review.prompt import (
-    _render_scope_manifest_section, build_incremental_review_prompt, build_review_prompt,
+    _DocumentBudget, _render_scope_manifest_section, build_incremental_review_prompt, build_review_prompt,
 )
 from the_guard.review.engine import run_architecture_review
 from the_guard.review.repository import (
@@ -64,8 +64,9 @@ class LargeDiffTests(ArchitectureReviewTestCase):
         prompt = build_review_prompt(self.repo, collect_review_scope(self.repo))
         batch_plan = prompt.split("## Session Batch Read Plan\n", 1)[1].split("\n## ", 1)[0]
 
-        assert "parallel read-only tool calls in the same turn" in batch_plan
-        assert "combine bounded `git show <target-sha>:<path>` or `git grep`" in batch_plan
+        assert "Run each supplied Batch N/M command as provided" in batch_plan
+        assert "Do not split it into per-file `git diff` or `git show` calls" in batch_plan
+        assert "Combine related snapshot file reads and searches in a single bounded read-only shell command" in batch_plan
         assert "Scope `git ls-tree` to touched module directories" in batch_plan
         assert "pass `-n` to `git log`" in batch_plan
         assert "Bound `git diff` by the batch plan or with `-- <paths>`" in batch_plan
@@ -343,6 +344,33 @@ class LargeDiffTests(ArchitectureReviewTestCase):
         section = prompt.split("## Additional previously reviewed task blueprints\n", 1)[1]
         inventory = section[section.index("{"):].split("\n## ", 1)[0].rstrip()
         self.assertEqual(inventory, json.dumps({paths[-1]: (head,)}, indent=2))
+
+    def test_large_omitted_blueprint_index_keeps_compact_full_anchors(self):
+        paths = [f"docs/plans/task_{i:02d}.md" for i in range(50)]
+        for path in paths:
+            self.write(path, b"# task\n")
+        head = self.commit("add plans")
+        prompt = build_review_prompt(self.repo, collect_review_scope(self.repo))
+        section = prompt.split("## Additional previously reviewed task blueprints\n", 1)[1]
+        inventory = section[section.index("{"):]
+        entries, end = json.JSONDecoder().raw_decode(inventory)
+        self.assertEqual(entries, {path: [head] for path in paths[4:]})
+        self.assertEqual(inventory[:end], json.dumps(entries, separators=(",", ":")))
+
+    def test_document_budget_counts_utf8_bytes_for_bodies_headings_and_total(self):
+        budget = _DocumentBudget()
+        heading = "# " + "界" * 10_000
+        budget.document("## 所有者", "边界.md", heading, "a" * 40, 24_000)
+        title, index = budget.render()[0].split("\n", 1)
+        self.assertEqual(title, "## 所有者")
+        self.assertIn("Document index (30,002 bytes", index)
+        self.assertLessEqual(len(index.encode("utf-8")), 2_000)
+        self.assertTrue(index.endswith("界…"))
+
+        for _ in range(7):
+            budget.append("界" * 10_000)
+        self.assertLessEqual(len("\n".join(budget.render()).encode("utf-8")), 180_000)
+        self.assertIn("Document budget exhausted", budget.render()[-1])
 
     def test_bulk_prompt_groups_deletions_keeps_pins_and_bounds_commands(self):
         deleted = [f"docs/plans/retired_{i:03d}.md" for i in range(160)]

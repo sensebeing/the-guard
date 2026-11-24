@@ -18,13 +18,17 @@ version and scoped repository contract match.
 Updater state and reviewer discovery default to `~/.config/the-guard`. The updater migrates
 legacy metadata on first default-path use and retains one rotated 512 KiB log backup.
 Review Contract `v2` sends the verified delta, prior findings and changed boundary or blueprint
-context when resuming. Full prompts prioritize owner documents and use heading indexes with
-committed read commands for oversized documents. Findings use manifest rule IDs, and a
-`NO-GO` verdict requires a concrete blocking finding.
+context when resuming. A same-patch rebase with updated boundary documents can resume with the
+inspectable document delta. Full prompts prioritize owner documents within a 180,000 UTF-8 byte
+budget and use heading indexes with committed read commands for oversized documents. Findings
+use manifest rule IDs, and a `NO-GO` verdict requires a concrete blocking finding.
 
-An eligible session resumes with its existing provider. Transient provider failures retry with
-bounded backoff before failover. Claude reads prompts on stdin. Agy checks the prompt against
-its argument size limit before launching. Snapshot Git reads run with
+An eligible session resumes with its existing provider. New reviews follow `priority_order`
+(default `codex > agy > claude`). Transient failures retry with bounded backoff. Persistent failures
+defer providers using `provider_cooldowns` for 15 minutes by default, or until `guard probe --reprobe`
+clears them. `--provider` and `THE_GUARD_REVIEW_PROVIDER` set the first choice for one invocation
+and leave the provider configuration untouched. All providers default to `high` effort. Agy reads
+prompts as `stream-json` on stdin. Snapshot Git reads run with
 `-c core.fsmonitor=false`, so a wedged or cross-version worktree fsmonitor daemon cannot stall
 them. Each run's `.meta.json` and `index.jsonl` record `full_review_reason` when the run is full:
 `force`, `no_prior_session`, `contract_changed`, `no_incremental_delta`, `provider_changed`,

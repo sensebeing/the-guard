@@ -11,6 +11,7 @@ import io
 import json
 import os
 from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import subprocess
 import sys
@@ -43,6 +44,7 @@ from the_guard.review.provider import (
     _normalize_priority_order,
     _normalize_provider_models,
     probe_environment,
+    record_provider_cooldown,
     record_working_provider,
     resolve_provider_model_config,
 )
@@ -56,7 +58,7 @@ from the_guard.review.repository import (
     load_valid_receipt,
 )
 from the_guard.review.contract import (
-    CODEX_DISABLED_FEATURES, BlockingFinding, ReviewOutput, ReviewTimeoutError, build_review_output_schema,
+    CODEX_DISABLED_FEATURES, DEFAULT_REVIEW_EFFORT, BlockingFinding, ReviewOutput, ReviewTimeoutError, build_review_output_schema,
     validate_review_output, verify_reviewed_head_sha,
 )
 from the_guard.review.runner import (
@@ -116,22 +118,52 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         data["blocking_findings"][0]["rule_id"] = "peq.owner"
         self.assertEqual(validate_review_output(data, allowed_rule_ids=allowed).verdict, "NO-GO")
 
-    def test_provider_failure_classes_and_argv_preflight(self) -> None:
+    def test_provider_failure_classes(self) -> None:
         for marker in ("429", "at capacity", "rate limit", "stream disconnected", "overloaded",
                        "temporarily unavailable", "502", "503", "529", "connection reset"):
             self.assertTrue(_is_transient_provider_failure(RuntimeError(marker)))
         for marker in ("input_too_large", "prompt is too long", "argument list too long",
-                       "exceeds safe argv limit", "unauthorized"):
+                       "unauthorized"):
             self.assertFalse(_is_transient_provider_failure(RuntimeError(f"429 {marker}")))
         self.assertFalse(_is_transient_provider_failure(ReviewTimeoutError("503 timeout")))
+
+    def test_agy_streams_large_prompt_and_reports_zero_exit_errors(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            repo, _ = self._init_repo(Path(td))
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
             scope = collect_review_scope(repo)
-            with patch("the_guard.review.runner.subprocess.Popen") as popen:
-                with self.assertRaisesRegex(RuntimeError, "128002.*exceeds safe argv limit.*128000"):
-                    _invoke_provider("agy", "agy", "é" * 64_001, repo, {}, scope=scope)
-                popen.assert_not_called()
-            self.assertFalse(list(repo.glob(".git/**/index.jsonl")))
+            agy = tmp / "agy"
+            _write_exec(
+                agy,
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "assert '-p' not in args and '--disable-slash-commands' not in args\n"
+                "assert args[args.index('--input-format') + 1] == 'stream-json'\n"
+                "assert args[args.index('--conversation') + 1] == 'resume-me'\n"
+                "event = json.loads(sys.stdin.read())\n"
+                "assert event == {'event': 'user', 'message': {'content': '界\\n' * 34_000}}\n"
+                "print(json.dumps({'event': 'init', 'conversation_id': 'resume-me'}))\n"
+                "result = {'status': 'ERROR', 'error': 'quota exceeded'} if os.getenv('FAIL_AGY') else {\n"
+                "    'status': 'SUCCESS', 'structured_output': {\n"
+                "        'verdict': 'GO', 'summary': 'ok', 'blocking_findings': [],\n"
+                f"        'reviewed_head_sha': {scope.head_sha!r},\n"
+                "    },\n"
+                "}\n"
+                "print(json.dumps({'event': 'result', 'result': result}))\n",
+            )
+            prompt = "界\n" * 34_000
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp)}
+            output, session_id, _ = _invoke_provider(
+                "agy", str(agy), prompt, repo, env, scope=scope, resume_session_id="resume-me",
+            )
+            self.assertEqual((output.verdict, session_id), ("GO", "resume-me"))
+            with self.assertRaisesRegex(RuntimeError, "agy failed:.*quota exceeded") as error:
+                _invoke_provider(
+                    "agy", str(agy), prompt, repo, {**env, "FAIL_AGY": "1"},
+                    scope=scope, resume_session_id="resume-me",
+                )
+            self.assertTrue(_is_persistent_provider_failure(error.exception))
 
     def test_sha_mismatch_exposes_suffix_difference_and_lengths(self) -> None:
         expected = "a" * 39 + "b"
@@ -1359,7 +1391,6 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         agy_cmd = _build_provider_cmd(
             "agy",
             "/bin/agy",
-            "prompt",
             "{}",
             model="gemini-4-argon-high",
             effort="high",
@@ -1395,7 +1426,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertNotIn("--add-dir", agy_cmd)
 
         agy_common_dir_cmd = _build_provider_cmd(
-            "agy", "/bin/agy", "prompt", "{}", common_dir=Path("/repo/.git")
+            "agy", "/bin/agy", "{}", common_dir=Path("/repo/.git")
         )
         agy_common_dir_settings = json.loads(
             agy_common_dir_cmd[agy_common_dir_cmd.index("--settings") + 1]
@@ -1413,13 +1444,12 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(agy_cmd[agy_cmd.index("--effort") + 1], "high")
         self.assertNotIn("--disable-slash-commands", agy_cmd)
         self.assertEqual(agy_cmd[agy_cmd.index("--output-format") + 1], "stream-json")
-        # `agy -p` requires its prompt as the flag value and does not read stdin.
-        self.assertEqual(agy_cmd[:3], ["/bin/agy", "-p", "prompt"])
+        self.assertEqual(agy_cmd[:3], ["/bin/agy", "--input-format", "stream-json"])
+        self.assertNotIn("-p", agy_cmd)
 
         claude_cmd = _build_provider_cmd(
             "claude",
             "/bin/claude",
-            "prompt",
             "{}",
             session_id="uuid-1",
             model="opus",
@@ -1439,7 +1469,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(claude_cmd[claude_cmd.index("--session-id") + 1], "uuid-1")
 
         claude_resume_cmd = _build_provider_cmd(
-            "claude", "/bin/claude", "inc", "{}", resume_session_id="uuid-1"
+            "claude", "/bin/claude", "{}", resume_session_id="uuid-1"
         )
         self.assertEqual(
             claude_resume_cmd[claude_resume_cmd.index("--resume") + 1], "uuid-1"
@@ -1451,17 +1481,16 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(cmd[cmd.index("--settings") + 1], '{"disableAllHooks":true}')
 
         agy_resume_cmd = _build_provider_cmd(
-            "agy", "/bin/agy", "inc", "{}", resume_session_id="conv-1"
+            "agy", "/bin/agy", "{}", resume_session_id="conv-1"
         )
         self.assertEqual(
             agy_resume_cmd[agy_resume_cmd.index("--conversation") + 1], "conv-1"
         )
-        self.assertEqual(agy_resume_cmd[:3], ["/bin/agy", "-p", "inc"])
+        self.assertEqual(agy_resume_cmd[:3], ["/bin/agy", "--input-format", "stream-json"])
 
         codex_cmd = _build_provider_cmd(
             "codex",
             "/bin/codex",
-            "prompt",
             "{}",
             schema_file=Path("/tmp/s.json"),
             out_file=Path("/tmp/o.json"),
@@ -1474,7 +1503,6 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         codex_resume_cmd = _build_provider_cmd(
             "codex",
             "/bin/codex",
-            "inc",
             "{}",
             schema_file=Path("/tmp/s.json"),
             out_file=Path("/tmp/o.json"),
@@ -1510,7 +1538,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         for session_id in (None, "thread-1"):
             with self.subTest(session_id=session_id):
                 cmd = _build_provider_cmd(
-                    "codex", "/bin/codex", "prompt", "{}",
+                    "codex", "/bin/codex", "{}",
                     resume_session_id=session_id,
                     disabled_mcp_servers=("plain", "local-tools", "local.tools"),
                 )
@@ -1841,8 +1869,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "if '--version' in sys.argv:\n"
                 "    print('1.4.2')\n"
                 "    raise SystemExit(0)\n"
-                "args = sys.argv[1:]\n"
-                "assert '-p' in args and args[args.index('-p') + 1]\n"
+                "assert json.loads(sys.stdin.read())['message']['content']\n"
                 "print(json.dumps({'event': 'init', 'conversation_id': 'agy-session'}))\n"
                 "print(json.dumps({'event': 'result', 'result': {'structured_output': {\n"
                 "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
@@ -1855,6 +1882,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
                 "THE_GUARD_REVIEW_LOG_DIR": str(log_dir),
             }
+            probe_environment(repo, env=env, priority_order=["claude", "agy"])
 
             first = run_architecture_review(repo, env=env)
             self.assertEqual((first.provider, first.mode), ("claude", "full"))
@@ -2323,6 +2351,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "if '--version' in sys.argv:\n"
                 "    print('1.4.2')\n"
                 "    raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
                 "with open(os.environ['AGY_ARGV_FILE'], 'w', encoding='utf-8') as f:\n"
                 "    json.dump(sys.argv[1:], f)\n"
                 "print(json.dumps({'event': 'init', 'conversation_id': 'c1'}))\n"
@@ -2500,7 +2529,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertIn("[features].multi_agent", deprecation_only)
         self.assertFalse(_is_persistent_provider_failure(RuntimeError(deprecation_only)))
 
-    def test_codex_stdout_quota_error_records_sticky_secondary_provider(self) -> None:
+    def test_codex_stdout_quota_error_cools_down_primary_provider(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             repo, _ = self._init_repo(tmp)
@@ -2537,6 +2566,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "if '--version' in sys.argv:\n"
                 "    print('1.4.2')\n"
                 "    raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
                 "print(json.dumps({'event': 'init', 'conversation_id': 'agy-quota-fallback'}))\n"
                 "print(json.dumps({'event': 'result', 'result': {'structured_output': {\n"
                 "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
@@ -2553,6 +2583,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual((result.verdict, result.provider), ("GO", "agy"))
             persisted = json.loads(cfg_file.read_text(encoding="utf-8"))
             self.assertEqual(persisted["preferred_provider"], "agy")
+            self.assertIn("usage limit", persisted["provider_cooldowns"]["codex"]["reason"])
 
     def test_colleague_environment_check_and_fallback_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2588,6 +2619,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 fake_bin / "agy",
                 "#!/usr/bin/env bash\n"
                 'if [ "$1" = "--version" ]; then echo \'1.4.2\'; exit 0; fi\n'
+                "cat >/dev/null\n"
                 'printf \'{"event":"init","conversation_id":"c1"}\\n\'\n'
                 'printf \'{"event":"result","result":{"status":"SUCCESS","structured_output":{"verdict":"GO","summary":"ok via agy","blocking_findings":[],"reviewed_head_sha":"%s"}}}\\n\' "$(git rev-parse HEAD)"\n',
             )
@@ -2599,19 +2631,41 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             }
 
             probed = probe_environment(repo, env=env)
-            self.assertEqual(probed["priority_order"], ["codex", "claude", "agy"])
+            self.assertEqual(probed["priority_order"], ["codex", "agy", "claude"])
             self.assertEqual(probed["preferred_provider"], "codex")
-            self.assertEqual(probed["available_providers"], ["codex", "claude", "agy"])
+            self.assertEqual(probed["available_providers"], ["codex", "agy", "claude"])
 
+            before = datetime.now(UTC)
             result = run_architecture_review(repo, force=True, env=env)
             self.assertEqual(result.verdict, "GO")
             self.assertEqual(result.provider, "agy")
 
             persisted = json.loads(cfg_file.read_text(encoding="utf-8"))
             self.assertEqual(persisted["preferred_provider"], "agy")
+            cooldown = persisted["provider_cooldowns"]["codex"]
+            expiry = datetime.fromisoformat(cooldown["until"])
+            self.assertLessEqual(before + timedelta(minutes=15), expiry)
+            self.assertLessEqual(expiry, datetime.now(UTC) + timedelta(minutes=15))
+            self.assertIn("quota exceeded", cooldown["reason"])
 
             ordered, _ = resolve_provider_order(repo, env=env)
-            self.assertEqual(ordered[0][0], "agy")
+            self.assertEqual([provider for provider, _ in ordered], ["agy", "claude", "codex"])
+            with patch.object(review_provider, "datetime", wraps=datetime) as clock:
+                clock.now.return_value = expiry
+                ordered, _ = resolve_provider_order(repo, env=env)
+            self.assertEqual([provider for provider, _ in ordered], ["codex", "agy", "claude"])
+            self.assertEqual(json.loads(cfg_file.read_text(encoding="utf-8")), persisted)
+            reset = subprocess.run(
+                [sys.executable, str(GATE_CLI), "probe", "--repo-root", str(repo), "--reprobe"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(reset.returncode, 0, reset.stderr)
+            reprobed = json.loads(reset.stdout)
+            self.assertFalse(reprobed.get("provider_cooldowns"))
+            self.assertEqual(reprobed["preferred_provider"], "codex")
 
             models = {
                 "agy": {"model": "gemini-4-argon-high", "effort": "high"},
@@ -2657,7 +2711,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(persisted["priority_order"], ["agy", "codex"])
             self.assertEqual(persisted["provider_models"], models)
             ordered, payload = resolve_provider_order(repo, env=env)
-            self.assertEqual([provider for provider, _ in ordered], ["codex", "agy"])
+            self.assertEqual([provider for provider, _ in ordered], ["agy", "codex"])
+            self.assertEqual(persisted["preferred_provider"], "agy")
             self.assertEqual(payload, persisted)
             for overrides in (
                 {"explicit_provider": "claude"},
@@ -2665,7 +2720,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             ):
                 forced, _ = resolve_provider_order(repo, **{"env": env, **overrides})
                 self.assertEqual(
-                    [provider for provider, _ in forced], ["claude", "codex", "agy"]
+                    [provider for provider, _ in forced], ["claude", "agy", "codex"]
                 )
 
             record_working_provider(repo, "claude", str(fake_bin / "claude"), env=env)
@@ -2739,7 +2794,12 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             resolve_provider_model_config("agy", payload, {}),
             ("gemini-4-argon-high", "high"),
         )
-        self.assertEqual(resolve_provider_model_config("codex", payload, {}), ("", ""))
+        self.assertEqual(DEFAULT_REVIEW_EFFORT, "high")
+        for provider in ("codex", "agy", "claude"):
+            self.assertEqual(
+                resolve_provider_model_config(provider, {}, {"CLAUDE_CODE_EFFORT_LEVEL": "max"}),
+                ("", "high"),
+            )
         self.assertEqual(
             resolve_provider_model_config(
                 "agy",
@@ -2757,6 +2817,112 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             ),
             ("override", "high"),
         )
+
+    def test_cooldown_updates_prune_invalid_entries_and_keep_all_providers_as_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            bin_dir = tmp / "bin"
+            config_file = tmp / "review-agent.json"
+            env = {
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "HOME": str(tmp),
+                "THE_GUARD_REVIEW_CONFIG": str(config_file),
+                "OPENAI_API_KEY": "test",
+                "GEMINI_API_KEY": "test",
+                "ANTHROPIC_API_KEY": "test",
+            }
+            for provider in ("codex", "agy", "claude"):
+                _write_exec(bin_dir / provider, "#!/bin/sh\nexit 0\n")
+            config = probe_environment(tmp, env=env)
+            config["provider_cooldowns"] = {
+                "codex": {"until": "invalid", "reason": "ignored"},
+                "agy": {"until": "2999-01-01T00:00:00", "reason": "timezone missing"},
+                "claude": {"until": "2000-01-01T00:00:00Z", "reason": "expired"},
+            }
+            config_file.write_text(json.dumps(config))
+            now = datetime(2026, 11, 24, tzinfo=UTC)
+            with patch.object(review_provider, "datetime", wraps=datetime) as clock:
+                clock.now.return_value = now
+                ordered, _ = resolve_provider_order(tmp, env=env)
+                self.assertEqual([provider for provider, _ in ordered], ["codex", "agy", "claude"])
+                record_provider_cooldown(tmp, "agy", reason="x" * 200, env={
+                    **env, "THE_GUARD_REVIEW_COOLDOWN_SECONDS": "20",
+                })
+                saved = json.loads(config_file.read_text())
+                self.assertEqual(saved["provider_cooldowns"], {
+                    "agy": {"until": (now + timedelta(seconds=20)).isoformat(), "reason": "x" * 160},
+                })
+                record_provider_cooldown(tmp, "claude", reason="quota", env=env)
+                record_provider_cooldown(tmp, "codex", reason="quota", env={
+                    **env, "THE_GUARD_REVIEW_COOLDOWN_SECONDS": "nan",
+                })
+                ordered, saved = resolve_provider_order(tmp, env=env)
+                self.assertEqual([provider for provider, _ in ordered], ["codex", "agy", "claude"])
+                self.assertEqual(saved["preferred_provider"], "codex")
+                self.assertEqual(saved["provider_cooldowns"]["codex"]["until"],
+                                 (now + timedelta(minutes=15)).isoformat())
+                record_working_provider(tmp, "agy", str(bin_dir / "agy"), env=env)
+                ordered, saved = resolve_provider_order(tmp, env=env)
+                self.assertEqual([provider for provider, _ in ordered], ["agy", "codex", "claude"])
+                self.assertEqual(saved["preferred_provider"], "agy")
+                config_before = config_file.read_bytes()
+                clock.now.return_value = now + timedelta(seconds=1)
+                record_working_provider(tmp, "agy", str(bin_dir / "agy"), env=env)
+                self.assertEqual(config_file.read_bytes(), config_before)
+
+    def test_invocation_provider_override_leaves_config_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "app.py")
+            _git(repo, "commit", "-m", "review scope")
+            home = tmp / "home"
+            (home / ".claude").mkdir(parents=True)
+            config_file = tmp / "review-agent.json"
+            fake_bin = home / ".local/bin"
+            _write_exec(fake_bin / "claude", "#!/bin/sh\nexit 0\n")
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(home),
+                "THE_GUARD_REVIEW_CONFIG": str(config_file),
+            }
+            probe_environment(repo, env=env)
+            config_file.write_bytes(config_file.read_bytes() + b"\n")
+            config_before = config_file.read_bytes()
+            with (
+                patch.dict(os.environ, env, clear=True),
+                contextlib.redirect_stdout(io.StringIO()),
+                patch("the_guard.review.engine._invoke_provider", return_value=(
+                    ReviewOutput("GO", "ok", (), ""), "session", "",
+                )),
+            ):
+                self.assertEqual(review_main([
+                    "run", "--repo-root", str(repo), "--force", "--provider", "claude",
+                ]), 0)
+            self.assertEqual(config_file.read_bytes(), config_before)
+
+            for options in (
+                {"explicit_provider": "claude", "env": env},
+                {"env": {**env, "THE_GUARD_REVIEW_PROVIDER": "claude"}},
+            ):
+                with self.subTest(options=options), patch("the_guard.review.engine._invoke_provider") as invoke:
+                    invoke.return_value = (ReviewOutput("GO", "ok", (), ""), "session", "")
+                    result = run_architecture_review(repo, force=True, **options)
+                    self.assertEqual(result.provider, "claude")
+                    self.assertEqual(config_file.read_bytes(), config_before)
+                    invoke.side_effect = RuntimeError("quota exceeded")
+                    with self.assertRaisesRegex(RuntimeError, "quota exceeded"):
+                        run_architecture_review(repo, force=True, **options)
+                    self.assertEqual(config_file.read_bytes(), config_before)
+
+            config_file.unlink()
+            with patch("the_guard.review.engine._invoke_provider", return_value=(
+                ReviewOutput("GO", "ok", (), ""), "session", "",
+            )):
+                result = run_architecture_review(repo, force=True, explicit_provider="claude", env=env)
+            self.assertEqual(result.provider, "claude")
+            self.assertFalse(config_file.exists())
 
     def test_build_review_prompt_loads_canonical_policy_rules(self) -> None:
         with tempfile.TemporaryDirectory() as td:
