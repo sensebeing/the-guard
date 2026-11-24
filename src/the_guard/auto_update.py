@@ -16,6 +16,8 @@ import sys
 import time
 from typing import Any, Iterator, Mapping
 
+from .git_helpers import clean_git_env
+
 AUTO_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 AUTO_UPDATE_LOG_MAX_BYTES = 512 * 1024
 SKILL_NAMES = ("the-guard", "the-guard-setup")
@@ -153,6 +155,7 @@ def _try_file_lock(path: Path) -> Iterator[bool]:
 def _subprocess_run(command: list[str], timeout: int) -> str:
     result = subprocess.run(
         command,
+        env=clean_git_env(),
         check=True,
         capture_output=True,
         text=True,
@@ -555,6 +558,7 @@ def maybe_trigger_background_auto_update(
         try:
             subprocess.Popen(
                 cmd,
+                env=clean_git_env(eff_env),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -653,8 +657,11 @@ def maybe_activate_newer_checkout_package(package_path: list[str]) -> bool:
     if package is None or str(package) in package_path:
         return False
     package_path[0:0] = [str(package)]
-    # Load the checkout's updater API while retaining the original delegation baseline.
+    # Load the checkout's bootstrap modules while retaining the original delegation baseline.
     boot_package_dir = PACKAGE_DIR
+    git_helpers = sys.modules.get(f"{__package__}.git_helpers")
+    if git_helpers is not None:
+        importlib.reload(git_helpers)
     importlib.reload(sys.modules[__name__]).PACKAGE_DIR = boot_package_dir
     return True
 

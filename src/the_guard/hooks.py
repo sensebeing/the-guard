@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .config import load_config
-from .git_helpers import changed_files, git_ok, resolve_changed_file
+from .git_helpers import changed_files, clean_git_env, git_ok, resolve_changed_file
 from .policy import PolicyError, load_policy
 from .review.repository import (
     collect_review_scope,
@@ -31,6 +31,7 @@ def hook_install_plan(root: Path | str) -> Path:
     proc = subprocess.run(
         ["git", "rev-parse", "--git-path", "hooks"],
         cwd=root,
+        env=clean_git_env(),
         capture_output=True,
         text=True,
         check=True,

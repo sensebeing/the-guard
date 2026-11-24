@@ -18,9 +18,11 @@ import tomllib
 import tempfile
 from unittest.mock import patch
 
+from the_guard.hooks import main_push_gate
 from the_guard.review.cli import main as review_main
 from the_guard.review import provider as review_provider
 from the_guard.review import repository as review_repository
+from the_guard.review import session as review_session
 from the_guard.review.engine import (
     _provider_review_plan,
     build_review_prompt,
@@ -86,6 +88,46 @@ BLUEPRINT_REVIEW = {"blueprint_globs": ["*.md"]}
 
 
 class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
+    def test_checkout_runtime_provenance_ignores_hook_git_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            unrelated = tmp / "unrelated"
+            unrelated.mkdir()
+            _git(unrelated, "init", "-b", "main")
+            module_path = repo / "src/the_guard/review/session.py"
+            module_path.parent.mkdir(parents=True)
+            module_path.write_text("# Runtime package fixture\n", encoding="utf-8")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Add runtime package")
+            expected_sha = _git(repo, "rev-parse", "--short", "HEAD")
+            with patch.object(review_session, "__file__", str(module_path)):
+                expected = review_session.active_guard_runtime()
+                self.assertEqual(expected["guard_sha"], expected_sha)
+                with patch.dict(os.environ, {"GIT_DIR": str(unrelated / ".git")}):
+                    self.assertEqual(review_session.active_guard_runtime(), expected)
+
+    def test_main_push_gate_verifies_target_receipt_with_hook_git_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp, review={})
+            base_sha = _git(repo, "rev-parse", "main")
+            (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", "app.py")
+            _git(repo, "commit", "-m", "Add reviewed code")
+            head_sha = _git(repo, "rev-parse", "HEAD")
+            result = run_architecture_review(repo, reviewer_fn=lambda _: {
+                "verdict": "GO", "summary": "Reviewed", "blocking_findings": [],
+            })
+            self.assertIsNotNone(load_valid_receipt(repo, result.patch_digest))
+            unrelated = tmp / "unrelated"
+            unrelated.mkdir()
+            _git(unrelated, "init", "-b", "main")
+            update = f"refs/heads/topic {head_sha} refs/heads/main {base_sha}\n"
+            self.assertEqual(main_push_gate(repo, update), 0)
+            with patch.dict(os.environ, {"GIT_DIR": str(unrelated / ".git")}):
+                self.assertEqual(main_push_gate(repo, update), 0)
+
     def test_cli_deterministic_snapshot_gate_precedes_provider_and_receipt(self):
         with tempfile.TemporaryDirectory() as td:
             repo, _ = self._init_repo(Path(td))
@@ -1433,7 +1475,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(meta["full_review_reason"], "no_prior_session")
 
     def test_snapshot_git_commands_disable_fsmonitor(self) -> None:
-        with patch("the_guard.review.repository.subprocess.run") as run:
+        with (
+            patch.dict(os.environ, {"GIT_DIR": "/other/.git", "GIT_OPTIONAL_LOCKS": "0"}, clear=True),
+            patch("the_guard.review.repository.subprocess.run") as run,
+        ):
             run.return_value = subprocess.CompletedProcess(
                 ["git"], 0, b"0123456789abcdef\n", b""
             )
@@ -1443,6 +1488,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         run.assert_called_once_with(
             ["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD"],
             cwd=Path("/repo"),
+            env={"GIT_OPTIONAL_LOCKS": "0"},
             check=True,
             capture_output=True,
         )
