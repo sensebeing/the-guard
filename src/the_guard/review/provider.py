@@ -84,6 +84,25 @@ def codex_home_dir(env: dict[str, str] | None = None) -> Path:
     return Path(configured) if configured else Path(eff_env.get("HOME", str(Path.home()))) / ".codex"
 
 
+def discover_codex_mcp_servers(worktree_path: Path) -> tuple[str, ...]:
+    """Collect server names from the Codex config layers within this worktree."""
+    worktree_path = worktree_path.resolve()
+    names: set[str] = set()
+    for directory in (worktree_path, *worktree_path.parents):
+        config_path = directory / ".codex" / "config.toml"
+        try:
+            with config_path.open("rb") as config_file:
+                servers = tomllib.load(config_file).get("mcp_servers")
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            pass
+        else:
+            if isinstance(servers, dict):
+                names.update(servers)
+        if (directory / ".git").exists():
+            break
+    return tuple(sorted(names))
+
+
 def _format_toml_key(key: Any) -> str:
     key_text = str(key)
     return key_text if re.fullmatch(r"[A-Za-z0-9_-]+", key_text) else json.dumps(key_text, ensure_ascii=False)

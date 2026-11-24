@@ -19,6 +19,7 @@ import tempfile
 from unittest.mock import patch
 
 from the_guard.review.cli import main as review_main
+from the_guard.review import provider as review_provider
 from the_guard.review import repository as review_repository
 from the_guard.review.engine import (
     _provider_review_plan,
@@ -703,13 +704,29 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             run_architecture_review(repo, reviewer_fn=reviewer)
 
             for prompt in prompts[-2:]:
+                self.assertIn(
+                    f"## Baseline task blueprint (immutable Anchor 0 @ {base[:12]}): "
+                    f"{merged_plan}\n{original}",
+                    prompt,
+                )
+                self.assertIn(
+                    f"## Prior reviewed branch blueprint (@ {first.head_sha[:12]}): "
+                    f"{branch_plan}\n{original}",
+                    prompt,
+                )
+                self.assertEqual(prompt.splitlines().count(original.rstrip()), len(commitments))
                 for path, commitment in commitments.items():
-                    self.assertIn(
+                    _, heading, history = prompt.partition(
                         f"### Prior reviewed branch blueprint (@ {second.head_sha[:12]}): "
-                        f"{path}\n{original}{commitment}",
-                        prompt,
+                        f"{path}\n",
                     )
-                    self.assertIn(f"-{commitment}", prompt)
+                    self.assertTrue(heading)
+                    baseline_diff, heading, head_diff = history.partition(
+                        f"### Task blueprint modifications on reviewed branch: {path}\n"
+                    )
+                    self.assertTrue(heading)
+                    self.assertIn(f"+{commitment}", baseline_diff)
+                    self.assertIn(f"-{commitment}", head_diff.split("```", 2)[1])
             self.assertEqual(legacy_anchors, {merged_plan: (base,), branch_plan: (first.head_sha,)})
             expected = {
                 merged_plan: (base, first.head_sha, second.head_sha),
@@ -986,6 +1003,25 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 prompt,
             )
             self.assertIn("-Retire the outbox.\n+Defer outbox retirement.", prompt)
+
+            def reviewer(_):
+                return {"verdict": "NO-GO", "summary": "Open work", "blocking_findings": []}
+
+            second = run_architecture_review(repo, reviewer_fn=reviewer)
+            (repo / "docs/task-plan.md").unlink()
+            _git(repo, "commit", "-am", "Delete the symlinked blueprint")
+            scope = collect_review_scope(repo)
+            prompt = build_review_prompt(repo, scope)
+            _, heading, history = prompt.partition(
+                f"### Prior reviewed branch blueprint (@ {second.head_sha[:12]}): docs/task-plan.md\n"
+            )
+            self.assertTrue(heading)
+            self.assertIn(
+                "-Retire the outbox.\n+Defer outbox retirement.\n```\n"
+                "### Task blueprint modifications on reviewed branch: docs/task-plan.md\n"
+                "[DELETED AT HEAD]",
+                history,
+            )
 
     def test_methodology_requires_zero_based_whole_module_reconciliation(self):
         obligations = (
@@ -1304,6 +1340,27 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(provider_env.get("THE_GUARD_REVIEW_ACTIVE"), "1")
         self.assertEqual(provider_env.get("THE_GUARD_SESSION_MODE"), "readonly")
         self.assertNotIn("CLAUDECODE", provider_env)
+
+    def test_codex_exec_and_resume_use_one_mcp_disable_override(self) -> None:
+        for session_id in (None, "thread-1"):
+            with self.subTest(session_id=session_id):
+                cmd = _build_provider_cmd(
+                    "codex", "/bin/codex", "prompt", "{}",
+                    resume_session_id=session_id,
+                    disabled_mcp_servers=("plain", "local-tools", "local.tools"),
+                )
+                overrides = [
+                    value for flag, value in zip(cmd, cmd[1:])
+                    if flag == "-c" and value.startswith("mcp_servers")
+                ]
+                self.assertEqual(len(overrides), 1)
+                self.assertEqual(tomllib.loads(overrides[0]), {"mcp_servers": {
+                    "plain": {"enabled": False},
+                    "local-tools": {"enabled": False},
+                    "local.tools": {"enabled": False},
+                }})
+                position = cmd.index(session_id) if session_id else len(cmd) - 1
+                self.assertLess(cmd.index(overrides[0]), position)
 
     def test_claude_prompt_travels_over_stdin_for_large_prompts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1684,6 +1741,42 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 {"current", *(f"home-{index}" for index in range(11))},
             )
 
+    def test_discover_codex_mcp_servers_from_linked_worktree_layers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            linked = tmp / "linked"
+            _git(repo, "worktree", "add", "--detach", str(linked))
+            nested = linked / "nested"
+            for directory, config in (
+                (tmp, '[mcp_servers.above-root]\ncommand = "fixture"\n'),
+                (repo, '[mcp_servers.main-only]\ncommand = "fixture"\n'),
+                (linked, '[mcp_servers.plain]\ncommand = "fixture"\n'
+                         '[mcp_servers.local-tools]\ncommand = "fixture"\n'),
+                (nested, '[mcp_servers."local.tools"]\nurl = "https://example.invalid"\n'
+                         '[mcp_servers.plain]\ncommand = "fixture"\n'),
+            ):
+                (directory / ".codex").mkdir(parents=True, exist_ok=True)
+                (directory / ".codex/config.toml").write_text(config, encoding="utf-8")
+
+            self.assertEqual(
+                review_provider.discover_codex_mcp_servers(nested),
+                ("local-tools", "local.tools", "plain"),
+            )
+            self.assertEqual(review_provider.discover_codex_mcp_servers(repo), ("main-only",))
+
+    def test_discover_codex_mcp_servers_ignores_unusable_config_layers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / ".git").mkdir()
+            config = repo / ".codex/config.toml"
+            config.parent.mkdir()
+            for content in (None, b"[broken", b"\xff", b"mcp_servers = []"):
+                with self.subTest(content=content):
+                    if content is not None:
+                        config.write_bytes(content)
+                    self.assertEqual(review_provider.discover_codex_mcp_servers(repo), ())
+
     def test_prepare_isolated_codex_home_and_codex_subprocess_env(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -1787,6 +1880,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 materialize({"CODEX_HOME": str(corrupt)})
 
             repo, _ = self._init_repo(tmp / "repo-fixture")
+            (repo / ".codex").mkdir()
+            (repo / ".codex/config.toml").write_text(
+                '[mcp_servers."project.tools"]\ncommand = "fixture"\n', encoding="utf-8",
+            )
             (repo / "services").mkdir()
             (repo / "services/example.py").write_text("value = 1\n", encoding="utf-8")
             _git(repo, "add", "services/example.py")
@@ -1809,7 +1906,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(result.verdict, "GO")
             scope = codex_isolation_scope_key(repo, "topic", env)
             self.assertEqual(json.loads(env_file.read_text())["CODEX_HOME"], str(git_common_dir(repo) / "the-guard-codex-homes" / scope))
-            self.assertNotIn("secret-token-123", " ".join(json.loads(argv_file.read_text())))
+            argv = json.loads(argv_file.read_text())
+            self.assertNotIn("secret-token-123", " ".join(argv))
+            self.assertIn('mcp_servers={"project.tools"={enabled=false}}', argv)
+            self.assertFalse(any("foo" in arg for arg in argv if arg.startswith("mcp_servers")))
 
     def test_isolated_codex_home_trusts_worktree_and_common_repository_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:

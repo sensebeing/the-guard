@@ -36,6 +36,12 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports and reloads the updater from the checkout while retaining the original package as the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
 - Review sessions persist the first reviewed head, the binding revisions of task blueprints already reviewed, and a contract digest covering reviewer code, configuration, policy rules, root instructions and the reviewed scope's architecture documents, touched-module boundary documents and touched/one-hop module declarations. Unrelated modules' documents, declarations and blueprint additions do not invalidate that evidence; changes to a touched module's contract or a one-hop neighbour's layer, role or dependency do. A digest change starts a fresh full review while preserving the binding blueprint revisions for a valid branch baseline. Codex isolation homes trust the worktree and common repository root, and provider stream decoding combines stderr with structured stdout errors so quota or auth failures reach sticky failover.
 
+For both `codex exec` and `codex exec resume`, static reviews disable each `[mcp_servers]`
+entry discovered in `.codex/config.toml` layers up to the active worktree's Git root. A single
+`-c` override sets `enabled=false` for each discovered server in a TOML inline table, preserving
+literal names that contain dots. The isolated Codex home omits user MCP configuration, and a
+linked worktree uses its own project configuration layers.
+
 Iterative fix-and-re-review rounds rerun plain `guard review`; the stored session resumes
 incrementally. `--force` is reserved for discarding a corrupted session or an explicit cold
 re-audit and is recorded as that run's `full_review_reason`. Provider prompts reach Claude over
@@ -71,8 +77,10 @@ Selection excludes unchanged, already loaded contracts before allocating up to f
 preview slots. Previews prioritize unchanged referenced merge-base evidence, then changed
 merge-base blueprints, then branch blueprints. The merge base supplies immutable Anchor 0.
 Each changed blueprint and referenced merge-base document retains ordered revisions for every
-distinct reviewed body. Inline previews include each historical body and a bounded diff or
-deletion marker when it differs from HEAD. Symlink-backed blueprints compare resolved bodies.
+distinct reviewed body. Inline previews include the bounded baseline body and a bounded diff
+from that baseline to each subsequent distinct reviewed revision. Any reviewed body that differs
+from HEAD also includes a bounded diff to HEAD or a deletion marker. Symlink-backed blueprints
+compare resolved bodies.
 The prompt indexes revisions outside the inline previews. Anchor histories
 survive provider restarts, verified rebases, and changes to discovery settings.
 `review.operational_ledgers` excludes explicit repository-relative paths from discovery and
