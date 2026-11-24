@@ -427,12 +427,12 @@ def check_contract_drift(
             for p in ([directory] if directory.is_file() else source_files(directory))
             if not p.is_symlink()
         }
-    # Only these source languages can carry deterministic module import edges.
+    # Inert documents and data carry no import edges; other text keeps extract_imports coverage.
     if scan_all_callers:
         import_candidates = [
             p
             for p in sorted(inventory)
-            if Path(p).suffix in DETERMINISTIC_IMPORT_EXTENSIONS
+            if Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
         ]
     else:
         import_candidates = [
@@ -440,7 +440,7 @@ def check_contract_drift(
             for p in sorted(inventory)
             if not is_excluded_topology_path(p)
             and owner_module(p, module_paths) in tightened
-            and Path(p).suffix in DETERMINISTIC_IMPORT_EXTENSIONS
+            and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
         ]
     # Stale evidence reports candidate modules only, and inert files carry no imports.
     evidence_candidates = [

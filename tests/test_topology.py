@@ -545,6 +545,15 @@ class TopologyTests(unittest.TestCase):
         self.write("packages/legacy/api.py", "def read():\n    return 2\n")
         self.write("packages/foundation/use_surface.py", "from packages.surface.api import read\n")
         self.write("packages/surface/use_legacy.py", "from packages.legacy.api import read\n")
+        self.write(
+            "packages/surface/use_legacy.vue",
+            '<script>\nimport { read } from "../legacy/api.ts";\n</script>\n',
+        )
+        # Inert documentation keeps its text but never contributes import edges.
+        self.write(
+            "packages/surface/guide.md",
+            'Retired callers: import "packages.legacy.api"\n',
+        )
         self.git("add", ".")
         self.git("commit", "-m", "permissive baseline at scale")
         base = self.git("rev-parse", "HEAD")
@@ -577,11 +586,13 @@ class TopologyTests(unittest.TestCase):
             {
                 ("packages/foundation/use_surface.py", 1, "guard.service-boundaries"),
                 ("packages/surface/use_legacy.py", 1, "guard.service-boundaries"),
+                ("packages/surface/use_legacy.vue", 2, "guard.service-boundaries"),
             },
         )
         by_path = {f.path: f for f in findings}
         self.assertIn("Layer 'foundation'", by_path["packages/foundation/use_surface.py"].message)
         self.assertIn("retired module 'packages/legacy'", by_path["packages/surface/use_legacy.py"].message)
+        self.assertIn("retired module 'packages/legacy'", by_path["packages/surface/use_legacy.vue"].message)
         self.assertLessEqual(len(commands), 25, commands)
 
     def test_snapshot_baseline_ignores_dirty_rename_inference(self):

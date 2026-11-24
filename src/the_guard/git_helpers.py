@@ -203,12 +203,14 @@ class BaseFileReader:
         return self._entries[path]
 
     def preload(self, paths: Iterable[str]) -> None:
-        """Batch base-snapshot lookups that ``_read_entry`` resolves tree-side.
+        """Batch the base-snapshot reads that ``_read_entry`` resolves tree-side.
 
         One recursive tree listing maps paths to blob ids, and bounded
         ``git cat-file --batch`` chunks read the unique blobs. Submodules,
-        imported trees and rename inference keep their per-path fallback, and
-        unreadable history stays uncached so the fallback fails closed.
+        imported trees and rename inference keep their per-path fallback.
+        Exact readers cache proven absence, while a missing blob or failed
+        ``git cat-file`` batch caches ``unavailable`` entries so reads fail
+        closed instead of guessing.
         """
         pending = [
             path
