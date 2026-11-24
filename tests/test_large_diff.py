@@ -57,6 +57,19 @@ class LargeDiffTests(ArchitectureReviewTestCase):
 
         return patch("subprocess.run", new=record)
 
+    def test_review_prompt_batches_snapshot_reads_and_bounds_git_output(self):
+        self.write("service/app.py", b"value = 1\n")
+        self.commit("Add a file to review")
+        prompt = build_review_prompt(self.repo, collect_review_scope(self.repo))
+        batch_plan = prompt.split("## Session Batch Read Plan\n", 1)[1].split("\n## ", 1)[0]
+
+        assert "parallel read-only tool calls in the same turn" in batch_plan
+        assert "combine bounded `git show <target-sha>:<path>` or `git grep`" in batch_plan
+        assert "Scope `git ls-tree` to touched module directories" in batch_plan
+        assert "pass `-n` to `git log`" in batch_plan
+        assert "Bound `git diff` by the batch plan or with `-- <paths>`" in batch_plan
+        assert "Read every listed production/contract/configuration batch at full depth" in batch_plan
+
     def test_full_budget_keeps_owner_body_and_indexes_secondary_only_once(self):
         self.write(".guard/config.json", json.dumps({"topology": {"modules": [
             {"path": "service", "role": "owner", "boundary_docs": ["docs/large.md"]},
