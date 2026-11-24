@@ -739,6 +739,8 @@ def _invoke_provider(
         prev_head_sha=prev_head_sha,
         reviewer_note=reviewer_note,
         full_review_reason=full_review_reason,
+        model=model,
+        effort=effort,
         contract_change_causes=contract_change_causes,
         env=env,
     )

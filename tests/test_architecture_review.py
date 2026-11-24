@@ -1597,7 +1597,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 "CLAUDE_ARGV_FILE": str(argv_record),
                 "CLAUDE_STDIN_FILE": str(stdin_record),
             }
-            prompt = "review-prompt-line\n" * 70000
+            prompt = "review-prompt-line 审查\n" * 70000
             self.assertGreater(len(prompt.encode("utf-8")), 1_200_000)
 
             output, session_id, log_path = _invoke_provider(
@@ -1609,6 +1609,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 scope=scope,
                 mode="full",
                 full_review_reason="no_prior_session",
+                model="sonnet",
+                effort="high",
             )
 
             self.assertEqual(output.verdict, "GO")
@@ -1625,6 +1627,10 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             )
             self.assertEqual(meta["mode"], "full")
             self.assertEqual(meta["full_review_reason"], "no_prior_session")
+            index = json.loads((log_dir / "index.jsonl").read_text(encoding="utf-8"))
+            for record in (meta, index):
+                self.assertEqual(record["prompt_bytes"], len(prompt.encode("utf-8")))
+                self.assertEqual((record["model"], record["effort"]), ("sonnet", "high"))
 
     def test_snapshot_git_commands_disable_fsmonitor(self) -> None:
         with (

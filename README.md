@@ -266,7 +266,9 @@ Initial reviews inspect the full changed file scope before reporting high-confid
 
 All providers default to `high` effort. Agy reads prompts over stdin as `stream-json`, so prompt size is independent of the OS argument limit. Persistent provider failures add a 15-minute entry to `provider_cooldowns`. During that window new reviews try non-cooled providers first in configured priority order. `guard probe --reprobe` clears cooldowns. Both `--provider` and `THE_GUARD_REVIEW_PROVIDER` set the first choice for one invocation and leave the provider configuration untouched.
 
-When a rebase keeps the branch patch identical and updates a touched module's boundary document, an eligible review session resumes with the changed document context. If the refresh lacks an inspectable delta, review starts a new full session. Snapshot document budgets count UTF-8 bytes, with 60,000 bytes for each primary owner document, 24,000 for each secondary document, and 180,000 in total.
+When a rebase keeps the branch patch identical and updates a touched module's boundary documents or its declared `boundary_docs` list, an eligible review session resumes with the changed context and requires a fresh receipt. If the refresh lacks an inspectable delta, review starts a new full session. Snapshot document budgets count UTF-8 bytes, with 60,000 bytes for each primary owner document, 24,000 for each secondary document, and 180,000 in total.
+
+Review run metadata and `index.jsonl` record `prompt_bytes` and the selected `model` and `effort` when set. The ten most recent runs remain available even after their worktrees are deleted. Each active worktree also keeps up to four runs within seven days of the newest run.
 
 ## Configuration
 
@@ -317,6 +319,10 @@ selects the integration boundary that `guard init` records and the `pre-push` ga
 The default empty array skips discovery. `review.operational_ledgers` lists repository-relative
 files to exclude from discovery and defaults to `["CHANGELOG.md"]`. Previously reviewed
 blueprints retain their revision history after discovery settings change.
+One-hop discovery reads matching blueprints in full and uses only added or removed lines from
+other Markdown in the current branch diff. Incremental reviews show bounded diffs for modified
+blueprints first, preview up to four newly discovered blueprints, and index overflow by revision.
+The prompt summarizes unchanged anchors when they exceed 12 entries or 4,000 UTF-8 bytes.
 Changes to a configured blueprint require review. Receipt reuse requires coverage of the
 applicable retained revisions and equivalent blueprint bodies across replayed snapshots.
 
@@ -341,7 +347,8 @@ The same directory holds updater metadata and logs by default. Legacy updater me
 `~/.guard` migrates during the next update using the default state directory after any running
 legacy updater releases its lock. `THE_GUARD_STATE_DIR` and
 `--state-dir` override the updater location. The updater rotates `auto_update.log` at 512 KiB and
-keeps one backup.
+keeps one backup. Background checks avoid Git and package hashing during the first 30 seconds
+after a scheduled update and honor a six-hour interval when the global tool is current.
 
 ## Topology checks and CLI reference
 

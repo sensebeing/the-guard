@@ -769,7 +769,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual((result.mode, result.provider), ("incremental", "claude"))
             self.assertEqual(json.loads(cfg_file.read_text())["preferred_provider"], "codex")
 
-    def test_run_index_rotates_atomically_and_retains_four_logs(self) -> None:
+    def test_run_index_rotates_atomically_and_retains_recent_logs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             env = {"THE_GUARD_REVIEW_LOG_DIR": str(root / "logs")}
@@ -789,11 +789,59 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             backup.write_text("old backup")
             old_index = b"x" * (2 * 1024 * 1024)
             index.write_bytes(old_index)
-            with mock.patch.object(session, "MAX_RETAINED_RUN_LOGS", 4):
-                recent = [finish_run() for _ in range(5)]
+            with mock.patch.object(session, "MAX_RETAINED_RUN_LOGS", 10):
+                recent = [finish_run() for _ in range(11)]
             self.assertEqual(backup.read_bytes(), old_index)
-            self.assertEqual(len(index.read_text().splitlines()), 5)
-            self.assertEqual(set(first.parent.glob("*.meta.json")), set(recent[-4:]))
+            self.assertEqual(len(index.read_text().splitlines()), 11)
+            self.assertEqual(set(first.parent.glob("*.meta.json")), set(recent[-10:]))
+
+    def test_recent_runs_survive_deleted_worktrees_and_old_active_runs_lose_protection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            deleted_worktree = root / "temporary"
+            deleted_worktree.mkdir()
+            logger = ReviewRunLogger(
+                root, worktree_path=deleted_worktree, branch="topic", provider="codex", mode="full",
+                merge_base="a" * 40, head_sha="b" * 40, patch_digest="c" * 64,
+                reviewable_file_count=1, prompt="Snapshot",
+                env={"THE_GUARD_REVIEW_LOG_DIR": str(root / "logs")},
+            )
+            logger.finish(status="completed")
+            newest = 1_000_000.0
+            os.utime(logger.meta_path, (newest, newest))
+
+            def seed(prefix: str, owner: Path, mtime: float) -> Path:
+                meta = logger.log_dir / f"{prefix}.meta.json"
+                meta.write_text(json.dumps({"worktree": str(owner)}))
+                os.utime(meta, (mtime, mtime))
+                for suffix in (".prompt.md", ".events.jsonl"):
+                    (logger.log_dir / f"{prefix}{suffix}").write_text("evidence")
+                return meta
+
+            recent = [
+                seed(f"recent-{index}", deleted_worktree, newest - index - 1)
+                for index in range(11)
+            ]
+            deleted_worktree.rmdir()
+            active = []
+            for index in range(8):
+                owner = root / f"active-{index}"
+                owner.mkdir()
+                active.extend(
+                    seed(f"active-{index}-{run}", owner, newest - 100 - run)
+                    for run in range(4)
+                )
+            old = seed("old", root, newest - 7 * 24 * 3600 - 1)
+
+            logger._prune_old_runs()
+
+            self.assertEqual(
+                set(logger.log_dir.glob("*.meta.json")), {logger.meta_path, *recent[:9], *active},
+            )
+            for meta in (*recent[9:], old):
+                prefix = meta.name.removesuffix(".meta.json")
+                self.assertFalse((logger.log_dir / f"{prefix}.prompt.md").exists())
+                self.assertFalse((logger.log_dir / f"{prefix}.events.jsonl").exists())
 
     def test_transient_primary_retries_before_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -888,6 +936,42 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     self.assertNotIn("## Verified incremental scope", prompt)
                     receipt = load_valid_receipt(repo, first.patch_digest)
                     self.assertEqual(receipt["head_sha"], second.head_sha)
+
+    def test_rebased_boundary_doc_list_changes_resume_but_require_a_new_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, reviewed = self._start_module_review(Path(td))
+            doc = "docs/a-extra.md"
+            config_path = repo / ".guard/config.json"
+            for declared, evidence in (
+                ([doc], "## Boundary reference: docs/a-extra.md\nAdditional owner context"),
+                ([], "Removed from declared boundary_docs (no longer bound as module boundary): `docs/a-extra.md`"),
+            ):
+                with self.subTest(declared=declared):
+                    old_digest = load_valid_receipt(repo, reviewed.patch_digest)["contract_digest"]
+                    _git(repo, "switch", "main")
+                    if declared:
+                        (repo / doc).write_text("Additional owner context\n")
+                        _git(repo, "add", doc)
+                    config = json.loads(config_path.read_text())
+                    config["topology"]["modules"][0]["boundary_docs"] = declared
+                    config_path.write_text(json.dumps(config))
+                    _git(repo, "commit", "-am", "update upstream boundary declaration")
+                    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                    _git(repo, "switch", "topic")
+                    _git(repo, "rebase", "main")
+
+                    scope = collect_review_scope(repo)
+                    self.assertEqual(scope.patch_digest, reviewed.patch_digest)
+                    self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+                    result = run_architecture_review(repo, env=env)
+                    self.assertEqual((result.mode, result.session_id), ("incremental", reviewed.session_id))
+                    prompt = Path(result.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                    self.assertIn("## Updated Module Scope & Boundary Context", prompt)
+                    self.assertIn(evidence, prompt)
+                    receipt = load_valid_receipt(repo, result.patch_digest)
+                    self.assertNotEqual(receipt["contract_digest"], old_digest)
+                    self.assertEqual(receipt["head_sha"], result.head_sha)
+                    reviewed = result
 
     def test_same_patch_contract_mismatch_without_inspectable_delta_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -987,6 +1071,8 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
     def test_rebase_only_invalidates_for_related_module_declarations(self) -> None:
         for module, mode, reason in (
             ("services/a", "full", "contract_changed"),
+            ("touched layer", "full", "contract_changed"),
+            ("touched dependencies", "full", "contract_changed"),
             ("services/b", "full", "contract_changed"),
             ("services/c", "incremental", ""),
             ("services/new", "full", "contract_changed"),
@@ -1008,6 +1094,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 elif module == "remove downstream":
                     modules[:] = [item for item in modules if item["path"] != "services/c"]
                     _git(repo, "rm", "-r", "services/c")
+                elif module == "touched layer":
+                    modules[0]["layer"] = "domain"
+                elif module == "touched dependencies":
+                    modules[0]["dependencies"] = []
                 else:
                     next(item for item in modules if item["path"] == module)["role"] = "updated owner"
                 if module == "services/c":
@@ -1484,13 +1574,15 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             )
             logger.finish(status="completed")
             # Quiet worktrees retain their evidence despite a much noisier peer.
+            newest = logger.meta_path.stat().st_mtime
             for idx in range(120):
                 prefix = f"retention-{idx:03d}"
                 meta = log_dir / f"{prefix}.meta.json"
                 meta.write_text(
                     json.dumps({"worktree": "quiet" if idx < 12 else "noisy"})
                 )
-                os.utime(meta, (1000 + idx, 1000 + idx))
+                mtime = newest - 120 + idx
+                os.utime(meta, (mtime, mtime))
                 for suffix in (".prompt.md", ".events.jsonl"):
                     (log_dir / f"{prefix}{suffix}").write_text("evidence")
             deleted_worktree = str(tmp / "deleted-wt")
