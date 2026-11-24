@@ -1170,9 +1170,11 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 _git(repo, "commit", "-m", "reviewed code")
                 reviewer = lambda _: {"verdict": "GO", "summary": "reviewed", "blocking_findings": []}
                 run_architecture_review(repo, reviewer_fn=reviewer)
+                prior = load_review_session(repo)
                 old_scope = collect_review_scope(repo)
                 digest = compute_review_contract_digest(load_policy(repo), load_config(repo),
-                                                       repo_root=repo, revision=old_scope.head_sha)
+                                                       repo_root=repo, revision=old_scope.head_sha,
+                                                       scope=old_scope)
                 _git(repo, "checkout", "main")
                 path = repo / document
                 path.write_text(path.read_text() + "\nChanged architectural responsibility\n")
@@ -1183,10 +1185,17 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 _git(repo, "rebase", "main")
                 scope = collect_review_scope(repo)
                 new_digest = compute_review_contract_digest(load_policy(repo), load_config(repo),
-                                                           repo_root=repo, revision=scope.head_sha)
+                                                           repo_root=repo, revision=scope.head_sha,
+                                                           scope=scope)
                 self.assertNotEqual(digest, new_digest)
                 self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
                 self.assertEqual(run_architecture_review(repo, reviewer_fn=reviewer).mode, "full")
+                saved = load_review_session(repo)
+                self.assertTrue(saved.session_contract_digest)
+                if document == "AGENTS.md":
+                    self.assertNotEqual(prior.session_contract_digest, saved.session_contract_digest)
+                else:
+                    self.assertEqual(prior.session_contract_digest, saved.session_contract_digest)
 
     def test_missing_boundary_reference_does_not_bind_an_unbound_module(self):
         with tempfile.TemporaryDirectory() as td:
