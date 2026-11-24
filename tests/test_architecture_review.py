@@ -21,7 +21,7 @@ from unittest.mock import patch
 from the_guard.review.cli import main as review_main
 from the_guard.review import repository as review_repository
 from the_guard.review.engine import (
-    _full_review_reason,
+    _provider_review_plan,
     build_review_prompt,
     collect_review_scope,
     resolve_provider_order,
@@ -1390,7 +1390,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             capture_output=True,
         )
 
-    def test_full_review_reason_vocabulary_names_each_full_cause(self) -> None:
+    def test_provider_review_plan_owns_mode_and_full_review_reason(self) -> None:
         session = ReviewSessionState(
             worktree_path="/repo",
             branch="topic",
@@ -1404,67 +1404,102 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             last_blocking_findings=(),
             last_submodule_shas={},
         )
-        cases = {
-            "force": {
-                "force": True,
-                "stored_session": session,
-                "contract_changed": False,
-                "has_incremental_prompt": True,
-                "prior_session": session,
-                "provider": "claude",
-            },
-            "no_prior_session": {
-                "force": False,
-                "stored_session": None,
-                "contract_changed": False,
-                "has_incremental_prompt": False,
-                "prior_session": None,
-                "provider": "claude",
-            },
-            "contract_changed": {
-                "force": False,
-                "stored_session": session,
-                "contract_changed": True,
-                "has_incremental_prompt": False,
-                "prior_session": None,
-                "provider": "claude",
-            },
-            "no_incremental_delta": {
-                "force": False,
-                "stored_session": session,
-                "contract_changed": False,
-                "has_incremental_prompt": False,
-                "prior_session": session,
-                "provider": "claude",
-            },
-            "provider_changed": {
-                "force": False,
-                "stored_session": session,
-                "contract_changed": False,
-                "has_incremental_prompt": True,
-                "prior_session": session,
-                "provider": "agy",
-            },
-            "missing_session_id": {
-                "force": False,
-                "stored_session": replace(session, session_id=""),
-                "contract_changed": False,
-                "has_incremental_prompt": True,
-                "prior_session": replace(session, session_id=""),
-                "provider": "claude",
-            },
-            "": {
-                "force": False,
-                "stored_session": session,
-                "contract_changed": False,
-                "has_incremental_prompt": True,
-                "prior_session": session,
-                "provider": "claude",
-            },
-        }
-        for expected, kwargs in cases.items():
-            with self.subTest(reason=expected):
-                self.assertEqual(_full_review_reason(**kwargs), expected)
+        missing_session_id = replace(session, session_id="")
+        cases = [
+            (
+                ("full", "resume_failed"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "claude",
+                    "resume_failed": True,
+                },
+            ),
+            (
+                ("full", "force"),
+                {
+                    "force": True,
+                    "stored_session": session,
+                    "prior_session": None,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "no_prior_session"),
+                {
+                    "force": False,
+                    "stored_session": None,
+                    "prior_session": None,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "contract_changed"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": None,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "no_incremental_delta"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "provider_changed"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "agy",
+                },
+            ),
+            (
+                ("full", "missing_session_id"),
+                {
+                    "force": False,
+                    "stored_session": missing_session_id,
+                    "prior_session": missing_session_id,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("incremental", ""),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "claude",
+                },
+            ),
+        ]
+        for (expected_mode, expected_reason), kwargs in cases:
+            with self.subTest(mode=expected_mode, reason=expected_reason):
+                plan = _provider_review_plan(**kwargs)
+                self.assertEqual(plan.mode, expected_mode)
+                self.assertEqual(plan.full_review_reason, expected_reason)
+
+        incremental_plan = _provider_review_plan(**cases[-1][1])
+        self.assertEqual(incremental_plan.incremental_prompt, "incremental prompt")
+        self.assertEqual(incremental_plan.resume_session_id, "session-1")
+        failed_plan = _provider_review_plan(**cases[0][1])
+        self.assertEqual(failed_plan.incremental_prompt, "")
+        self.assertEqual(failed_plan.resume_session_id, "")
 
     def test_run_metadata_records_cold_forced_and_contract_full_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as td:
