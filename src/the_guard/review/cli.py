@@ -16,10 +16,14 @@ from ..config import load_config
 from ..policy import PolicyError, load_policy
 from ..topology import run_topology_guard, check_contract_drift
 from .contract import PROVIDERS, BlockingFinding, validate_review_output
-from .session import ReviewResult
+from .session import ReviewResult, compute_review_contract_digest
 from .engine import run_architecture_review
 from .provider import probe_environment, resolve_provider_order
-from .repository import collect_review_scope, resolve_or_carry_forward_receipt
+from .repository import (
+    collect_review_scope,
+    diagnose_missing_receipt,
+    resolve_or_carry_forward_receipt,
+)
 
 
 def _parse_priority_order(value: str) -> list[str]:
@@ -171,22 +175,25 @@ def _run_review(args: argparse.Namespace, root: Path) -> int:
             if scope.is_exempt:
                 print(f"EXEMPT (digest={scope.patch_digest[:12]})")
                 return 0
+            current_contract_digest = compute_review_contract_digest(
+                snapshot_policy, snapshot_config, repo_root=root, revision=scope.head_sha, scope=scope,
+            )
             receipt = resolve_or_carry_forward_receipt(
                 root,
                 scope,
                 persist=False,
                 config=snapshot_config,
                 policy=snapshot_policy,
+                contract_digest=current_contract_digest,
             )
             if receipt is not None:
                 print(
                     f"VERIFIED (provider={receipt.get('provider', 'unknown')}, digest={scope.patch_digest[:12]})"
                 )
                 return 0
-            sys.stderr.write(
-                f"## Architecture Review Gate: NO-GO (missing receipt for patch_digest={scope.patch_digest[:12]})\n\n"
-                "Run `guard review`; fix all related findings or submit evidence "
-                "with --note, then retry the push.\n"
+            print(
+                diagnose_missing_receipt(root, scope, contract_digest=current_contract_digest),
+                file=sys.stderr,
             )
             return 2
         if static_findings:

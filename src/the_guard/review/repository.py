@@ -40,6 +40,7 @@ from .session import (
     UTC,
     ReviewResult,
     ReviewSessionState,
+    active_guard_runtime,
     compute_review_contract_digest,
     list_review_sessions,
     receipt_payload,
@@ -818,6 +819,83 @@ def _receipt_covers(
     )
 
 
+def _scope_contract_digest(
+    repo_root: Path,
+    scope: ReviewScope,
+    *,
+    config: GuardConfig | None,
+    policy: Policy | None,
+    contract_digest: str | None = None,
+) -> str:
+    config = config or load_config(repo_root, revision=scope.head_sha)
+    policy = policy or load_policy(repo_root, revision=scope.head_sha, config=config)
+    return contract_digest or compute_review_contract_digest(
+        policy, config, repo_root=repo_root, revision=scope.head_sha, scope=scope,
+    )
+
+
+def diagnose_missing_receipt(
+    repo_root: Path,
+    scope: ReviewScope,
+    *,
+    config: GuardConfig | None = None,
+    policy: Policy | None = None,
+    contract_digest: str | None = None,
+) -> str:
+    """Explain a failed receipt lookup after carry-forward has been attempted."""
+    missing = (
+        f"NO-GO: missing review receipt for pushed range (patch {scope.patch_digest[:12]}). "
+        "Run guard review, address findings or submit --note evidence, then retry."
+    )
+    receipt = load_valid_receipt(repo_root, scope.patch_digest)
+    if receipt is None:
+        return missing
+
+    current_contract = contract_digest or _scope_contract_digest(
+        repo_root, scope, config=config, policy=policy,
+    )
+    receipt_contract = receipt.get("contract_digest")
+    if receipt_contract != current_contract:
+        receipt_sha = str(receipt.get("guard_sha") or "")
+        receipt_tree = receipt.get("guard_tree_digest")
+        receipt_digest = str(receipt_contract or "")[:12] or "unknown"
+        contracts = f"receipt contract {receipt_digest}, verifier contract {current_contract[:12]}"
+        if receipt_tree or receipt_sha:
+            runtime = active_guard_runtime()
+            verifier_sha = runtime["guard_sha"]
+            if (receipt_tree and receipt_tree != runtime["guard_tree_digest"]) or (
+                receipt_sha and verifier_sha
+                and not (receipt_sha.startswith(verifier_sha) or verifier_sha.startswith(receipt_sha))
+            ):
+                receipt_dir = receipt.get("guard_package_dir") or "unknown package path"
+                return (
+                    f"NO-GO: the-guard runtime mismatch ({contracts}). "
+                    f"Receipt runtime {receipt_sha or 'unknown SHA'} at {receipt_dir}. "
+                    f"Verifier runtime {verifier_sha or 'unknown SHA'} at {runtime['guard_package_dir']}. "
+                    "Use the same guard CLI for review and verification. "
+                    "Run guard self-update to align them, then re-run guard review."
+                )
+        return (
+            f"NO-GO: review contract changed ({contracts}). "
+            "Policy, .guard/config.json, boundary docs, or the guard version may have changed. "
+            "Re-run guard review."
+        )
+    if not _anchors_cover(
+        normalize_task_blueprint_anchors(receipt.get("task_blueprint_anchors")),
+        scope.task_blueprint_anchors,
+    ):
+        return (
+            "NO-GO: blueprint-anchor drift. The review receipt does not cover all required "
+            "task blueprint revisions. Re-run guard review."
+        )
+    if receipt.get("head_sha") != scope.head_sha or receipt.get("merge_base") != scope.merge_base:
+        return (
+            "NO-GO: commit/baseline drift. The review receipt covers a different HEAD or merge base "
+            "and no eligible review session could carry it forward. Re-run guard review."
+        )
+    return missing
+
+
 def resolve_or_carry_forward_receipt(
     repo_root: Path,
     scope: ReviewScope,
@@ -832,15 +910,8 @@ def resolve_or_carry_forward_receipt(
     if existing is None and not sessions:
         return None
     current_config = config or load_config(repo_root, revision=scope.head_sha)
-    current_policy = policy or load_policy(
-        repo_root, revision=scope.head_sha, config=current_config
-    )
-    current_contract_digest = contract_digest or compute_review_contract_digest(
-        current_policy,
-        current_config,
-        repo_root=repo_root,
-        revision=scope.head_sha,
-        scope=scope,
+    current_contract_digest = _scope_contract_digest(
+        repo_root, scope, config=current_config, policy=policy, contract_digest=contract_digest,
     )
     if (
         existing is not None
