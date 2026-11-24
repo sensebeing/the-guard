@@ -6,13 +6,38 @@ import os
 import difflib
 import posixpath
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 GIT_TIMEOUT_SECONDS = 30
+GIT_REPO_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_SUPER_PREFIX",
+)
 _CAT_FILE_BATCH_SIZE = 2000
+
+
+def clean_git_env(
+    env: Mapping[str, str] | None = None,
+    *,
+    extra: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Let the child Git command select its repository from its working directory or arguments."""
+    cleaned = dict(os.environ if env is None else env)
+    for name in GIT_REPO_ENV_VARS:
+        cleaned.pop(name, None)
+    if extra is not None:
+        cleaned.update(extra)
+    return cleaned
 
 
 def submodule_paths(repo_root: Path, *, revision: str | None = None) -> tuple[str, ...]:
@@ -79,7 +104,7 @@ def git(cwd: Path, command: list[str]) -> subprocess.CompletedProcess[str] | Non
             command,
             cwd=cwd,
             capture_output=True,
-            env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
+            env=clean_git_env(extra={"GIT_NO_LAZY_FETCH": "1"}),
             check=False,
             text=True,
             errors="replace",
@@ -277,7 +302,7 @@ class BaseFileReader:
                 cwd=self.root,
                 input="".join(f"{oid}\n" for oid in oids).encode(),
                 capture_output=True,
-                env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
+                env=clean_git_env(extra={"GIT_NO_LAZY_FETCH": "1"}),
                 check=False,
                 timeout=GIT_TIMEOUT_SECONDS,
             )
@@ -499,6 +524,7 @@ def changed_files(
         result = subprocess.run(
             ["git", *args],
             cwd=root,
+            env=clean_git_env(),
             capture_output=True,
             check=True,
             timeout=GIT_TIMEOUT_SECONDS,
@@ -537,6 +563,7 @@ def read_repository_file(
                 entry = subprocess.run(
                     ["git", "ls-tree", revision, "--", f":(literal){rel_path}"],
                     cwd=repo_root,
+                    env=clean_git_env(),
                     capture_output=True,
                     check=True,
                     timeout=15,
@@ -548,6 +575,7 @@ def read_repository_file(
                 link = subprocess.run(
                     ["git", "show", f"{revision}:{rel_path}"],
                     cwd=repo_root,
+                    env=clean_git_env(),
                     capture_output=True,
                     check=True,
                     timeout=15,
@@ -568,6 +596,7 @@ def read_repository_file(
             proc = subprocess.run(
                 ["git", "show", f"{revision}:{rel_path}"],
                 cwd=repo_root,
+                env=clean_git_env(),
                 check=False,
                 capture_output=True,
                 timeout=15,

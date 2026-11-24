@@ -20,7 +20,7 @@ from .auto_update import (
 from .config import REVIEW_INTEGRATION_MODES, VERSION, load_config
 from .distill import distill
 from .finding import Finding
-from .git_helpers import changed_files, resolve_changed_base
+from .git_helpers import changed_files, clean_git_env, resolve_changed_base
 from .hooks import edit_guard, main_push_gate
 from .init import initialize
 from .policy import PolicyError, load_policy
@@ -115,6 +115,7 @@ def _publish_check_github_review(
         head_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=root,
+            env=clean_git_env(),
             check=True,
             capture_output=True,
             text=True,

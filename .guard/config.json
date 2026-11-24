@@ -54,7 +54,9 @@
         "boundary_docs": [
           "src/the_guard/README.md"
         ],
-        "dependencies": [],
+        "dependencies": [
+          "src/the_guard/git_helpers.py"
+        ],
         "layer": "foundation",
         "role": "Checkout selection, package activation, and installed tool and skill update lifecycle"
       },
@@ -131,7 +133,7 @@
         ],
         "dependencies": [],
         "layer": "foundation",
-        "role": "Read-only Git history, safe repository snapshot reads and changed-line plumbing"
+        "role": "Git subprocess repository isolation, read-only history, safe repository snapshot reads and changed-line plumbing"
       },
       {
         "path": "src/the_guard/hooks.py",

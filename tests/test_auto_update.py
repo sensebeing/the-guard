@@ -90,9 +90,16 @@ class AutoUpdateTests(unittest.TestCase):
             legacy.mkdir()
             metadata = legacy / "auto_update.json"
             metadata.write_text('{"installed_sha":"legacy","last_checked_at":1}')
-            env = {"THE_GUARD_BIN": sys.executable, "THE_GUARD_AUTO_UPDATE": "1"}
+            env = {
+                "THE_GUARD_BIN": sys.executable,
+                "THE_GUARD_AUTO_UPDATE": "1",
+                "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
+            }
             with mock.patch.object(auto_update.subprocess, "Popen") as popen:
-                self.assertTrue(auto_update.maybe_trigger_background_auto_update(home_dir=home, env=env))
+                self.assertTrue(auto_update.maybe_trigger_background_auto_update(
+                    home_dir=home, env={**env, "GIT_DIR": str(home / "other/.git")},
+                ))
+            self.assertEqual(popen.call_args.kwargs.get("env"), env)
             self.assertNotIn("--state-dir", popen.call_args.args[0])
             self.assertTrue(metadata.is_file())
             self.assertFalse((home / ".config/the-guard/auto_update.json").exists())
@@ -220,7 +227,7 @@ class AutoUpdateTests(unittest.TestCase):
                 self.assertIsNone(auto_update.maybe_delegate_to_checkout(["status"], home_dir=home, env=env))
                 trigger.assert_not_called()
 
-    def test_activate_newer_checkout_package_prepends_path_and_reloads_once(self) -> None:
+    def test_activate_newer_checkout_package_reloads_bootstrap_modules_once(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             home, package, metadata, sha = self._make_checkout(root_path)
@@ -242,10 +249,13 @@ class AutoUpdateTests(unittest.TestCase):
                 self.assertTrue(auto_update.maybe_activate_newer_checkout_package(package_path))
                 self.assertEqual(package_path, [str(package.resolve()), str(install)])
                 self.assertFalse(auto_update.maybe_activate_newer_checkout_package(package_path))
-                reload.assert_called_once_with(auto_update)
+                self.assertEqual(reload.call_args_list, [
+                    mock.call(sys.modules["the_guard.git_helpers"]),
+                    mock.call(auto_update),
+                ])
                 trigger.assert_not_called()
 
-    def test_imports_resolve_config_and_policy_from_activated_checkout(self) -> None:
+    def test_bootstrap_uses_checkout_modules_with_hook_git_dir(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             home, package, metadata, _ = self._make_checkout(root_path)
@@ -260,14 +270,25 @@ class AutoUpdateTests(unittest.TestCase):
             sha = self._commit_checkout(home / "the-guard", "new package version")
             original_metadata = json.dumps({"installed_sha": sha[:7]})
             metadata.write_text(original_metadata, encoding="utf-8")
+            unrelated = root_path / "unrelated"
+            subprocess.run(["git", "init", str(unrelated)], check=True, capture_output=True)
             result = subprocess.check_output(
-                [sys.executable, "-c", "import the_guard; from the_guard import policy; "
-                 "print(the_guard.__version__); print(policy.__file__)"],
-                env={"HOME": str(home), "PYTHONPATH": str(install.parent), "PATH": os.environ["PATH"],
-                     "THE_GUARD_BIN": "/usr/bin/true"},
+                [sys.executable, "-c", "import the_guard; "
+                 "from the_guard import auto_update, config, git_helpers, policy; "
+                 "print(the_guard.__version__); "
+                 "print(*(module.__file__ for module in (auto_update, config, git_helpers, policy)), sep='\\n')"],
+                cwd=root_path,
+                env={
+                    "HOME": str(home), "PYTHONPATH": str(install.parent), "PATH": os.environ["PATH"],
+                    "THE_GUARD_BIN": "/usr/bin/true", "GIT_DIR": str(unrelated / ".git"),
+                },
                 text=True,
             )
-            self.assertEqual(result.splitlines(), ["9.8.7", str(package.resolve() / "policy.py")])
+            self.assertEqual(result.splitlines(), [
+                "9.8.7", *(str(package.resolve() / filename) for filename in (
+                    "auto_update.py", "config.py", "git_helpers.py", "policy.py",
+                )),
+            ])
             self.assertEqual(metadata.read_text(encoding="utf-8"), original_metadata)
             self.assertEqual(list(metadata.parent.iterdir()), [metadata])
 
@@ -402,18 +423,47 @@ class AutoUpdateTests(unittest.TestCase):
             (checkout / "dirty.txt").write_text("dirty\n", encoding="utf-8")
             self.assertIsNone(auto_update.maybe_delegate_to_checkout(["status"], active_repo_root=consumer, home_dir=home, env=env))
 
-    def test_linked_worktree_counts_as_same_guard_repository(self) -> None:
+    def test_repository_identity_ignores_hook_git_dir(self) -> None:
         """A linked worktree must not delegate or update during snapshot-bound self-inspection."""
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             repo = root_path / "repo"
             subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
             (repo / "marker").write_text("main\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(repo), "add", "marker"], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
+            self._commit_checkout(repo, "init")
             linked = root_path / "linked"
             subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", "feature", str(linked)], check=True, capture_output=True)
-            self.assertTrue(auto_update._is_same_git_repo(repo, linked))
+            unrelated = root_path / "unrelated"
+            subprocess.run(["git", "init", str(unrelated)], check=True, capture_output=True)
+            for hook_env in ({}, {"GIT_DIR": str(unrelated / ".git")}):
+                with self.subTest(hook_env=hook_env), mock.patch.dict(os.environ, hook_env):
+                    self.assertTrue(auto_update._is_same_git_repo(repo, linked))
+                    self.assertFalse(auto_update._is_same_git_repo(repo, unrelated))
+
+    def test_checkout_selection_and_activation_ignore_hook_git_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root).resolve()
+            home, package, metadata, baseline = self._make_checkout(root_path)
+            install = self._make_stale_install(root_path, package)
+            metadata.write_text(json.dumps({"installed_sha": baseline[:7]}), encoding="utf-8")
+            unrelated = root_path / "unrelated"
+            subprocess.run(["git", "init", "-b", "topic", str(unrelated)], check=True, capture_output=True)
+            env = {"THE_GUARD_AUTO_UPDATE": "1", "PATH": os.environ["PATH"]}
+            for hook_env in ({}, {"GIT_DIR": str(unrelated / ".git")}):
+                package_path = [str(install)]
+                with (
+                    self.subTest(hook_env=hook_env),
+                    mock.patch.dict(os.environ, {**env, **hook_env}, clear=True),
+                    mock.patch.object(Path, "home", return_value=home),
+                    mock.patch.object(auto_update, "PACKAGE_DIR", install),
+                    mock.patch.object(importlib, "reload", return_value=auto_update),
+                ):
+                    self.assertEqual(auto_update._newer_checkout_package(
+                        active_repo_root=unrelated, env=os.environ,
+                    ), package)
+                    self.assertTrue(auto_update.maybe_activate_newer_checkout_package(package_path))
+                    self.assertEqual(package_path, [str(package), str(install)])
+
     def test_parser_exposes_self_update_and_status_contracts(self) -> None:
         """CLI parser exposes checkout, home, state, gemini, quiet, and json flags."""
         parser = build_parser()

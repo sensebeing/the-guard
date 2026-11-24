@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..config import GuardConfig, load_config
-from ..git_helpers import git_ok
+from ..git_helpers import clean_git_env, git_ok
 from ..policy import Policy, load_policy
 from .contract import (
     CODE_EXTENSIONS,
@@ -73,6 +73,7 @@ def _git(
     return subprocess.run(
         ["git", "-c", "core.fsmonitor=false", *args],
         cwd=repo_root,
+        env=clean_git_env(),
         check=check,
         capture_output=True,
     )
@@ -251,6 +252,7 @@ def _compute_stable_patch_id(repo_root: Path, diff_bytes: bytes) -> str:
     proc = subprocess.run(
         ["git", "patch-id", "--stable"],
         cwd=repo_root,
+        env=clean_git_env(),
         input=diff_bytes,
         check=True,
         capture_output=True,
