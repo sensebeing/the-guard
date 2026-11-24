@@ -104,9 +104,9 @@ GitHub PR mode writes `.github/workflows/the-guard-review.yml` and expects the
 `THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository secrets.
 
 If you maintain a custom `pre-push` hook, resolve the worktree root with
-`git rev-parse --show-toplevel` before clearing inherited Git repository selectors such as
-`GIT_DIR` and `GIT_WORK_TREE`. Invoke the global `guard hook main-push-gate --repo-root "$top"`
-with Git's complete stdin update stream. [Git repository selectors](src/the_guard/git_helpers.py)
+`git rev-parse --show-toplevel` before clearing inherited [Git repository selectors](src/the_guard/git_helpers.py)
+such as `GIT_DIR` and `GIT_WORK_TREE`. Invoke the global `guard hook main-push-gate --repo-root "$top"`
+with Git's complete stdin update stream.
 
 ### 3. Or run the setup skill
 

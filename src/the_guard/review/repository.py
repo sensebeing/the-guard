@@ -877,7 +877,7 @@ def diagnose_missing_receipt(
                 receipt_sha and verifier_sha
                 and not (receipt_sha.startswith(verifier_sha) or verifier_sha.startswith(receipt_sha))
             )
-            if receipt_version or (verifier_tree and (tree_changed or sha_changed)):
+            if receipt_version or (verifier_tree and tree_changed) or sha_changed:
                 receipt_dir = receipt.get("guard_package_dir") or "unknown package path"
                 versions = (
                     f"Receipt review_contract_version={receipt_version}. "

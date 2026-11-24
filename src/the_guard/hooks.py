@@ -19,7 +19,7 @@ from .review.session import compute_review_contract_digest
 from .topology import check_contract_drift, run_topology_guard
 
 
-_LEGACY_HOOK_CONTENTS = (
+_LEGACY_HOOK_CONTENT = (
     "#!/bin/sh\n# Managed by the-guard\n"
     'exec guard hook main-push-gate --repo-root "$(git rev-parse --show-toplevel)"\n'
 )
@@ -31,7 +31,7 @@ HOOK_CONTENT = (
     "    exit 1\n"
     "fi\n"
     f"unset {' '.join(GIT_REPO_ENV_VARS)}\n"
-    'if ! guard_bin=$(command -v guard) || [ ! -f "$guard_bin" ] || [ ! -x "$guard_bin" ]; then\n'
+    'if ! guard_bin=$(command -v guard 2>/dev/null) || [ ! -f "$guard_bin" ] || [ ! -x "$guard_bin" ]; then\n'
     '    guard_bin="$HOME/.local/bin/guard"\n'
     "fi\n"
     'if [ ! -f "$guard_bin" ] || [ ! -x "$guard_bin" ]; then\n'
@@ -57,7 +57,7 @@ def hook_install_plan(root: Path | str) -> Path:
     if not directory.is_absolute():
         directory = root / directory
     hook = directory / "pre-push"
-    if hook.exists() and hook.read_text() not in (HOOK_CONTENT, _LEGACY_HOOK_CONTENTS):
+    if hook.exists() and hook.read_text() not in (HOOK_CONTENT, _LEGACY_HOOK_CONTENT):
         raise ValueError(
             f"Refusing to overwrite existing hook: {hook}; chain guard hook main-push-gate explicitly"
         )

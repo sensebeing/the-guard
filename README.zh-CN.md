@@ -102,9 +102,8 @@ guard init --preset full --with-hooks
 GitHub PR 模式会写入 `.github/workflows/the-guard-review.yml`，需要 `THE_GUARD_APP_ID` 与 `THE_GUARD_PRIVATE_KEY` 仓库密钥。
 
 自定义 `pre-push` 钩子应先用 `git rev-parse --show-toplevel` 解析工作区根目录，再清除
-`GIT_DIR`、`GIT_WORK_TREE` 等继承的 Git 仓库定位变量。调用全局
+`GIT_DIR`、`GIT_WORK_TREE` 等继承的 [Git 仓库定位变量](src/the_guard/git_helpers.py)。调用全局
 `guard hook main-push-gate --repo-root "$top"`，并透传 Git 从 stdin 提供的完整引用更新列表。
-[Git 仓库定位变量](src/the_guard/git_helpers.py)
 
 ### 3. 或通过技能交互式接入
 

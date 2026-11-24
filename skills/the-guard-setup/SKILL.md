@@ -96,10 +96,10 @@ customized workflow, except an existing `uses: ./` workflow in the-guard's own r
 
 The managed hook installer upgrades earlier managed versions and preserves custom hooks. In a
 custom `pre-push` hook, resolve the worktree root with `git rev-parse --show-toplevel`, then clear
-Git repository selectors such as `GIT_DIR` and `GIT_WORK_TREE`. Call the global
+[Git repository selectors](https://github.com/sensebeing/the-guard/blob/main/src/the_guard/git_helpers.py)
+such as `GIT_DIR` and `GIT_WORK_TREE`. Call the global
 `guard hook main-push-gate --repo-root "$top"` with Git's complete stdin update list and preserve
 the existing checks.
-[Git repository selectors](https://github.com/sensebeing/the-guard/blob/main/src/the_guard/git_helpers.py)
 
 For agent post-edit hooks, invoke `guard hook edit-guard --repo-root .` with JSON containing
 `tool_input.file_path` to check the edited file.

@@ -25,25 +25,32 @@ from the_guard.review.repository import (
 
 
 class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
-    def test_unreadable_verifier_tree_is_not_runtime_drift(self) -> None:
+    def test_unreadable_verifier_tree_uses_legacy_sha_comparison(self) -> None:
         scope = ReviewScope(
             base_ref="main", merge_base="a" * 40, head_sha="b" * 40,
             changed_files=("app.py",), reviewable_files=("app.py",),
             submodule_changes=(), patch_digest="c" * 64,
         )
-        receipt = {
-            "contract_digest": "1" * 64,
-            "guard_tree_digest": "2" * 64,
-            "guard_sha": "old-sha",
-        }
         with (
-            patch("the_guard.review.repository.load_valid_receipt", return_value=receipt),
             patch.object(session, "compute_package_tree_digest", side_effect=OSError("unreadable")),
             patch.object(session, "_installed_vcs_commit", return_value="current-sha"),
         ):
-            message = diagnose_missing_receipt(Path("."), scope, contract_digest="3" * 64)
-
-        self.assertIn("review contract changed", message)
+            for sha, expected in (
+                ("", "review contract changed"),
+                ("current", "review contract changed"),
+                ("old-sha", "runtime mismatch"),
+            ):
+                receipt = {
+                    "contract_digest": "1" * 64,
+                    "guard_tree_digest": "2" * 64,
+                    "guard_sha": sha,
+                }
+                with (
+                    self.subTest(sha=sha),
+                    patch("the_guard.review.repository.load_valid_receipt", return_value=receipt),
+                ):
+                    message = diagnose_missing_receipt(Path("."), scope, contract_digest="3" * 64)
+                    self.assertIn(expected, message)
 
     def test_push_gates_explain_why_a_receipt_cannot_be_used(self) -> None:
         with TemporaryDirectory() as tmp:
