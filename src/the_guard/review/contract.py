@@ -44,6 +44,8 @@ def build_agy_readonly_settings(common_dir: Path | None = None) -> str:
 
 
 CONFIG_SCHEMA = "the-guard-agent-config/v1"
+# Bump only for breaking changes to review semantics, prompts, scope, or output schema.
+REVIEW_CONTRACT_VERSION = "v1"
 DEFAULT_HEARTBEAT_SECONDS = 15.0
 DEFAULT_STALL_TIMEOUT_SECONDS = 900.0
 DEFAULT_MAX_RUNAWAY_SECONDS = 3600.0

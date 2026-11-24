@@ -26,7 +26,7 @@
 
 ```text
 请为当前仓库安装并配置 https://github.com/sensebeing/the-guard。
-安装 CLI（`uv tool install git+https://github.com/sensebeing/the-guard` 或 `python3 -m pip install git+https://github.com/sensebeing/the-guard`），
+安装全局 CLI（`uv tool install git+https://github.com/sensebeing/the-guard`），
 安装技能（`npx skills add sensebeing/the-guard --global --agent '*'` 或从本地检出目录创建软链），
 然后按 skills/the-guard-setup/SKILL.md 引导我选择接入模式（core、full、distill 或 hybrid）并完成 guard check 验证。
 ```
@@ -51,12 +51,11 @@
 
 ### 1. 安装
 
-需 Python 3.11+ 与 Git 环境，可直接从 GitHub 安装 `guard` CLI：
+在 Python 3.11+ 与 Git 环境中安装一份全局 `guard` CLI，供本地审查与钩子共用，
+独立于项目的 `.venv`。
 
 ```sh
 uv tool install git+https://github.com/sensebeing/the-guard
-# 或使用 pip：
-python3 -m pip install git+https://github.com/sensebeing/the-guard
 ```
 
 为 Claude Code、Codex、Cursor、Gemini CLI、GitHub Copilot 或 Windsurf 安装技能（`$the-guard` 与 `$the-guard-setup`）：
@@ -101,6 +100,10 @@ guard init --preset full --with-hooks
 | `both` | `guard init --with-hooks --with-github-workflow` | 安装 GitHub PR 审查工作流，直接推送主分支仍需本地 `GO` 回执。 |
 
 GitHub PR 模式会写入 `.github/workflows/the-guard-review.yml`，需要 `THE_GUARD_APP_ID` 与 `THE_GUARD_PRIVATE_KEY` 仓库密钥。
+
+自定义 `pre-push` 钩子应先用 `git rev-parse --show-toplevel` 解析工作区根目录，再清除
+`GIT_DIR`、`GIT_WORK_TREE` 等继承的 [Git 仓库定位变量](src/the_guard/git_helpers.py)。调用全局
+`guard hook main-push-gate --repo-root "$top"`，并透传 Git 从 stdin 提供的完整引用更新列表。
 
 ### 3. 或通过技能交互式接入
 

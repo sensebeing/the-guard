@@ -66,7 +66,7 @@ from the_guard.review.runner import (
     _summarize_stream_line,
 )
 from the_guard.config import load_config, GuardConfig
-from the_guard.git_helpers import git_stdout
+from the_guard.git_helpers import GIT_REPO_ENV_VARS, git_stdout
 from the_guard.review.documents import (
     boundary_document_paths,
     changed_task_blueprints,
@@ -202,6 +202,25 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                     reviewer_fn=lambda _: {"verdict": "GO", "summary": "Reviewed", "blocking_findings": []},
                 )
             self.assertEqual(result.verdict, "GO")
+
+    def test_review_provider_does_not_inherit_git_repository_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", "app.py")
+            _git(repo, "commit", "-m", "Reviewable change")
+            env = {**dict.fromkeys(GIT_REPO_ENV_VARS, "foreign"), "GIT_CONFIG_COUNT": "0"}
+            with (
+                patch("the_guard.review.engine.resolve_provider_order", return_value=([("codex", "codex")], {})),
+                patch(
+                    "the_guard.review.engine._invoke_provider",
+                    return_value=(ReviewOutput("GO", "Reviewed", (), ""), "test-session", ""),
+                ) as invoke,
+            ):
+                result = run_architecture_review(repo, env=env)
+            self.assertEqual(result.verdict, "GO")
+            self.assertEqual(invoke.call_args.args[4], {"GIT_CONFIG_COUNT": "0"})
+            self.assertEqual(env["GIT_DIR"], "foreign")
 
     def test_document_inventory_batches_tree_reads_and_skips_file_module_children(self):
         with tempfile.TemporaryDirectory() as td:

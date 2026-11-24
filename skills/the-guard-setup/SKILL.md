@@ -25,10 +25,9 @@ as an approved standard or invent module ownership from directory names.
 
 ## Install and align
 
-Check Python >= 3.11 and `guard --help`. If the CLI is not installed, install it from GitHub
-(`uv tool install git+https://github.com/sensebeing/the-guard` or
-`python3 -m pip install git+https://github.com/sensebeing/the-guard`), from a local checkout
-(`python3 -m pip install /path/to/the-guard`), or run its `bin/guard` launcher.
+Check Python >= 3.11 and `guard --help`. Use
+`uv tool install git+https://github.com/sensebeing/the-guard` for the global CLI. Use this one
+installation for local reviews and hooks, outside the product project's `.venv`.
 Installation has no external runtime dependencies; independent review also needs Git and a locally
 installed/authenticated `codex`, `claude` or `agy` CLI.
 Reviewer discovery and updater state default to `~/.config/the-guard`. An explicit updater
@@ -95,11 +94,15 @@ Pass `--integration-mode <local-hooks|github-pr|both>` to set the mode explicitl
 `THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository secrets. `init` refuses to overwrite a
 customized workflow, except an existing `uses: ./` workflow in the-guard's own repository.
 
-If hook installation is authorized, the pre-push hook refuses to replace an existing hook. If one
-exists, integrate `guard hook main-push-gate` into that hook while preserving its other checks and
-passing Git's complete stdin update list. Do not consume stdin twice. For agent post-edit hooks,
-invoke `guard hook edit-guard --repo-root .` with JSON containing `tool_input.file_path`; this
-checks the file after an edit, not a proposed edit.
+The managed hook installer upgrades earlier managed versions and preserves custom hooks. In a
+custom `pre-push` hook, resolve the worktree root with `git rev-parse --show-toplevel`, then clear
+[Git repository selectors](https://github.com/sensebeing/the-guard/blob/main/src/the_guard/git_helpers.py)
+such as `GIT_DIR` and `GIT_WORK_TREE`. Call the global
+`guard hook main-push-gate --repo-root "$top"` with Git's complete stdin update list and preserve
+the existing checks.
+
+For agent post-edit hooks, invoke `guard hook edit-guard --repo-root .` with JSON containing
+`tool_input.file_path` to check the edited file.
 
 Run `guard probe` to inspect available review providers. Before merging or pushing a protected
 change, commit it on its topic branch, run `guard review`, and address all concrete blocking findings.

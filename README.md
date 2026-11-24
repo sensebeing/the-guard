@@ -26,7 +26,7 @@ Paste this into Claude Code, Codex, Cursor, Antigravity, or Orca:
 
 ```text
 Install and set up https://github.com/sensebeing/the-guard for this repository.
-Install the CLI (`uv tool install git+https://github.com/sensebeing/the-guard` or `python3 -m pip install git+https://github.com/sensebeing/the-guard`),
+Install the global CLI (`uv tool install git+https://github.com/sensebeing/the-guard`),
 install the skills (`npx skills add sensebeing/the-guard --global --agent '*'` or symlink from a checkout),
 then follow skills/the-guard-setup/SKILL.md to help me choose an onboarding mode (core, full, distill, or hybrid) and verify guard check.
 ```
@@ -51,12 +51,11 @@ Tests check behavior, and linters, formatters, and static analyzers catch style 
 
 ### 1. Install
 
-Install the `guard` CLI with Python 3.11+ and Git:
+With Python 3.11+ and Git, install one global `guard` CLI for local reviews and hooks,
+outside the project's `.venv`.
 
 ```sh
 uv tool install git+https://github.com/sensebeing/the-guard
-# or with pip:
-python3 -m pip install git+https://github.com/sensebeing/the-guard
 ```
 
 Install the agent skills (`$the-guard` and `$the-guard-setup`) for Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, or Windsurf:
@@ -103,6 +102,11 @@ Choose how reviewed changes reach `main`; `--integration-mode` sets the mode exp
 
 GitHub PR mode writes `.github/workflows/the-guard-review.yml` and expects the
 `THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository secrets.
+
+If you maintain a custom `pre-push` hook, resolve the worktree root with
+`git rev-parse --show-toplevel` before clearing inherited [Git repository selectors](src/the_guard/git_helpers.py)
+such as `GIT_DIR` and `GIT_WORK_TREE`. Invoke the global `guard hook main-push-gate --repo-root "$top"`
+with Git's complete stdin update stream.
 
 ### 3. Or run the setup skill
 

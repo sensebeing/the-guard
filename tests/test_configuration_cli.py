@@ -15,7 +15,7 @@ from benchmarks import guardbench
 from benchmarks.guardbench import build_guardbench_repo, evaluate_deterministic_checks
 from the_guard.cli import main, changed_files
 from the_guard.config import GuardConfig, load_config, validate_config
-from the_guard.git_helpers import read_repository_file
+from the_guard.git_helpers import GIT_REPO_ENV_VARS, read_repository_file
 from the_guard.hooks import edit_guard, install_hooks, main_push_gate
 from the_guard.init import initialize
 from the_guard.policy import load_policy, PolicyError
@@ -458,9 +458,60 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(main_push_gate(self.root, update.replace(head, self.base, 1)), 0)
         hook = install_hooks(self.root)
         hook.write_text("# existing custom hook\n")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "Refusing to overwrite existing hook"):
             install_hooks(self.root)
         self.assertEqual(hook.read_text(), "# existing custom hook\n")
+
+    def test_managed_pre_push_uses_global_fallback_and_cleans_git_environment(self):
+        hook = install_hooks(self.root)
+        with tempfile.TemporaryDirectory() as outside:
+            outside = Path(outside)
+            foreign_git = outside / "foreign.git"
+            subprocess.run(
+                ["git", "init", "--bare", str(foreign_git)], check=True, capture_output=True,
+            )
+            home = outside / "test home"
+            guard = home / ".local/bin/guard"
+            guard.parent.mkdir(parents=True)
+            guard.write_text(
+                '#!/bin/sh\nenv > "$HOME/provider-env"\nprintf "%s\\n" "$@"\ncat\n',
+                encoding="utf-8",
+            )
+            guard.chmod(0o755)
+            env = {
+                **dict.fromkeys(GIT_REPO_ENV_VARS, "inherited"),
+                "GIT_DIR": str(foreign_git),
+                "GIT_COMMON_DIR": str(foreign_git),
+                "GIT_OBJECT_DIRECTORY": str(foreign_git / "objects"),
+                "GIT_WORK_TREE": str(self.root.resolve()),
+                "HOME": str(home),
+                "PATH": "/usr/bin:/bin",
+            }
+            updates = "refs/heads/topic new refs/heads/main old\nrefs/tags/v1 new refs/tags/v1 zero\n"
+            result = subprocess.run(
+                [str(hook), "origin", "remote"], cwd=outside, env=env,
+                input=updates, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout, f"hook\nmain-push-gate\n--repo-root\n{self.root.resolve()}\n{updates}",
+            )
+            child_env = {
+                line.partition("=")[0] for line in (home / "provider-env").read_text().splitlines()
+            }
+            self.assertFalse(child_env.intersection(GIT_REPO_ENV_VARS))
+
+    def test_install_hooks_upgrades_only_the_legacy_managed_template(self):
+        hook = install_hooks(self.root)
+        hardened = hook.read_text(encoding="utf-8")
+        hook.write_text(
+            '#!/bin/sh\n# Managed by the-guard\n'
+            'exec guard hook main-push-gate --repo-root "$(git rev-parse --show-toplevel)"\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(install_hooks(self.root), hook)
+        self.assertEqual(hook.read_text(encoding="utf-8"), hardened)
+        self.assertIn("unset " + " ".join(GIT_REPO_ENV_VARS), hardened)
 
     def test_config_invalid_constraints_fail_closed(self):
         self.write(
