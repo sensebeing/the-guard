@@ -528,6 +528,121 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual([f.message for f in snapshot], [f.message for f in working])
         self.assertTrue(any("Stale dependency" in f.message for f in snapshot))
 
+    def test_contract_drift_batches_snapshot_reads_for_large_repositories(self):
+        self.config({
+            "modules": [
+                {"path": "packages/foundation"},
+                {"path": "packages/surface"},
+                {"path": "packages/legacy"},
+            ]
+        })
+        for index in range(100):
+            self.write(f"packages/foundation/mod_{index:03d}.py", f"value = {index}\n")
+            self.write(f"packages/surface/mod_{index:03d}.py", f"value = {index + 1000}\n")
+            self.write(f"packages/foundation/notes_{index:03d}.md", f"# Notes {index}\n")
+            self.write(f"packages/surface/data_{index:03d}.json", json.dumps({"index": index}))
+        self.write("packages/surface/api.py", "def read():\n    return 1\n")
+        self.write("packages/legacy/api.py", "def read():\n    return 2\n")
+        self.write("packages/foundation/use_surface.py", "from packages.surface.api import read\n")
+        self.write("packages/surface/use_legacy.py", "from packages.legacy.api import read\n")
+        self.write(
+            "packages/surface/use_legacy.vue",
+            '<script>\nimport { read } from "../legacy/api.ts";\n</script>\n',
+        )
+        # Inert documentation keeps its text but never contributes import edges.
+        self.write(
+            "packages/surface/guide.md",
+            'Retired callers: import "packages.legacy.api"\n',
+        )
+        self.git("add", ".")
+        self.git("commit", "-m", "permissive baseline at scale")
+        base = self.git("rev-parse", "HEAD")
+        self.config({
+            "enforce_module_dependencies": True,
+            "layers": {"foundation": [], "surface": ["foundation"]},
+            "modules": [
+                {"path": "packages/foundation", "layer": "foundation", "dependencies": []},
+                {"path": "packages/surface", "layer": "surface", "dependencies": []},
+                {"path": "packages/legacy", "retired": True},
+            ],
+        })
+        self.git("add", ".")
+        self.git("commit", "-m", "tighten layers and retire legacy")
+        head = self.git("rev-parse", "HEAD")
+        commands = []
+        real_run = subprocess.run
+
+        def counting_run(args, *rest, **kwargs):
+            if args and args[0] == "git":
+                commands.append(list(args))
+            return real_run(args, *rest, **kwargs)
+
+        with patch("subprocess.run", new=counting_run):
+            findings = check_contract_drift(
+                self.root, [".guard/config.json"], base=base, revision=head
+            )
+        self.assertEqual(
+            {(f.path, f.line, f.rule_id) for f in findings},
+            {
+                ("packages/foundation/use_surface.py", 1, "guard.service-boundaries"),
+                ("packages/surface/use_legacy.py", 1, "guard.service-boundaries"),
+                ("packages/surface/use_legacy.vue", 2, "guard.service-boundaries"),
+            },
+        )
+        by_path = {f.path: f for f in findings}
+        self.assertIn("Layer 'foundation'", by_path["packages/foundation/use_surface.py"].message)
+        self.assertIn("retired module 'packages/legacy'", by_path["packages/surface/use_legacy.py"].message)
+        self.assertIn("retired module 'packages/legacy'", by_path["packages/surface/use_legacy.vue"].message)
+        self.assertLessEqual(len(commands), 25, commands)
+
+    def test_contract_drift_baseline_evidence_uses_baseline_ownership(self):
+        self.config({
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/a", "dependencies": ["packages/b"]},
+                {"path": "packages/b", "dependencies": []},
+            ],
+        })
+        self.write("packages/a/keep.py", "value = 1\n")
+        self.write("packages/a/nested/main.py", "import packages.b.api\n")
+        self.write("packages/b/api.py", "def read():\n    return 1\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "baseline parent-owned dependency")
+        base = self.git("rev-parse", "HEAD")
+        self.config({
+            "enforce_module_dependencies": True,
+            "modules": [
+                {"path": "packages/a", "dependencies": ["packages/b"]},
+                {"path": "packages/a/nested", "dependencies": []},
+                {"path": "packages/b", "dependencies": []},
+            ],
+        })
+        self.write("packages/a/keep.py", "value = 2\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "split nested owner")
+        head = self.git("rev-parse", "HEAD")
+        findings = check_contract_drift(
+            self.root,
+            [".guard/config.json", "packages/a/keep.py"],
+            base=base,
+            revision=head,
+        )
+        self.assertEqual(
+            {(f.path, f.rule_id, f.message) for f in findings},
+            {
+                (
+                    "packages/a/nested/main.py",
+                    "guard.service-boundaries",
+                    "Module 'packages/a/nested' imports undeclared dependency 'packages/b' (allowed: []).",
+                ),
+                (
+                    ".guard/config.json",
+                    "guard.single-source-of-truth",
+                    "Stale dependency 'packages/a' -> 'packages/b'; remove the unused declared dependency.",
+                ),
+            },
+        )
+
     def test_snapshot_baseline_ignores_dirty_rename_inference(self):
         self.config(
             {"forbidden_imports": [{"scope_prefixes": ["packages/a"], "imports": ["forbidden"]}]}
