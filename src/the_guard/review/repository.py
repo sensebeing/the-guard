@@ -863,7 +863,8 @@ def diagnose_missing_receipt(
         if receipt_tree or receipt_sha:
             runtime = active_guard_runtime()
             verifier_sha = runtime["guard_sha"]
-            if (receipt_tree and receipt_tree != runtime["guard_tree_digest"]) or (
+            verifier_tree = runtime["guard_tree_digest"]
+            if (receipt_tree and verifier_tree and receipt_tree != verifier_tree) or (
                 receipt_sha and verifier_sha
                 and not (receipt_sha.startswith(verifier_sha) or verifier_sha.startswith(receipt_sha))
             ):

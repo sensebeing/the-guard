@@ -281,11 +281,9 @@ def active_guard_runtime() -> dict[str, str]:
     if not sha:
         with suppress(OSError):
             checkout = package_dir.parent.parent
-            git_dir = checkout / ".git"
-            if git_dir.exists():
+            if (checkout / ".git").exists():
                 sha = (git_stdout(checkout, [
-                    "git", f"--git-dir={git_dir}", "-c", "core.fsmonitor=false",
-                    "rev-parse", "--short", "HEAD",
+                    "git", "-c", "core.fsmonitor=false", "rev-parse", "--short", "HEAD",
                 ]) or "").strip()
     if not sha and tree_digest:
         with suppress(OSError, RuntimeError, ValueError):

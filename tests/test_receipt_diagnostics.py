@@ -14,11 +14,35 @@ from the_guard.hooks import main_push_gate
 from the_guard.policy import load_policy
 from the_guard.review import session
 from the_guard.review.cli import main as review_main
+from the_guard.review.contract import ReviewScope
 from the_guard.review.engine import run_architecture_review
-from the_guard.review.repository import collect_review_scope, load_valid_receipt, save_receipt
+from the_guard.review.repository import (
+    collect_review_scope,
+    diagnose_missing_receipt,
+    load_valid_receipt,
+    save_receipt,
+)
 
 
 class ReceiptDiagnosticsTests(ArchitectureReviewTestCase):
+    def test_unreadable_verifier_tree_is_not_runtime_drift(self) -> None:
+        scope = ReviewScope(
+            base_ref="main", merge_base="a" * 40, head_sha="b" * 40,
+            changed_files=("app.py",), reviewable_files=("app.py",),
+            submodule_changes=(), patch_digest="c" * 64,
+        )
+        receipt = {
+            "contract_digest": "1" * 64,
+            "guard_tree_digest": "2" * 64,
+        }
+        with (
+            patch("the_guard.review.repository.load_valid_receipt", return_value=receipt),
+            patch.object(session, "compute_package_tree_digest", side_effect=OSError("unreadable")),
+        ):
+            message = diagnose_missing_receipt(Path("."), scope, contract_digest="3" * 64)
+
+        self.assertIn("review contract changed", message)
+
     def test_push_gates_explain_why_a_receipt_cannot_be_used(self) -> None:
         with TemporaryDirectory() as tmp:
             repo, _ = self._init_repo(Path(tmp), review={"blueprint_globs": ["plan.md"]})
