@@ -361,20 +361,20 @@ def _bounded_document(body: str) -> str:
 
 
 def _render_task_blueprint_diff(
-    repo_root: Path, head_sha: str, snapshot: TaskBlueprintSnapshot,
-    prior_sha: str, prior_body: str,
+    repo_root: Path, snapshot: TaskBlueprintSnapshot,
+    from_sha: str, from_body: str, to_sha: str, to_body: str | None,
 ) -> str:
-    if snapshot.head_body is None:
+    if to_body is None:
         return "[DELETED AT HEAD]"
     if snapshot.follows_symlink:
         # Git records the link itself. Compare the resolved committed bodies.
         diff = "".join(
             line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
             for line in difflib.unified_diff(
-                prior_body.splitlines(keepends=True),
-                snapshot.head_body.splitlines(keepends=True),
-                fromfile=f"{prior_sha}:{snapshot.path} (resolved)",
-                tofile=f"{head_sha}:{snapshot.path} (resolved)",
+                from_body.splitlines(keepends=True),
+                to_body.splitlines(keepends=True),
+                fromfile=f"{from_sha}:{snapshot.path} (resolved)",
+                tofile=f"{to_sha}:{snapshot.path} (resolved)",
             )
         )
     else:
@@ -387,7 +387,7 @@ def _render_task_blueprint_diff(
             "--no-renames",
             "--text",
             "--unified=3",
-            f"{prior_sha}..{head_sha}",
+            f"{from_sha}..{to_sha}",
             *_literal_pathspecs((snapshot.path,)),
         ).stdout.decode("utf-8", errors="replace")
     limit = 8_000
@@ -400,7 +400,8 @@ def _render_task_blueprint_diff(
 def _render_task_blueprint(
     repo_root: Path, head_sha: str, snapshot: TaskBlueprintSnapshot
 ) -> str:
-    if snapshot.baseline_body is None:
+    baseline_body = snapshot.baseline_body
+    if baseline_body is None:
         assert snapshot.head_body is not None
         return (
             f"## Task design & architecture blueprint: {snapshot.path}\n"
@@ -410,14 +411,21 @@ def _render_task_blueprint(
     baseline_sha = snapshot.baseline_sha
     assert baseline_sha is not None
     sections = []
-    for revision, body in ((baseline_sha, snapshot.baseline_body), *snapshot.reviewed_revisions):
-        level = "##" if revision == baseline_sha else "###"
+    for revision, body in ((baseline_sha, baseline_body), *snapshot.reviewed_revisions):
         title = f"Prior reviewed branch blueprint (@ {revision[:12]})"
-        if revision == baseline_sha and snapshot.in_merge_base:
-            title = f"Baseline task blueprint (immutable Anchor 0 @ {revision[:12]})"
-        sections.append(f"{level} {title}: {snapshot.path}\n{_bounded_document(body)}")
+        if revision == baseline_sha:
+            if snapshot.in_merge_base:
+                title = f"Baseline task blueprint (immutable Anchor 0 @ {revision[:12]})"
+            sections.append(f"## {title}: {snapshot.path}\n{_bounded_document(body)}")
+        else:
+            changes = _render_task_blueprint_diff(
+                repo_root, snapshot, baseline_sha, baseline_body, revision, body,
+            )
+            sections.append(f"### {title}: {snapshot.path}\n{changes}")
         if body != snapshot.head_body:
-            changes = _render_task_blueprint_diff(repo_root, head_sha, snapshot, revision, body)
+            changes = _render_task_blueprint_diff(
+                repo_root, snapshot, revision, body, head_sha, snapshot.head_body,
+            )
             sections.append(
                 f"### Task blueprint modifications on reviewed branch: {snapshot.path}\n{changes}"
             )

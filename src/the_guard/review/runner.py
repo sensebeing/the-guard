@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -28,7 +29,7 @@ from .contract import (
     ReviewOutput,
     validate_review_output,
 )
-from .provider import isolated_codex_home
+from .provider import _format_toml_key, discover_codex_mcp_servers, isolated_codex_home
 from .repository import current_branch_name, git_common_dir
 from .session import ReviewRunLogger
 
@@ -527,6 +528,7 @@ def _build_provider_cmd(
     model: str = "",
     effort: str = "",
     common_dir: Path | None = None,
+    disabled_mcp_servers: Sequence[str] = (),
 ) -> list[str]:
     if provider == "agy":
         # `agy -p` consumes the following token as its prompt value and never reads
@@ -586,6 +588,11 @@ def _build_provider_cmd(
         for feature in CODEX_DISABLED_FEATURES:
             isolated_args.extend(["--disable", feature])
         isolated_args.extend(["-c", "check_for_update_on_startup=false"])
+        if disabled_mcp_servers:
+            servers = ",".join(
+                f"{_format_toml_key(name)}={{enabled=false}}" for name in disabled_mcp_servers
+            )
+            isolated_args.extend(["-c", f"mcp_servers={{{servers}}}"])
         if model:
             isolated_args.extend(["-m", model])
         if effort:
@@ -780,6 +787,7 @@ def _invoke_provider(
                         resume_session_id=resume_session_id,
                         model=model,
                         effort=effort,
+                        disabled_mcp_servers=discover_codex_mcp_servers(repo_root),
                     )
                     rc, out, err = _run_streaming_cmd(
                         provider,
