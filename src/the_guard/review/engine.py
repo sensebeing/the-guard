@@ -164,8 +164,10 @@ def _session_contract_changed(
     prior_declarations = {m["path"]: m for m in prior_config.topology.get("modules", [])}
     prior_upstream, prior_downstream = resolve_module_neighbours(touched, prior_declarations)
     modules = touched, upstream | prior_upstream, downstream | prior_downstream
-    return _scoped_config_payload(prior_config, scope, *modules) != _scoped_config_payload(
-        config, scope, *modules
+    return _scoped_config_payload(
+        prior_config, scope, *modules, include_touched_boundary_docs=False,
+    ) != _scoped_config_payload(
+        config, scope, *modules, include_touched_boundary_docs=False,
     )
 
 

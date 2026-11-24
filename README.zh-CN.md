@@ -262,7 +262,9 @@ guard review check-push
 
 三种引擎的默认推理力度都是 `high`。Agy 通过标准输入接收 `stream-json` 提示词，提示词大小不受命令行参数长度限制。引擎发生持久故障时，`provider_cooldowns` 默认记录 15 分钟的冷却期。新审查按配置顺序优先尝试未冷却的引擎，`guard probe --reprobe` 可清空冷却记录。`--provider` 和 `THE_GUARD_REVIEW_PROVIDER` 只调整当次调用的首选顺序，不写入引擎配置。
 
-分支 rebase 后补丁相同、触达模块的边界文档有更新时，符合续接条件的会话会增量复核文档差异。若无法提供可核查的差异，则重新执行全量审查。快照文档按 UTF-8 字节计量，主要责任文档单份上限为 60,000 字节，其他文档单份上限为 24,000 字节，总预算为 180,000 字节。
+分支 rebase 后补丁相同，且触达模块的边界文档或 `boundary_docs` 列表有更新时，符合条件的会话会增量复核变更，仍须重新取得回执。若无法提供可核查的差异，则重新执行全量审查。快照文档按 UTF-8 字节计量，主要责任文档单份上限为 60,000 字节，其他文档单份上限为 24,000 字节，总预算为 180,000 字节。
+
+审查元数据和 `index.jsonl` 记录 `prompt_bytes`，以及已设置的 `model` 和 `effort`。全局最近 10 次运行的日志在工作区删除后仍保留。每个活跃工作区还保留距最新运行不超过 7 天的最多 4 次运行日志。
 
 ## 配置参考
 
@@ -323,9 +325,11 @@ rules:
 `# guard-exempt guard.architecture-simplicity: concrete reason here`
 
 审查参数可通过环境变量 `THE_GUARD_REVIEW_CONFIG`、`THE_GUARD_REVIEW_PROVIDER`、`THE_GUARD_REVIEW_MODEL`、`THE_GUARD_REVIEW_EFFORT`、`THE_GUARD_REVIEW_COOLDOWN_SECONDS`、`THE_GUARD_REVIEW_STALL_SECONDS`、`THE_GUARD_REVIEW_HEARTBEAT_SECONDS`、`THE_GUARD_REVIEW_MAX_SECONDS` 与 `THE_GUARD_REVIEW_LOG_DIR` 覆盖，提供者探测结果默认保存在 `~/.config/the-guard/review-agent.json`。
-自动更新的状态和日志也默认保存在 `~/.config/the-guard`。更新器下次使用默认目录运行时会迁移旧状态。更新日志达到 512 KiB 时轮转，并保留一份备份。
+自动更新的状态和日志也默认保存在 `~/.config/the-guard`。更新器下次使用默认目录运行时会迁移旧状态。更新日志达到 512 KiB 时轮转，并保留一份备份。调度更新后的 30 秒内跳过 Git 与包哈希检查。全局工具已同步时，后台更新间隔为 6 小时。
 
-`review.blueprint_globs` 默认为空，可通过仓库相对路径模式启用任务蓝图发现。`review.operational_ledgers` 指定发现时排除的文件，默认为 `["CHANGELOG.md"]`。已审阅的蓝图在发现配置变更后仍保留修订历史。标为 `retired: true` 的模块路径只允许删除文件，并禁止声明依赖与外部导入。模块退役时也会检查仓库中未变更的调用方。
+`review.blueprint_globs` 默认为空，可通过仓库相对路径模式启用任务蓝图发现。`review.operational_ledgers` 指定发现时排除的文件，默认为 `["CHANGELOG.md"]`。一跳引用检索读取匹配蓝图的全文，其他 Markdown 仅检索当前分支差异中的增删行。增量审查优先展示已修改蓝图的有界差异，最多预览 4 份新发现的蓝图，剩余蓝图通过修订索引查阅。未变更锚点超过 12 条或 4,000 UTF-8 字节时以计数摘要展示。已审阅的蓝图在发现配置变更后仍保留修订历史。
+
+标为 `retired: true` 的模块路径只允许删除文件，并禁止声明依赖与外部导入。模块退役时也会检查仓库中未变更的调用方。
 
 ## 拓扑检查与命令参考
 

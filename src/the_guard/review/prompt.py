@@ -33,6 +33,7 @@ from .repository import (
     previous_review_scope,
 )
 from .documents import (
+    MAX_TASK_DESIGN_DOCS,
     TaskBlueprintSnapshot,
     TaskBlueprintSelection,
     architecture_document_paths,
@@ -55,6 +56,8 @@ from .session import (
 
 _BULK_SCOPE_THRESHOLD = 150
 _BULK_ANCHOR_THRESHOLD = 40
+_MAX_UNCHANGED_ANCHOR_LINES = 12
+_MAX_UNCHANGED_ANCHOR_BYTES = 4_000
 _MAX_BATCH_COMMAND_CHARS = 8_000
 MAX_PRIMARY_OWNER_DOC_BYTES = 60_000
 MAX_SECONDARY_DOC_BYTES = 24_000
@@ -1055,17 +1058,24 @@ def _incremental_context_delta(
     prior_head = session.last_head_sha
     head = context.scope.head_sha
     unchanged = {}
-    changes = []
+    modified = []
+    newly_discovered = []
     for blueprint in context.blueprints.anchor_snapshots:
         path = blueprint.path
         if path in session.task_blueprint_anchors and blueprint.prior_body == blueprint.head_body:
             unchanged[path] = context.task_blueprint_anchors[path]
+        elif blueprint.prior_body is not None and blueprint.prior_body != blueprint.head_body:
+            modified.append(blueprint)
         else:
-            changes.append(blueprint)
-    if changes:
+            newly_discovered.append(blueprint)
+    if modified or newly_discovered:
         budget.append("## Updated Task Blueprints")
-    for blueprint in changes:
+    preview_paths = {blueprint.path for blueprint in context.blueprints.previews}
+    newly_discovered.sort(key=lambda blueprint: blueprint.path not in preview_paths)
+    omitted_changes = []
+    for blueprint in (*modified, *newly_discovered[:MAX_TASK_DESIGN_DOCS]):
         path = blueprint.path
+        omitted_before = budget.omitted
         if blueprint.prior_body is not None and blueprint.prior_body != blueprint.head_body:
             diff = _render_task_blueprint_diff(
                 context.repo_root, blueprint, prior_head, blueprint.prior_body, head, blueprint.head_body,
@@ -1079,15 +1089,25 @@ def _incremental_context_delta(
                     context.repo_root, blueprint, revision, body,
                     f"### Task design & architecture blueprint: {path}", budget,
                 )
+        if budget.omitted > omitted_before:
+            omitted_changes.append(blueprint)
+    omitted_changes.extend(newly_discovered[MAX_TASK_DESIGN_DOCS:])
     sections = budget.render()
     if unchanged and (inc_scope is not None or sections):
-        anchors = "\n".join(f"- `{path}` @ {', '.join(revs)}" for path, revs in sorted(unchanged.items()))
+        anchors = ""
+        if len(unchanged) <= _MAX_UNCHANGED_ANCHOR_LINES:
+            anchors = "\n".join(f"- `{path}` @ {', '.join(revs)}" for path, revs in sorted(unchanged.items()))
+        if not anchors or _utf8_size(anchors) > _MAX_UNCHANGED_ANCHOR_BYTES:
+            anchors = (
+                f"{len(unchanged)} unchanged task blueprint anchors retained from prior session history "
+                "(inspect recorded revisions with `git show <rev>:<path>` if needed after compaction)."
+            )
         sections.append("### Unchanged task blueprint anchors (use session history)\n" + anchors)
-    if budget.omitted and changes:
+    if omitted_changes:
         sections.append(_render_omitted_blueprints(
             context.repo_root, context.scope,
-            {snapshot.path: context.task_blueprint_anchors[snapshot.path] for snapshot in changes},
-            changes, context.pinned_anchors,
+            {snapshot.path: context.task_blueprint_anchors[snapshot.path] for snapshot in omitted_changes},
+            omitted_changes, context.pinned_anchors,
         ))
     return sections
 
@@ -1108,8 +1128,9 @@ def _render_module_context_delta(
         previous_scope, prior_config = previous_review_scope(repo_root, session)
         prior_touched, _, _ = resolve_scope_modules(repo_root, previous_scope, prior_config)
         prior_modules = {module["path"]: module for module in prior_config.topology.get("modules", ())}
+        common_modules = prior_touched & context.touched
         prior_paths = {
-            path for module in prior_touched & context.touched
+            path for module in common_modules
             for path in boundary_document_paths(prior_modules.get(module, {"path": module}))
         }
         prior_bodies = _snapshot_document_bodies(repo_root, prior_paths, prior_head)
@@ -1133,12 +1154,45 @@ def _render_module_context_delta(
         if prior_bodies.get(path) != current_bodies.get(path)
         and path not in new_docs and path not in prior_architecture
     )
-    if not (new_modules or new_docs or changed_docs):
+    declarations = {module["path"]: module for module in context.topology.get("modules", ())}
+
+    def declared_bindings(modules: Mapping[str, dict], touched: set[str]) -> set[tuple[str, str]]:
+        return {
+            (module, path) for module in touched
+            for path in modules.get(module, {}).get("boundary_docs", ())
+        }
+
+    prior_bindings = declared_bindings(prior_modules, common_modules)
+    current_bindings = declared_bindings(declarations, context.touched)
+    removed_bindings = prior_bindings - current_bindings
+    added_bindings = sorted(
+        (module, path) for module, path in current_bindings - prior_bindings
+        if module in common_modules
+    )
+    removed_docs = sorted(
+        {path for _, path in removed_bindings}.difference(
+            {path for _, path in current_bindings}, current_docs, prior_architecture, changed_docs,
+        )
+    )
+    if not (new_modules or new_docs or changed_docs or removed_bindings or added_bindings):
         return
 
+    omitted_before = budget.omitted
     budget.append("## Updated Module Scope & Boundary Context")
+    if removed_bindings or added_bindings:
+        budget.append("\n".join([
+            "Declared `boundary_docs` changes by module",
+            *(f"- `{module}` removed `{path}`" for module, path in sorted(removed_bindings)),
+            *(f"- `{module}` added `{path}`" for module, path in added_bindings),
+        ]))
+        if budget.omitted != omitted_before:
+            raise _PriorModuleContextUnavailable("Boundary declaration changes exceed the document budget")
+    if removed_docs:
+        budget.append(
+            "Removed from declared boundary_docs (no longer bound as module boundary): "
+            + ", ".join(f"`{path}`" for path in removed_docs)
+        )
     if new_modules:
-        declarations = {module["path"]: module for module in context.topology.get("modules", ())}
         prior_rules = scoped_topology_rules(prior_config.topology, prior_touched)
         new_topology = {
             key: [rule for rule in rules if rule not in prior_rules[key]]

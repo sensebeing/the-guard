@@ -41,6 +41,8 @@ LOG_META_SCHEMA = "the-guard-log-meta/v1"
 UTC = timezone.utc
 MAX_RETAINED_RUN_LOGS = 30
 MAX_RETAINED_LOGS_PER_WORKTREE = 4
+MIN_RETAINED_RECENT_RUNS = 10
+MAX_RETAINED_WORKTREE_LOG_AGE_SECONDS = 7 * 24 * 3600
 MAX_INDEX_LOG_BYTES = 2 * 1024 * 1024
 MAX_RETAINED_SESSIONS = 12
 MAX_RETAINED_RECEIPTS = 200
@@ -138,6 +140,8 @@ def _scoped_config_payload(
     touched: set[str],
     upstream: set[str],
     downstream: set[str],
+    *,
+    include_touched_boundary_docs: bool = True,
 ) -> dict[str, Any]:
     """Keep the reviewed module contract while dropping unrelated module declarations."""
     payload = asdict(config)
@@ -167,10 +171,12 @@ def _scoped_config_payload(
             "retired": declared.get("retired", False),
         }
 
+    touched_modules = [declared_modules.get(module, {"path": module}) for module in sorted(touched)]
+    if not include_touched_boundary_docs:
+        for module in touched_modules:
+            module.pop("boundary_docs", None)
     topology["modules"] = {
-        "touched": [
-            declared_modules.get(module, {"path": module}) for module in sorted(touched)
-        ],
+        "touched": touched_modules,
         "upstream": [neighbour_projection(module) for module in sorted(upstream)],
         "downstream": [neighbour_projection(module) for module in sorted(downstream)],
     }
@@ -607,6 +613,8 @@ class ReviewRunLogger:
         prev_head_sha: str | None = None,
         reviewer_note: str = "",
         full_review_reason: str = "",
+        model: str = "",
+        effort: str = "",
         contract_change_causes: tuple[str, ...] = (),
         env: dict[str, str] | None = None,
     ) -> None:
@@ -623,6 +631,9 @@ class ReviewRunLogger:
         self.prev_head_sha = prev_head_sha or ""
         self.reviewer_note = reviewer_note.strip()
         self.full_review_reason = full_review_reason
+        self.model = model
+        self.effort = effort
+        self.prompt_bytes = len(prompt.encode("utf-8"))
         self.contract_change_causes = contract_change_causes
         self.started_at = datetime.now(UTC).isoformat()
         self._start_mono = time.monotonic()
@@ -732,16 +743,18 @@ class ReviewRunLogger:
     def _prune_old_runs(self) -> None:
         meta_files = sorted(
             (
-                p
+                (p.stat().st_mtime, p)
                 for p in self.log_dir.glob("*.meta.json")
                 if not p.name.startswith("latest")
             ),
-            key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
+        newest_mtime = meta_files[0][0] if meta_files else 0.0
+        protected = {path for _, path in meta_files[:MIN_RETAINED_RECENT_RUNS]}
         worktree_counts: dict[str, int] = {}
-        protected: set[Path] = set()
-        for meta_file in meta_files:
+        for mtime, meta_file in meta_files:
+            if newest_mtime - mtime > MAX_RETAINED_WORKTREE_LOG_AGE_SECONDS:
+                break
             prefix = meta_file.name.removesuffix(".meta.json")
             try:
                 meta = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -758,9 +771,9 @@ class ReviewRunLogger:
             if worktree_active and count < MAX_RETAINED_LOGS_PER_WORKTREE:
                 protected.add(meta_file)
             worktree_counts[worktree] = count + 1
-        # The per-worktree floor wins if protected logs alone exceed the global target.
+        # Both retention floors take precedence over the global target.
         spare_slots = max(0, MAX_RETAINED_RUN_LOGS - len(protected))
-        unprotected = [p for p in meta_files if p not in protected]
+        unprotected = [path for _, path in meta_files if path not in protected]
         for old_meta in unprotected[spare_slots:]:
             prefix = old_meta.name[: -len(".meta.json")]
             for suffix in (".meta.json", ".prompt.md", ".events.jsonl"):
@@ -807,6 +820,7 @@ class ReviewRunLogger:
             "head_sha": self.head_sha,
             "patch_digest": self.patch_digest,
             "reviewable_file_count": self.reviewable_file_count,
+            "prompt_bytes": self.prompt_bytes,
             "reviewer_note": self.reviewer_note,
             "event_count": event_count,
             "verdict": verdict,
@@ -817,6 +831,10 @@ class ReviewRunLogger:
             "events_file": str(self.events_path),
             "meta_file": str(self.meta_path),
         }
+        if self.model:
+            payload["model"] = self.model
+        if self.effort:
+            payload["effort"] = self.effort
         if self.contract_change_causes:
             payload["contract_change_causes"] = list(self.contract_change_causes)
         try:

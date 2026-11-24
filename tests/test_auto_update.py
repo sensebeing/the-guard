@@ -878,6 +878,53 @@ class AutoUpdateTests(unittest.TestCase):
             )
             self.assertGreater(updated["last_checked_at"], expired)
 
+    def test_delegated_stale_venv_honors_cooldown_until_global_install_lags(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            home, package, metadata, sha = self._make_checkout(root_path)
+            stale = self._make_stale_install(root_path, package)
+            installed = home / ".local/share/uv/tools/the-guard/lib/python3.12/site-packages/the_guard"
+            shutil.copytree(package, installed)
+            guard = home / ".local/bin/guard"
+            guard.parent.mkdir(parents=True)
+            guard.touch()
+            with (
+                mock.patch.object(auto_update, "PACKAGE_DIR", stale),
+                mock.patch.object(auto_update, "_resolve_guard_command", return_value=[str(guard)]),
+                mock.patch.object(auto_update, "_append_log"),
+                mock.patch.object(auto_update, "time") as clock,
+            ):
+                clock.time.return_value = 10_000.0
+                metadata.write_text(json.dumps({"installed_sha": sha[:7], "last_checked_at": 9_940.0}))
+                env = {"THE_GUARD_AUTO_UPDATE": "1", "PATH": os.environ.get("PATH", "")}
+                # Run the delegated command, substituting only the detached updater process.
+                popen = subprocess.Popen
+                with mock.patch.object(subprocess, "Popen", side_effect=lambda *args, **kwargs: (
+                    mock.Mock() if kwargs.get("start_new_session") else popen(*args, **kwargs)
+                )):
+                    self.assertEqual(auto_update.maybe_delegate_to_checkout(["review"], home_dir=home, env=env), 2)
+                    self.assertEqual(json.loads(metadata.read_text())["last_checked_at"], 9_940.0)
+
+                    shutil.copyfile(stale / "cli.py", installed / "cli.py")
+                    self.assertEqual(auto_update.maybe_delegate_to_checkout(["review"], home_dir=home, env=env), 2)
+                    self.assertEqual(json.loads(metadata.read_text())["last_checked_at"], 10_000.0)
+
+    def test_background_debounce_skips_checkout_git_and_digest_work(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            home, package, metadata, _ = self._make_checkout(root_path)
+            (package.parents[1] / "pyproject.toml").touch()
+            metadata.write_text(json.dumps({"last_checked_at": time.time()}))
+            with (
+                mock.patch.object(auto_update, "PACKAGE_DIR", root_path / "installed/src/the_guard"),
+                mock.patch.object(auto_update, "_subprocess_run", side_effect=AssertionError("unexpected Git call")),
+                mock.patch.object(auto_update, "compute_package_tree_digest", side_effect=AssertionError("unexpected hash")),
+            ):
+                self.assertFalse(auto_update.maybe_trigger_background_auto_update(
+                    active_repo_root=root_path / "consumer", home_dir=home,
+                    env={"THE_GUARD_AUTO_UPDATE": "1"},
+                ))
+
     def test_spawn_failure_does_not_advance_cooldown(self) -> None:
         """A failed Popen records status=failed and error without advancing last_checked_at."""
         with tempfile.TemporaryDirectory() as root:

@@ -57,12 +57,16 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   the applicable modules. The session digest covers global rules and root contracts. Branch
   configuration edits can resume when the changed declarations and scoped rules belong to
   currently or previously touched modules. A rebase also checks touched modules and one-hop
-  neighbours. Sessions saved before the root digest was
+  neighbours. Upstream changes limited to a touched module's declared `boundary_docs` preserve
+  an eligible session and require a new receipt. Sessions saved before the root digest was
   introduced require an exact scoped digest match to continue. A full review retains binding
   blueprint revisions for a valid branch baseline.
 
 Without a local checkout, `guard self-update` runs `uv tool upgrade the-guard` and records the
 installed package's PEP 610 commit, package-tree digest and CLI update status.
+The background scheduler checks its 30-second debounce before Git or digest work. After that
+pause, a stale global installation can trigger an immediate background repair. A stale consumer
+venv can delegate while the current global installation follows the six-hour update interval.
 
 Provider processes receive an environment cleared of inherited Git repository selectors.
 Codex isolation homes trust the worktree and common repository root, and provider stream decoding
@@ -92,8 +96,11 @@ All providers receive prompts on stdin and default to `high` effort. Agy receive
 objective cause in bounded run metadata as `full_review_reason`: `force`, `no_prior_session`,
 `contract_changed`, `no_incremental_delta`, `provider_changed`, `missing_session_id` or
 `resume_failed`. Contract invalidation records up to five changed paths relevant to the branch
-contract in `contract_change_causes`. Log retention protects the four most recent runs per active worktree
-alongside the global target of 30 runs. `index.jsonl` rotates at 2 MiB with a single backup.
+contract in `contract_change_causes`. Run metadata and `index.jsonl` record `prompt_bytes`
+and the selected `model` and `effort` when set. Log retention protects the ten newest runs
+globally, including runs from deleted worktrees, and up to four runs per active worktree
+within seven days of the newest run. Other runs fill the remaining slots in the 30-run
+target. `index.jsonl` rotates at 2 MiB with a single backup.
 Isolated Codex homes remove `tmp/` and retain active session data.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
@@ -107,14 +114,16 @@ documents have a 24,000 UTF-8 byte limit. The document section has a 180,000 UTF
 Oversized documents use a heading index with line numbers and a snapshot read command.
 Incremental prompts send prior findings, rebuttal evidence, the verified change, and new or
 changed boundary and blueprint context. A same-patch rebase with updated touched boundaries
-resumes when the verified session can inspect the document delta. An unchanged-head rebuttal
-uses the session history.
+resumes when the verified session can inspect the document delta. The prompt shows declared
+boundary additions and removals by module, including transfers of unchanged documents.
+An unchanged-head rebuttal uses the session history.
 The manifest supplies the allowed finding IDs for prompts, output schemas and verdict validation.
 A `NO-GO` verdict requires at least one blocking finding.
 
 `review.blueprint_globs` defaults to an empty array. When configured, `review/documents` selects
-matching Markdown blueprints and discovers matching one-hop references from Markdown changed in the branch, reading
-its bodies at the merge base, reviewed revisions, and HEAD, and from `--note`. Persisted anchors
+matching Markdown blueprints and discovers one-hop references from their full bodies at the
+merge base, reviewed revisions, and HEAD. Other Markdown contributes references from added or
+removed lines in the current branch diff. `--note` also contributes references. Persisted anchors
 without branch changes are retained as evidence and their outgoing links are skipped. Links
 beginning with `./` or `../` resolve against the source document directory. Other links try the
 repository root first and then the source directory, using the tree where the link appears.
@@ -126,6 +135,9 @@ distinct reviewed body. Inline previews include the bounded baseline body and a 
 from that baseline to each subsequent distinct reviewed revision. Any reviewed body that differs
 from HEAD also includes a bounded diff to HEAD or a deletion marker. Symlink-backed blueprints
 compare resolved bodies.
+Incremental prompts show modified blueprint diffs first and preview up to four newly discovered
+blueprints in priority order. They index overflow by revision. Unchanged anchors are shown
+individually up to 12 entries and 4,000 UTF-8 bytes, then summarized as a count.
 The prompt indexes revisions outside the inline previews. For bulk deletions it groups eligible
 merge-base blueprints by directory with commands to recover their paths. Pinned deletions join
 the group when their eligible count exceeds the bulk threshold and their recorded bodies match

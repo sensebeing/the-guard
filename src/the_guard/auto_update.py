@@ -485,7 +485,6 @@ def maybe_trigger_background_auto_update(
     state_dir: str | Path | None = None,
     gemini_dir: str | Path | None = None,
     env: dict[str, str] | None = None,
-    force_local_sync: bool = False,
 ) -> bool:
     eff_env = os.environ if env is None else env
     if _auto_update_disabled(eff_env):
@@ -498,10 +497,6 @@ def maybe_trigger_background_auto_update(
         return False
 
     resolved_home = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
-    if active_repo_root is not None:
-        checkout, _ = _discover_checkout(None, resolved_home)
-        if checkout is not None and _is_same_git_repo(Path(active_repo_root), checkout):
-            return False
     resolved_state, legacy = _state_dirs_for(resolved_home, state_dir, eff_env)
     resolved_gemini = gemini_dir_for(
         home_dir=resolved_home, gemini_dir=gemini_dir, env=eff_env
@@ -512,6 +507,12 @@ def maybe_trigger_background_auto_update(
         cooldown = time.time() - float(metadata.get("last_checked_at") or 0)
     except (TypeError, ValueError):
         cooldown = AUTO_UPDATE_INTERVAL_SECONDS
+    if cooldown < 30:
+        return False
+    if active_repo_root is not None:
+        checkout, _ = _discover_checkout(None, resolved_home)
+        if checkout is not None and _is_same_git_repo(Path(active_repo_root), checkout):
+            return False
     local_sync_needed = False
     checkout = (resolved_home / "the-guard").resolve()
     if not (checkout / ".git").exists():
@@ -535,9 +536,7 @@ def maybe_trigger_background_auto_update(
             )
         except (OSError, ValueError, subprocess.SubprocessError):
             local_sync_needed = False
-    if cooldown < 30:
-        return False
-    if not force_local_sync and not local_sync_needed and cooldown < AUTO_UPDATE_INTERVAL_SECONDS:
+    if not local_sync_needed and cooldown < AUTO_UPDATE_INTERVAL_SECONDS:
         return False
 
     guard_cmd = _resolve_guard_command(resolved_home, eff_env)
@@ -551,7 +550,7 @@ def maybe_trigger_background_auto_update(
             cooldown = AUTO_UPDATE_INTERVAL_SECONDS
         if cooldown < 30:
             return False
-        if not force_local_sync and not local_sync_needed and cooldown < AUTO_UPDATE_INTERVAL_SECONDS:
+        if not local_sync_needed and cooldown < AUTO_UPDATE_INTERVAL_SECONDS:
             return False
         cmd = [
             *guard_cmd,
@@ -704,6 +703,6 @@ def maybe_delegate_to_checkout(
     if argv[0] != "status":
         maybe_trigger_background_auto_update(
             active_repo_root=active_repo_root, home_dir=resolved_home, state_dir=state_dir,
-            gemini_dir=gemini_dir, env=eff_env, force_local_sync=True,
+            gemini_dir=gemini_dir, env=eff_env,
         )
     return proc.returncode

@@ -499,6 +499,94 @@ class LargeDiffTests(ArchitectureReviewTestCase):
         receipt = load_valid_receipt(self.repo, result.patch_digest)
         self.assertEqual(receipt["task_blueprint_anchors"], {path: list(revisions) for path, revisions in expected.items()})
 
+    def test_non_blueprint_references_come_only_from_current_branch_diff_lines(self):
+        archive = "docs/plans/archive.md"
+        added = "docs/plans/added.md"
+        removed = "docs/plans/removed.md"
+        historical = "docs/plans/historical.md"
+        old_notes = "services/retired/CLAUDE.md"
+        retired = "docs/plans/retired.md"
+        for path in (archive, added, removed, historical):
+            self.write(path, b"# Evidence\n")
+        self.write("CLAUDE.md", f"See {archive}\n\n-- Old: {removed}\n".encode())
+        base = self.commit("publish archive and review documents")
+        self.write(old_notes, f"See {historical}\n".encode())
+        self.write(retired, b"# Reviewed and later retired\n")
+        prior = self.commit("publish the first review round")
+        for path in (old_notes, retired):
+            (self.repo / path).unlink()
+        self.write("CLAUDE.md", f"See {archive}\n\n++ New: {added}\n".encode())
+        head = self.commit("change the current link and retire the first-round files")
+
+        selection = resolve_task_design_blueprints(
+            self.repo, ["CLAUDE.md"], base_sha=base, head_sha=head,
+            config=load_config(self.repo, revision=head), prior_reviewed_sha=prior,
+        )
+        self.assertEqual(
+            {snapshot.path for snapshot in selection.anchor_snapshots},
+            {added, removed, retired},
+        )
+
+    def test_incremental_blueprints_prioritize_modified_and_index_preview_overflow(self):
+        self.write("docs/plans/reference.md", b"# Existing evidence\n")
+        base = self.commit("publish base evidence")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", base)
+        modified = "docs/plans/modified.md"
+        self.write(modified, b"# First reviewed body\n")
+        prior = self.commit("start the branch plan")
+        session = ReviewSessionState(
+            str(self.repo), "topic", base, "codex", "session", prior, "previous", "GO", "", (), {},
+            task_blueprint_anchors={modified: (prior,)},
+        )
+        paths = [f"docs/plans/task_{index:02d}.md" for index in range(45)]
+        for path in paths:
+            self.write(path, b"# New plan\n")
+        self.write(modified, b"# Revised body\nSee docs/plans/reference.md\n")
+        head = self.commit("revise the branch plan and add new plans")
+        scope = collect_review_scope(self.repo)
+        delta = collect_incremental_scope(self.repo, scope, session)
+        prompt = build_incremental_review_prompt(self.repo, scope, session, delta)
+        section = prompt.split("## Updated Task Blueprints\n", 1)[1].split("\n## ", 1)[0]
+        self.assertTrue(section.startswith(f"### Task blueprint modifications on reviewed branch: {modified}"))
+        self.assertEqual(
+            re.findall(r"^### Task design & architecture blueprint: (.*)$", section, re.MULTILINE),
+            ["docs/plans/reference.md", *paths[:3]],
+        )
+        index = prompt.split("## Additional previously reviewed task blueprints\n", 1)[1]
+        inventory = index[index.index("{"):]
+        entries, end = json.JSONDecoder().raw_decode(inventory)
+        self.assertEqual(entries, {path: [head] for path in paths[3:]})
+        self.assertEqual(inventory[:end], json.dumps(entries, separators=(",", ":")))
+
+    def test_incremental_unchanged_anchors_have_line_and_byte_limits(self):
+        for count, nested in ((12, ""), (13, ""), (12, "長" * 56 + "/" + "文" * 56 + "/")):
+            with self.subTest(count=count, nested=bool(nested)):
+                _git(self.repo, "reset", "--hard", "origin/main")
+                paths = [f"docs/plans/{nested}task_{index:02d}.md" for index in range(count)]
+                for path in paths:
+                    self.write(path, b"# Reviewed plan\n")
+                prior = self.commit("record reviewed blueprints")
+                base = _git(self.repo, "rev-parse", "origin/main")
+                session = ReviewSessionState(
+                    str(self.repo), "topic", base, "codex", "session", prior, "previous", "GO", "", (), {},
+                    task_blueprint_anchors=dict.fromkeys(paths, (prior,)),
+                )
+                self.write("app.py", b"value = 1\n")
+                self.commit("update implementation")
+                scope = collect_review_scope(self.repo)
+                delta = collect_incremental_scope(self.repo, scope, session)
+                prompt = build_incremental_review_prompt(self.repo, scope, session, delta)
+                anchors = prompt.split("### Unchanged task blueprint anchors (use session history)\n", 1)[1]
+                anchors = anchors.split("\n## ", 1)[0].rstrip()
+                if count == 12 and not nested:
+                    self.assertEqual(anchors, "\n".join(f"- `{path}` @ {prior}" for path in paths))
+                else:
+                    self.assertEqual(
+                        anchors,
+                        f"{count} unchanged task blueprint anchors retained from prior session history "
+                        "(inspect recorded revisions with `git show <rev>:<path>` if needed after compaction).",
+                    )
+
     def test_batched_blueprints_preserve_bytes_and_validate_utf8(self):
         self.write("docs/plans/active.md", b"# line\r\nnext\r")
         base = _git(self.repo, "rev-parse", "HEAD")

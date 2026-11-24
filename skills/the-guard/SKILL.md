@@ -17,9 +17,12 @@ full review. Routine fixes and automatic upgrades preserve existing `GO` receipt
 version and scoped repository contract match.
 Updater state and reviewer discovery default to `~/.config/the-guard`. The updater migrates
 legacy metadata on first default-path use and retains one rotated 512 KiB log backup.
+Background checks skip Git and hashing for 30 seconds after scheduling. The six-hour interval
+applies when the global installation is current, including when delegation serves a stale project venv.
 Review Contract `v2` sends the verified delta, prior findings and changed boundary or blueprint
-context when resuming. A same-patch rebase with updated boundary documents can resume with the
-inspectable document delta. Full prompts prioritize owner documents within a 180,000 UTF-8 byte
+context when resuming. A same-patch rebase with updated touched-module boundary documents or
+`boundary_docs` declarations can resume with the inspectable delta and requires a fresh receipt.
+Full prompts prioritize owner documents within a 180,000 UTF-8 byte
 budget and use heading indexes with committed read commands for oversized documents. Findings
 use manifest rule IDs, and a `NO-GO` verdict requires a concrete blocking finding.
 
@@ -30,10 +33,13 @@ clears them. `--provider` and `THE_GUARD_REVIEW_PROVIDER` set the first choice f
 and leave the provider configuration untouched. All providers default to `high` effort. Agy reads
 prompts as `stream-json` on stdin. Snapshot Git reads run with
 `-c core.fsmonitor=false`, so a wedged or cross-version worktree fsmonitor daemon cannot stall
-them. Each run's `.meta.json` and `index.jsonl` record `full_review_reason` when the run is full:
-`force`, `no_prior_session`, `contract_changed`, `no_incremental_delta`, `provider_changed`,
-`missing_session_id` or `resume_failed`. Contract invalidation records `contract_change_causes`.
-`index.jsonl` rotates at 2 MiB, and isolated Codex homes clear `tmp/` while retaining sessions.
+them. Each run's `.meta.json` and `index.jsonl` record `prompt_bytes` and the selected `model`
+and `effort` when set. Full runs set `full_review_reason` to `force`, `no_prior_session`,
+`contract_changed`, `no_incremental_delta`, `provider_changed`, `missing_session_id` or
+`resume_failed`. Contract invalidation records `contract_change_causes`.
+Log retention protects the ten newest runs across all worktrees and up to four runs per active
+worktree within seven days of the newest run. `index.jsonl` rotates at 2 MiB. Isolated Codex
+homes clear `tmp/` while retaining sessions.
 
 ## Daily loop
 
@@ -70,6 +76,10 @@ touched boundaries. Root contract changes require a full review. Changes to a to
 boundary can resume with updated evidence.
 Task blueprint discovery runs when `review.blueprint_globs` is configured. It selects matching
 Markdown paths and excludes `review.operational_ledgers`, which defaults to `["CHANGELOG.md"]`.
+One-hop discovery scans changed blueprints in full and only added or removed lines in other
+branch Markdown. Incremental review shows modified blueprint diffs first, previews up to four
+newly discovered blueprints, and indexes overflow. It summarizes unchanged anchors beyond
+12 entries or 4,000 UTF-8 bytes.
 Branch-wide `guard check` / `guard topology check` block newly broken document declarations and
 stale dependencies while grandfathering untouched legacy declarations. Edit checks reject changed unregistered
 production source under governance; protected pushes run static checks before exemptions/receipts.

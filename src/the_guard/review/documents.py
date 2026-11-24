@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import posixpath
 import re
 from collections.abc import Collection, Iterable, Mapping
@@ -394,7 +395,7 @@ def resolve_task_design_blueprints(
         )
         if changed is None:
             raise ValueError(f"Cannot inspect task blueprint changes at {base_sha}...{revision}")
-        historical_changes.extend(changed.split("\0"))
+        historical_changes.extend(path for path in changed.split("\0") if matches_blueprint(path))
     readers = {
         revision: _SnapshotDocuments(repo_root, revision)
         for revision in dict.fromkeys((base_sha, *reviewed_commits, head_sha))
@@ -473,8 +474,23 @@ def resolve_task_design_blueprints(
     changed_docs = resolve_candidates(changed_candidates)
     reference_candidates = {}
     for path in markdown_changes:
-        for revision in modes_by_revision:
-            body = read_body(path, revision)
+        if matches_blueprint(path):
+            sources = ((revision, read_body(path, revision)) for revision in modes_by_revision)
+        else:
+            # Only current branch changes can add non-blueprint paths to this inventory.
+            lines = difflib.unified_diff(
+                (read_body(path, base_sha) or "").splitlines(),
+                (read_body(path, head_sha) or "").splitlines(),
+                n=0,
+            )
+            # Skip the two file headers without dropping changed lines that start with +++ or ---.
+            next(lines, None)
+            next(lines, None)
+            sources = (
+                (head_sha if line.startswith("+") else base_sha, line[1:])
+                for line in lines if line.startswith(("+", "-"))
+            )
+        for revision, body in sources:
             if body is not None:
                 reference_candidates.update(dict.fromkeys(
                     (revision, candidates) for candidates in _task_design_references(body, path)
