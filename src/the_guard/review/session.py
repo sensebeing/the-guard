@@ -481,6 +481,7 @@ class ReviewRunLogger:
         resume_session_id: str | None = None,
         prev_head_sha: str | None = None,
         reviewer_note: str = "",
+        full_review_reason: str = "",
         env: dict[str, str] | None = None,
     ) -> None:
         self.worktree = str(worktree_path.resolve())
@@ -495,6 +496,7 @@ class ReviewRunLogger:
         self.resume_session_id = resume_session_id or ""
         self.prev_head_sha = prev_head_sha or ""
         self.reviewer_note = reviewer_note.strip()
+        self.full_review_reason = full_review_reason
         self.started_at = datetime.now(UTC).isoformat()
         self._start_mono = time.monotonic()
 
@@ -665,6 +667,7 @@ class ReviewRunLogger:
             "branch": self.branch,
             "provider": self.provider,
             "mode": self.mode,
+            "full_review_reason": self.full_review_reason,
             "resume_session_id": self.resume_session_id,
             "session_id": session_id,
             "merge_base": self.merge_base,

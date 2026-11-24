@@ -10,6 +10,7 @@ import fcntl
 import io
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 import sys
@@ -18,7 +19,9 @@ import tempfile
 from unittest.mock import patch
 
 from the_guard.review.cli import main as review_main
+from the_guard.review import repository as review_repository
 from the_guard.review.engine import (
+    _provider_review_plan,
     build_review_prompt,
     collect_review_scope,
     resolve_provider_order,
@@ -53,6 +56,7 @@ from the_guard.review.contract import CODEX_DISABLED_FEATURES, ReviewOutput, ver
 from the_guard.review.runner import (
     _build_provider_cmd,
     _build_provider_env,
+    _invoke_provider,
     _is_persistent_provider_failure,
     _provider_failure_detail,
     _run_streaming_cmd,
@@ -67,7 +71,7 @@ from the_guard.review.documents import (
     read_document,
     resolve_task_design_blueprints,
 )
-from the_guard.review.session import compute_review_contract_digest
+from the_guard.review.session import ReviewSessionState, compute_review_contract_digest
 from the_guard.policy import PolicyError, load_policy
 from architecture_review_support import (
     ArchitectureReviewTestCase,
@@ -1208,6 +1212,8 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(agy_cmd[agy_cmd.index("--effort") + 1], "high")
         self.assertNotIn("--disable-slash-commands", agy_cmd)
         self.assertEqual(agy_cmd[agy_cmd.index("--output-format") + 1], "stream-json")
+        # `agy -p` requires its prompt as the flag value and does not read stdin.
+        self.assertEqual(agy_cmd[:3], ["/bin/agy", "-p", "prompt"])
 
         claude_cmd = _build_provider_cmd(
             "claude",
@@ -1221,6 +1227,9 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(claude_cmd[claude_cmd.index("--model") + 1], "opus")
         self.assertEqual(claude_cmd[claude_cmd.index("--effort") + 1], "high")
         self.assertEqual(claude_cmd[claude_cmd.index("--permission-mode") + 1], "plan")
+        # The prompt is streamed over stdin, never argv, to stay under the OS size limit.
+        self.assertEqual(claude_cmd[:2], ["/bin/claude", "-p"])
+        self.assertNotIn("prompt", claude_cmd)
         self.assertIn("--disallowedTools", claude_cmd)
         disallowed = claude_cmd[claude_cmd.index("--disallowedTools") + 1]
         self.assertIn("Write", disallowed)
@@ -1235,6 +1244,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             claude_resume_cmd[claude_resume_cmd.index("--resume") + 1], "uuid-1"
         )
         self.assertNotIn("--session-id", claude_resume_cmd)
+        self.assertNotIn("inc", claude_resume_cmd)
         for cmd in (claude_cmd, claude_resume_cmd):
             self.assertIn("--strict-mcp-config", cmd)
             self.assertEqual(cmd[cmd.index("--settings") + 1], '{"disableAllHooks":true}')
@@ -1245,6 +1255,7 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(
             agy_resume_cmd[agy_resume_cmd.index("--conversation") + 1], "conv-1"
         )
+        self.assertEqual(agy_resume_cmd[:3], ["/bin/agy", "-p", "inc"])
 
         codex_cmd = _build_provider_cmd(
             "codex",
@@ -1293,6 +1304,336 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
         self.assertEqual(provider_env.get("THE_GUARD_REVIEW_ACTIVE"), "1")
         self.assertEqual(provider_env.get("THE_GUARD_SESSION_MODE"), "readonly")
         self.assertNotIn("CLAUDECODE", provider_env)
+
+    def test_claude_prompt_travels_over_stdin_for_large_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            (repo / "services/catalog").mkdir(parents=True)
+            (repo / "services/catalog/service.py").write_text(
+                "value = 1\n", encoding="utf-8"
+            )
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "review scope")
+            scope = collect_review_scope(repo)
+
+            fake_bin = tmp / "bin"
+            argv_record = tmp / "claude_argv.json"
+            stdin_record = tmp / "claude_stdin.txt"
+            log_dir = tmp / "logs"
+            _write_exec(
+                fake_bin / "claude",
+                "#!/usr/bin/env python3\n"
+                "import json, os, subprocess, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('2.0.0')\n"
+                "    raise SystemExit(0)\n"
+                "with open(os.environ['CLAUDE_ARGV_FILE'], 'w', encoding='utf-8') as f:\n"
+                "    json.dump(sys.argv[1:], f)\n"
+                "prompt = sys.stdin.read()\n"
+                "with open(os.environ['CLAUDE_STDIN_FILE'], 'w', encoding='utf-8') as f:\n"
+                "    f.write(prompt)\n"
+                "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'claude-stdin-session'}))\n"
+                "print(json.dumps({'type': 'result', 'result': {'structured_output': {\n"
+                "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+                "    'verdict': 'GO', 'summary': 'stdin transport ok', 'blocking_findings': []\n"
+                "}}}))\n",
+            )
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(tmp / "home"),
+                "THE_GUARD_REVIEW_LOG_DIR": str(log_dir),
+                "CLAUDE_ARGV_FILE": str(argv_record),
+                "CLAUDE_STDIN_FILE": str(stdin_record),
+            }
+            prompt = "review-prompt-line\n" * 70000
+            self.assertGreater(len(prompt.encode("utf-8")), 1_200_000)
+
+            output, session_id, log_path = _invoke_provider(
+                "claude",
+                str(fake_bin / "claude"),
+                prompt,
+                repo,
+                env,
+                scope=scope,
+                mode="full",
+                full_review_reason="no_prior_session",
+            )
+
+            self.assertEqual(output.verdict, "GO")
+            self.assertEqual(session_id, "claude-stdin-session")
+            recorded_argv = json.loads(argv_record.read_text(encoding="utf-8"))
+            self.assertEqual(recorded_argv[:2], ["-p", "--permission-mode"])
+            self.assertNotIn(prompt, recorded_argv)
+            self.assertNotIn("review-prompt-line", " ".join(recorded_argv))
+            self.assertEqual(stdin_record.read_text(encoding="utf-8"), prompt)
+            meta = json.loads(
+                Path(log_path.replace(".events.jsonl", ".meta.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(meta["mode"], "full")
+            self.assertEqual(meta["full_review_reason"], "no_prior_session")
+
+    def test_snapshot_git_commands_disable_fsmonitor(self) -> None:
+        with patch("the_guard.review.repository.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["git"], 0, b"0123456789abcdef\n", b""
+            )
+            result = review_repository._git(Path("/repo"), "rev-parse", "HEAD")
+
+        self.assertEqual(result.stdout, b"0123456789abcdef\n")
+        run.assert_called_once_with(
+            ["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD"],
+            cwd=Path("/repo"),
+            check=True,
+            capture_output=True,
+        )
+
+    def test_provider_review_plan_owns_mode_and_full_review_reason(self) -> None:
+        session = ReviewSessionState(
+            worktree_path="/repo",
+            branch="topic",
+            merge_base="a" * 40,
+            provider="claude",
+            session_id="session-1",
+            last_head_sha="b" * 40,
+            last_patch_digest="c" * 40,
+            last_verdict="GO",
+            last_summary="",
+            last_blocking_findings=(),
+            last_submodule_shas={},
+        )
+        missing_session_id = replace(session, session_id="")
+        cases = [
+            (
+                ("full", "resume_failed"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "claude",
+                    "resume_failed": True,
+                },
+            ),
+            (
+                ("full", "force"),
+                {
+                    "force": True,
+                    "stored_session": session,
+                    "prior_session": None,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "no_prior_session"),
+                {
+                    "force": False,
+                    "stored_session": None,
+                    "prior_session": None,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "contract_changed"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": None,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "no_incremental_delta"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": None,
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("full", "provider_changed"),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "agy",
+                },
+            ),
+            (
+                ("full", "missing_session_id"),
+                {
+                    "force": False,
+                    "stored_session": missing_session_id,
+                    "prior_session": missing_session_id,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "claude",
+                },
+            ),
+            (
+                ("incremental", ""),
+                {
+                    "force": False,
+                    "stored_session": session,
+                    "prior_session": session,
+                    "inc_prompt": "incremental prompt",
+                    "provider": "claude",
+                },
+            ),
+        ]
+        for (expected_mode, expected_reason), kwargs in cases:
+            with self.subTest(mode=expected_mode, reason=expected_reason):
+                plan = _provider_review_plan(**kwargs)
+                self.assertEqual(plan.mode, expected_mode)
+                self.assertEqual(plan.full_review_reason, expected_reason)
+
+        incremental_plan = _provider_review_plan(**cases[-1][1])
+        self.assertEqual(incremental_plan.incremental_prompt, "incremental prompt")
+        self.assertEqual(incremental_plan.resume_session_id, "session-1")
+        failed_plan = _provider_review_plan(**cases[0][1])
+        self.assertEqual(failed_plan.incremental_prompt, "")
+        self.assertEqual(failed_plan.resume_session_id, "")
+
+    def test_run_metadata_records_cold_forced_and_contract_full_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            service = repo / "services/catalog/service.py"
+            service.parent.mkdir(parents=True)
+            service.write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "round 1")
+
+            fake_home = tmp / "home"
+            fake_bin = fake_home / ".local/bin"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
+            log_dir = tmp / "logs"
+            (fake_home / ".claude").mkdir(parents=True)
+            _write_exec(
+                fake_bin / "claude",
+                "#!/usr/bin/env python3\n"
+                "import json, subprocess, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('2.0.0')\n"
+                "    raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
+                "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'reason-session'}))\n"
+                "print(json.dumps({'type': 'result', 'result': {'structured_output': {\n"
+                "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+                "    'verdict': 'GO', 'summary': 'reason probe', 'blocking_findings': []\n"
+                "}}}))\n",
+            )
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(fake_home),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_LOG_DIR": str(log_dir),
+            }
+
+            def meta_of(result) -> dict:
+                return json.loads(
+                    Path(
+                        result.log_path.replace(".events.jsonl", ".meta.json")
+                    ).read_text(encoding="utf-8")
+                )
+
+            cold = run_architecture_review(repo, env=env)
+            self.assertEqual((cold.mode, cold.verdict), ("full", "GO"))
+            self.assertEqual(meta_of(cold)["full_review_reason"], "no_prior_session")
+
+            forced = run_architecture_review(repo, env=env, force=True)
+            self.assertEqual((forced.mode, forced.verdict), ("full", "GO"))
+            self.assertEqual(meta_of(forced)["full_review_reason"], "force")
+
+            (repo / ".guard").mkdir(exist_ok=True)
+            (repo / ".guard/config.json").write_text(
+                json.dumps({"review": {"project_title": "Renamed project"}}),
+                encoding="utf-8",
+            )
+            _git(repo, "add", ".guard/config.json")
+            _git(repo, "commit", "-m", "change reviewer contract")
+            contracted = run_architecture_review(repo, env=env)
+            self.assertEqual((contracted.mode, contracted.verdict), ("full", "GO"))
+            self.assertEqual(
+                meta_of(contracted)["full_review_reason"], "contract_changed"
+            )
+
+    def test_run_metadata_records_provider_changed_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            service = repo / "services/catalog/service.py"
+            service.parent.mkdir(parents=True)
+            service.write_text("value = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "round 1")
+
+            fake_home = tmp / "home"
+            fake_bin = fake_home / ".local/bin"
+            cfg_file = fake_home / ".config/the-guard/review-agent.json"
+            log_dir = tmp / "logs"
+            (fake_home / ".claude").mkdir(parents=True)
+            (fake_home / ".gemini/antigravity-cli").mkdir(parents=True)
+            _write_exec(
+                fake_bin / "claude",
+                "#!/usr/bin/env python3\n"
+                "import json, subprocess, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('2.0.0')\n"
+                "    raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
+                "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'claude-session'}))\n"
+                "print(json.dumps({'type': 'result', 'result': {'structured_output': {\n"
+                "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+                "    'verdict': 'GO', 'summary': 'claude probe', 'blocking_findings': []\n"
+                "}}}))\n",
+            )
+            _write_exec(
+                fake_bin / "agy",
+                "#!/usr/bin/env python3\n"
+                "import json, subprocess, sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('1.4.2')\n"
+                "    raise SystemExit(0)\n"
+                "args = sys.argv[1:]\n"
+                "assert '-p' in args and args[args.index('-p') + 1]\n"
+                "print(json.dumps({'event': 'init', 'conversation_id': 'agy-session'}))\n"
+                "print(json.dumps({'event': 'result', 'result': {'structured_output': {\n"
+                "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+                "    'verdict': 'GO', 'summary': 'agy provider probe', 'blocking_findings': []\n"
+                "}}}))\n",
+            )
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(fake_home),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+                "THE_GUARD_REVIEW_LOG_DIR": str(log_dir),
+            }
+
+            first = run_architecture_review(repo, env=env)
+            self.assertEqual((first.provider, first.mode), ("claude", "full"))
+
+            service.write_text("value = 2\n", encoding="utf-8")
+            _git(repo, "add", "services/catalog/service.py")
+            _git(repo, "commit", "-m", "round 2")
+
+            switched = run_architecture_review(
+                repo, env={**env, "THE_GUARD_REVIEW_PROVIDER": "agy"}
+            )
+            self.assertEqual((switched.provider, switched.mode), ("agy", "full"))
+            meta = json.loads(
+                Path(
+                    switched.log_path.replace(".events.jsonl", ".meta.json")
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(meta["full_review_reason"], "provider_changed")
 
     def test_prune_isolated_codex_homes_evicts_only_unlocked_expired_homes(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -28,13 +28,25 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   scanning only affected modules and rechecking complete production imports (including changed files
   and callers affected by target-layer or owner-resolution changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
   granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
-- `review/contract` owns reviewer types, wire schema and output validation; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope, patch identity and receipt carry-forward;
+- `review/contract` owns reviewer types, wire schema and output validation; `review/github` owns GitHub PR target parsing, attributable formatting, and publication; `repository` owns Git scope, patch identity, receipt carry-forward and fsmonitor-isolated snapshot Git calls;
   `documents` owns review document inventory, binding blueprint selection and snapshot reads; `session` owns local evidence persistence; `provider` owns CLI discovery/configuration;
-  `runner` owns process execution and provider stream decoding; `prompt` owns snapshot-bound instructions;
+  `runner` owns process execution, stdin prompt delivery and provider stream decoding; `prompt` owns snapshot-bound instructions;
   `engine` composes review and continuation. These modules do not implement product policy semantics.
 - `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows.
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports and reloads the updater from the checkout while retaining the original package as the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
 - Review sessions persist the first reviewed head, the binding revisions of task blueprints already reviewed, and a contract digest covering reviewer code, configuration, policy rules, root instructions and the reviewed scope's architecture documents, touched-module boundary documents and touched/one-hop module declarations. Unrelated modules' documents, declarations and blueprint additions do not invalidate that evidence; changes to a touched module's contract or a one-hop neighbour's layer, role or dependency do. A digest change starts a fresh full review while preserving the binding blueprint revisions for a valid branch baseline. Codex isolation homes trust the worktree and common repository root, and provider stream decoding combines stderr with structured stdout errors so quota or auth failures reach sticky failover.
+
+Iterative fix-and-re-review rounds rerun plain `guard review`; the stored session resumes
+incrementally. `--force` is reserved for discarding a corrupted session or an explicit cold
+re-audit and is recorded as that run's `full_review_reason`. Provider prompts reach Claude over
+standard input, so prompts are not bounded by the OS argv limit that raised `E2BIG` near 1 MB;
+`agy -p` requires its prompt as the flag value, and `codex exec` already read the prompt from
+standard input. Every `repository` snapshot Git call injects `-c core.fsmonitor=false`, so a
+wedged or cross-version worktree `fsmonitor--daemon` cannot stall review. Full runs record the
+objective cause in bounded run metadata as `full_review_reason`: `force`, `no_prior_session`,
+`contract_changed`, `no_incremental_delta`, `provider_changed`, `missing_session_id` or
+`resume_failed`; incremental runs record an empty value. The field is observational only and
+does not change receipt, carry-forward or invalidation semantics.
 
 Policy meanings live in the installed rule Markdown, not duplicate Python rule dictionaries.
 Discovery reports observed structure; it never grants ownership or changes declared constraints.

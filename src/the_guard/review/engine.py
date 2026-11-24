@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,55 @@ from .session import (
     ReviewRunLogger,
     ReviewSessionState,
 )
+
+
+@dataclass(frozen=True)
+class _ProviderReviewPlan:
+    """One provider attempt's mode decision with everything its invocation needs."""
+
+    mode: str
+    full_review_reason: str
+    incremental_prompt: str = ""
+    resume_session_id: str = ""
+
+
+def _provider_review_plan(
+    *,
+    force: bool,
+    stored_session: ReviewSessionState | None,
+    prior_session: ReviewSessionState | None,
+    inc_prompt: str | None,
+    provider: str,
+    resume_failed: bool = False,
+) -> _ProviderReviewPlan:
+    """Decide one provider's mode and own the full-review-reason vocabulary.
+
+    ``mode == "incremental"`` exactly when the stored session can resume for this
+    provider and an incremental prompt was built; that plan records an empty
+    ``full_review_reason``. Every other plan is a full run whose objective cause is
+    ``force``, ``no_prior_session``, ``contract_changed``, ``no_incremental_delta``,
+    ``provider_changed``, ``missing_session_id`` or ``resume_failed``.
+    """
+    if resume_failed:
+        return _ProviderReviewPlan("full", "resume_failed")
+    if force:
+        return _ProviderReviewPlan("full", "force")
+    if stored_session is None:
+        return _ProviderReviewPlan("full", "no_prior_session")
+    if prior_session is None:
+        return _ProviderReviewPlan("full", "contract_changed")
+    if inc_prompt is None:
+        return _ProviderReviewPlan("full", "no_incremental_delta")
+    if prior_session.provider != provider:
+        return _ProviderReviewPlan("full", "provider_changed")
+    if not prior_session.session_id:
+        return _ProviderReviewPlan("full", "missing_session_id")
+    return _ProviderReviewPlan(
+        "incremental",
+        "",
+        incremental_prompt=inc_prompt,
+        resume_session_id=prior_session.session_id,
+    )
 
 
 def run_architecture_review(
@@ -237,38 +287,42 @@ def run_architecture_review(
             model, effort = resolve_provider_model_config(
                 provider, config_payload, eff_env
             )
-            can_resume = (
-                inc_prompt is not None
-                and prior_session is not None
-                and prior_session.provider == provider
-                and bool(prior_session.session_id)
-            )
-            if can_resume and prior_session is not None and inc_prompt is not None:
+            plan_inputs = {
+                "force": force,
+                "stored_session": stored_session,
+                "prior_session": prior_session,
+                "inc_prompt": inc_prompt,
+                "provider": provider,
+            }
+            plan = _provider_review_plan(**plan_inputs)
+            if plan.mode == "incremental":
+                resume_session_id = plan.resume_session_id
                 try:
                     payload, resolved_session_id, log_path = _invoke_provider(
                         provider,
                         binary_path,
-                        inc_prompt,
+                        plan.incremental_prompt,
                         repo_root,
                         eff_env,
                         scope=scope,
-                        mode="incremental",
-                        resume_session_id=prior_session.session_id,
+                        mode=plan.mode,
+                        resume_session_id=plan.resume_session_id,
                         prev_head_sha=prev_head_sha,
                         reviewer_note=eff_note,
                         model=model,
                         effort=effort,
                     )
                     chosen_provider = provider
-                    effective_mode = "incremental"
+                    effective_mode = plan.mode
                     if idx == 0 or primary_failed_persistently:
                         record_working_provider(
                             repo_root, provider, binary_path, eff_env
                         )
                     break
                 except Exception as resume_exc:
+                    plan = _provider_review_plan(**plan_inputs, resume_failed=True)
                     sys.stderr.write(
-                        f"[arch-review][{provider}] incremental session resume ({prior_session.session_id}) failed ({resume_exc}); falling back to full session...\n"
+                        f"[arch-review][{provider}] incremental session resume ({resume_session_id}) failed ({resume_exc}); falling back to full session...\n"
                     )
                     sys.stderr.flush()
 
@@ -280,14 +334,15 @@ def run_architecture_review(
                     repo_root,
                     eff_env,
                     scope=scope,
-                    mode="full",
+                    mode=plan.mode,
+                    full_review_reason=plan.full_review_reason,
                     prev_head_sha=prev_head_sha,
                     reviewer_note=eff_note,
                     model=model,
                     effort=effort,
                 )
                 chosen_provider = provider
-                effective_mode = "full"
+                effective_mode = plan.mode
                 if idx == 0 or primary_failed_persistently:
                     record_working_provider(repo_root, provider, binary_path, eff_env)
                 break
