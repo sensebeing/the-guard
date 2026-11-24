@@ -26,6 +26,8 @@ from .prompt import (
     build_review_prompt,
 )
 from .provider import (
+    FALLBACK_COOLDOWN_SECONDS,
+    _normalize_priority_order,
     record_working_provider,
     resolve_provider_model_config,
     resolve_provider_order,
@@ -416,7 +418,10 @@ def run_architecture_review(
         chosen_provider = ""
         primary_failed_persistently = False
         primary_provider = candidates[0][0]
-        forced_provider = explicit_provider or eff_env.get("THE_GUARD_REVIEW_PROVIDER", "").strip()
+        priority_order = _normalize_priority_order(config_payload.get("priority_order"))
+        priority_top = priority_order[0] if priority_order else ""
+        preferred_provider = config_payload.get("preferred_provider")
+        forced_provider = (explicit_provider or eff_env.get("THE_GUARD_REVIEW_PROVIDER", "")).strip()
         if not forced_provider and prior_session and prior_session.session_id and inc_prompt is not None:
             candidates = sorted(candidates, key=lambda candidate: candidate[0] != prior_session.provider)
         for provider, binary_path in candidates:
@@ -471,8 +476,24 @@ def run_architecture_review(
 
                 chosen_provider = provider
                 effective_mode = plan.mode
-                if provider == primary_provider or primary_failed_persistently:
-                    record_working_provider(repo_root, provider, binary_path, eff_env)
+                should_record = not forced_provider and (
+                    primary_failed_persistently
+                    or (
+                        provider == primary_provider
+                        and (
+                            not preferred_provider
+                            or (provider == priority_top and provider != preferred_provider)
+                        )
+                    )
+                )
+                if should_record:
+                    if primary_failed_persistently and priority_top and provider != priority_top:
+                        record_working_provider(
+                            repo_root, provider, binary_path, eff_env,
+                            fallback_cooldown_seconds=FALLBACK_COOLDOWN_SECONDS,
+                        )
+                    else:
+                        record_working_provider(repo_root, provider, binary_path, eff_env)
                 break
             if payload is not None:
                 break

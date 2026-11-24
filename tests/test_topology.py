@@ -12,6 +12,7 @@ from time import perf_counter
 
 from the_guard.config import GuardConfig, load_config
 from the_guard.cli import main
+from the_guard.finding import Finding
 from the_guard.topology import (
     audit_topology,
     check_contract_drift,
@@ -21,6 +22,7 @@ from the_guard.topology import (
 )
 from the_guard.topology.configured import check_configured
 from the_guard.topology import audit as topology_audit
+from the_guard.topology import configured as topology_configured
 from the_guard.git_helpers import BaseFileReader, BaseFileEntry, _compute_changed_lines
 from the_guard.topology.imports import (
     DETERMINISTIC_IMPORT_EXTENSIONS,
@@ -1489,6 +1491,50 @@ import '../orca-workspace/index.ts';
         )
         self.write("src/api.py", "def write():\n    return 1\n")
         self.assertEqual(run_topology_guard(self.root, ["src/api.py"], base="HEAD"), [])
+
+    def test_retired_table_ratchet_parses_each_matching_snapshot_once(self):
+        path = "src/api.py"
+        config = GuardConfig(topology={"retired_tables": [
+            {"tables": [f"old_{number}" for number in range(200)]},
+            {"tables": ["old_12"], "rule_id": "guard.service-boundaries"},
+        ]})
+        base = 'a = "FROM old_12"\nb = "FROM old_4 JOIN old_4"\n'
+        current = '\n'.join([
+            '# FROM old_12',
+            'a = "JOIN old_12" # guard-exempt guard.data-modeling: approved fixture boundary',
+            'b = "FROM old_4"',
+            'c = "FROM old_12 JOIN old_99"',
+            'd = "FROM old_99"',
+            'e = "FROM old_42"',
+        ])
+        span_reader = topology_configured.sql_spans
+        with patch.object(topology_configured, "sql_spans", wraps=span_reader) as spans:
+            self.assertEqual(check_configured(path, current, base, {1, 2, 3, 4, 5}, config), [
+                Finding("guard.service-boundaries", path, 2,
+                        "Retired table 'old_12' is delete-only (1 -> 2 SQL references)."),
+                Finding("guard.data-modeling", path, 4,
+                        "Retired table 'old_12' is delete-only (1 -> 2 SQL references)."),
+                Finding("guard.data-modeling", path, 4,
+                        "Retired table 'old_99' is delete-only (0 -> 2 SQL references)."),
+            ])
+            self.assertEqual([call.args for call in spans.call_args_list], [(current, path), (base, path)])
+            spans.reset_mock()
+            self.assertEqual(check_configured(path, 'a = "FROM active"', base, {1}, config), [])
+            spans.assert_not_called()
+
+    def test_sql_prefilters_preserve_unicode_and_implicit_string_concatenation(self):
+        path = "src/api.py"
+        config = GuardConfig(topology={
+            "exclusive_sql_owners": [{"table": "owned", "owners": ["src/owner.py"]}],
+            "retired_tables": [{"tables": ["island"]}],
+        })
+        text = 'owner_query = "FR" "OM owned"\nretired_query = "FROM ıſland"\n'
+        self.assertEqual(check_configured(path, text, None, {1, 2}, config), [
+            Finding("guard.single-source-of-truth", path, 1,
+                    "SQL for 'owned' belongs exclusively to ['src/owner.py']"),
+            Finding("guard.data-modeling", path, 2,
+                    "Retired table 'island' is delete-only (0 -> 1 SQL references)."),
+        ])
 
     def test_forbidden_patterns_layering_and_exemption(self):
         self.config(

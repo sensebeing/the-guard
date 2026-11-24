@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from .repository import git_common_dir
 from .session import MAX_RETAINED_SESSIONS, UTC, worktree_session_key
 
 ISOLATED_CODEX_HOME_MAX_AGE_SECONDS = 24 * 3600
+FALLBACK_COOLDOWN_SECONDS = 1800
 
 
 def _config_file_path(repo_root: Path, env: dict[str, str] | None = None) -> Path:
@@ -371,6 +372,22 @@ def _load_config(cfg_path: Path) -> dict[str, Any]:
     )
 
 
+def _write_config(cfg_path: Path, payload: dict[str, Any]) -> None:
+    with contextlib.suppress(OSError):
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        _write_snapshot(cfg_path, data.encode("utf-8"))
+
+
+def _fallback_is_active(expires_at: Any) -> bool:
+    if not expires_at:
+        return True
+    try:
+        return datetime.fromisoformat(expires_at) > datetime.now(UTC)
+    except (TypeError, ValueError):
+        return False
+
+
 def resolve_provider_model_config(
     provider: str,
     config_payload: dict[str, Any] | None = None,
@@ -395,6 +412,7 @@ def probe_environment(
     *,
     priority_order: list[str] | None = None,
     provider_models: dict[str, dict[str, str]] | None = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
     eff_env = dict(os.environ if env is None else env)
     cfg_path = _config_file_path(repo_root, eff_env)
@@ -431,13 +449,8 @@ def probe_environment(
     }
     if models:
         payload["provider_models"] = models
-    try:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-    except OSError:
-        pass
+    if persist:
+        _write_config(cfg_path, payload)
     return payload
 
 
@@ -462,11 +475,13 @@ def resolve_provider_order(
             if isinstance(cached.get("provider_binaries"), dict)
             else {}
         )
-        order = (
-            [preferred, *[p for p in priority if p != preferred]]
-            if preferred in priority
-            else priority
-        )
+        order = priority
+        if (
+            preferred in priority
+            and preferred != priority[0]
+            and _fallback_is_active(cached.get("fallback_expires_at"))
+        ):
+            order = [preferred, *(p for p in priority if p != preferred)]
         for prov in order:
             bin_path = binaries.get(prov) or _find_provider_binary(prov, eff_env)
             if (
@@ -477,7 +492,7 @@ def resolve_provider_order(
                 ordered.append((prov, bin_path))
     payload = cached
     if not ordered:
-        payload = probe_environment(repo_root, eff_env)
+        payload = probe_environment(repo_root, eff_env, persist=not forced)
     binaries = payload.get("provider_binaries", {})
     if not ordered:
         ordered = [
@@ -496,7 +511,12 @@ def resolve_provider_order(
 
 
 def record_working_provider(
-    repo_root: Path, provider: str, binary_path: str, env: dict[str, str] | None = None
+    repo_root: Path,
+    provider: str,
+    binary_path: str,
+    env: dict[str, str] | None = None,
+    *,
+    fallback_cooldown_seconds: int | None = None,
 ) -> None:
     eff_env = dict(os.environ if env is None else env)
     cfg_path = _config_file_path(repo_root, eff_env)
@@ -508,22 +528,24 @@ def record_working_provider(
         if provider not in avail:
             avail.insert(0, provider)
         bins = {**dict(existing.get("provider_binaries") or {}), provider: binary_path}
+    priority_order = _normalize_priority_order(existing.get("priority_order")) or list(PROVIDERS)
+    now = datetime.now(UTC)
     data = {
         "schema": CONFIG_SCHEMA,
-        "priority_order": _normalize_priority_order(existing.get("priority_order"))
-        or list(PROVIDERS),
+        "priority_order": priority_order,
         "preferred_provider": provider,
         "available_providers": avail,
         "provider_binaries": bins,
-        "probed_at": datetime.now(UTC).isoformat(),
+        "probed_at": now.isoformat(),
     }
+    if (
+        fallback_cooldown_seconds is not None
+        and fallback_cooldown_seconds > 0
+        and provider != priority_order[0]
+    ):
+        expires_at = now + timedelta(seconds=fallback_cooldown_seconds)
+        data["fallback_expires_at"] = expires_at.isoformat()
     models = _normalize_provider_models(existing.get("provider_models"))
     if models:
         data["provider_models"] = models
-    try:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-    except OSError:
-        pass
+    _write_config(cfg_path, data)

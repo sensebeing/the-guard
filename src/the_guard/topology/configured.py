@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-from ..finding import _line_exempts_rule
-
 import ast
 import fnmatch
 import re
 from collections.abc import Sequence
+from functools import lru_cache
 from typing import Any, Literal
 
 from ..config import GuardConfig
-from ..finding import Finding
+from ..finding import Finding, _line_exempts_rule
 from .discovery import candidate_module_for_path
 from .imports import extract_imports, owner_module, resolve_target_module
 from .paths import is_excluded_topology_path
+
+_SQL_CLAUSE = r"\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+"
+_SQL_CLAUSE_RE = re.compile(_SQL_CLAUSE, re.I)
+# These re.I matches for ASCII letters are not preserved by str.lower().
+_SQL_ASCII_CASE_EQUIVALENTS = str.maketrans({"İ": "i", "ı": "i", "ſ": "s"})
 
 
 def in_scope(path: str, prefixes: Sequence[str]) -> bool:
@@ -24,13 +28,19 @@ def in_scope(path: str, prefixes: Sequence[str]) -> bool:
     )
 
 
+@lru_cache(maxsize=1024)
 def sql_pattern(table: str) -> re.Pattern[str]:
     return re.compile(
-        r'\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+(?:ONLY\s+)?(?:public\.)?["\x27]?'
+        _SQL_CLAUSE + r'(?:ONLY\s+)?(?:public\.)?["\x27]?'
         + re.escape(table)
         + r"\b",
         re.I,
     )
+
+
+@lru_cache(maxsize=256)
+def _forbidden_pattern(expression: str, literal: bool) -> re.Pattern[str]:
+    return re.compile(re.escape(expression) if literal else expression)
 
 
 def sql_spans(text: str, path: str) -> list[tuple[int, int, str]]:
@@ -64,8 +74,15 @@ def check_configured(
     findings = []
     topology = config.topology
     prefix = config.rule_id_prefix
-    spans = sql_spans(text, path)
     lines = text.splitlines()
+
+    @lru_cache(maxsize=1)
+    def _get_spans() -> list[tuple[int, int, str]]:
+        return sql_spans(text, path)
+
+    @lru_cache(maxsize=1)
+    def _get_base_spans() -> list[tuple[int, int, str]]:
+        return sql_spans(base_text, path) if base_text else []
 
     if check_retired_edits:
         retired_module = owner_module(path, [
@@ -85,7 +102,7 @@ def check_configured(
             continue
         rule_id = rule.get("rule_id", prefix + "single-source-of-truth")
         pattern = sql_pattern(rule["table"])
-        for start, end, value in spans:
+        for start, end, value in _get_spans():
             if (
                 pattern.search(value)
                 and _is_range_touched(changed_lines, start, end)
@@ -110,41 +127,53 @@ def check_configured(
     for rule in retired:
         if not in_scope(path, rule.get("scope_prefixes", [""])):
             continue
+        rule_id = rule.get("rule_id", prefix + "data-modeling")
+        touched_lines = [
+            (number, line)
+            for number, line in enumerate(lines, 1)
+            if _is_range_touched(changed_lines, number, number)
+            and not line.lstrip().startswith(("#", "//", "--"))
+            and not _line_exempts_rule(line, rule_id, exempt_tag=config.exempt_tag)
+        ]
+        if not touched_lines:
+            continue
+        touched_blob = "\n".join(line for _, line in touched_lines)
+        if not _SQL_CLAUSE_RE.search(touched_blob):
+            continue
+        if not touched_blob.isascii():
+            touched_blob = touched_blob.translate(_SQL_ASCII_CASE_EQUIVALENTS)
+        touched_blob_lower = touched_blob.lower()
         for table in rule["tables"]:
+            if table.isascii() and table.lower() not in touched_blob_lower:
+                continue
             pattern = sql_pattern(table)
-            current_count = sum(len(pattern.findall(value)) for _, _, value in spans)
+            match_line = next(
+                (number for number, line in touched_lines if pattern.search(line)), None
+            )
+            if match_line is None:
+                continue
+            current_count = sum(
+                len(pattern.findall(value)) for _, _, value in _get_spans()
+            )
             base_count = sum(
-                len(pattern.findall(value))
-                for _, _, value in sql_spans(base_text or "", path)
+                len(pattern.findall(value)) for _, _, value in _get_base_spans()
             )
             if current_count >= base_count:
-                rule_id = rule.get("rule_id", prefix + "data-modeling")
-                for number, line in enumerate(lines, 1):
-                    if not _is_range_touched(
-                        changed_lines, number, number
-                    ) or line.lstrip().startswith(("#", "//", "--")):
-                        continue
-                    if _line_exempts_rule(line, rule_id, exempt_tag=config.exempt_tag):
-                        continue
-                    if pattern.search(line):
-                        findings.append(
-                            Finding(
-                                rule_id,
-                                path,
-                                number,
-                                f"Retired table '{table}' is delete-only ({base_count} -> {current_count} SQL references).",
-                            )
-                        )
-                        break
+                findings.append(
+                    Finding(
+                        rule_id,
+                        path,
+                        match_line,
+                        f"Retired table '{table}' is delete-only ({base_count} -> {current_count} SQL references).",
+                    )
+                )
     for rule in topology.get("forbidden_patterns", []):
         if not in_scope(path, rule.get("scope_prefixes", [""])):
             continue
         rule_id = rule.get("rule_id", prefix + "single-source-of-truth")
         expression = rule["literal_or_regex"]
-        pattern = re.compile(
-            re.escape(expression) if rule.get("literal", False) else expression
-        )
-        for number, line in enumerate(text.splitlines(), 1):
+        pattern = _forbidden_pattern(expression, bool(rule.get("literal", False)))
+        for number, line in enumerate(lines, 1):
             if (
                 _is_range_touched(changed_lines, number, number)
                 and not line.lstrip().startswith(("#", "//"))
