@@ -393,6 +393,14 @@ def _active_cooldowns(raw: Any, now: datetime) -> dict[str, dict[str, str]]:
     return active
 
 
+def _set_provider_cooldowns(payload: dict[str, Any], cooldowns: dict[str, dict[str, str]]) -> None:
+    payload.pop("fallback_expires_at", None)
+    if cooldowns:
+        payload["provider_cooldowns"] = cooldowns
+    else:
+        payload.pop("provider_cooldowns", None)
+
+
 def _cooldown_expiry(now: datetime, env: dict[str, str]) -> datetime:
     try:
         seconds = float(env.get("THE_GUARD_REVIEW_COOLDOWN_SECONDS", str(DEFAULT_PROVIDER_COOLDOWN_SECONDS)))
@@ -541,10 +549,7 @@ def resolve_provider_order(
         cooldowns = {}
     preferred = next((provider for provider, _ in ordered if provider not in cooldowns), "")
     effective = {**payload, "preferred_provider": preferred}
-    if cooldowns:
-        effective["provider_cooldowns"] = cooldowns
-    else:
-        effective.pop("provider_cooldowns", None)
+    _set_provider_cooldowns(effective, cooldowns)
     if forced in PROVIDERS:
         forced_bin = binaries.get(forced) or _find_provider_binary(forced, eff_env)
         if forced_bin:
@@ -608,9 +613,6 @@ def _record_provider_result(
             "available_providers": available,
             "provider_binaries": binaries,
         }
-        if cooldowns:
-            data["provider_cooldowns"] = cooldowns
-        else:
-            data.pop("provider_cooldowns", None)
+        _set_provider_cooldowns(data, cooldowns)
         if data != existing:
             _write_provider_config(cfg_path, {**data, "probed_at": now.isoformat()})

@@ -28,9 +28,8 @@ from the_guard.review.engine import (
 from the_guard.review import session
 from the_guard.review.contract import ReviewOutput, ReviewScope
 from the_guard.review.documents import resolve_scope_modules
-from the_guard.review.session import ReviewResult, ReviewRunLogger
 from the_guard.review.prompt import _parse_numstat_entries, build_incremental_review_prompt
-from the_guard.review.provider import probe_environment, record_provider_cooldown
+from the_guard.review.provider import probe_environment, record_provider_cooldown, record_working_provider
 from the_guard.review.repository import (
     _collect_branch_delta,
     _is_same_per_file_branch_patch,
@@ -39,6 +38,7 @@ from the_guard.review.repository import (
     review_logs_dir,
     compute_review_contract_digest,
 )
+from the_guard.review.session import ReviewResult, ReviewRunLogger
 from the_guard.config import GuardConfig, load_config
 from the_guard.hooks import main_push_gate
 from the_guard.policy import load_policy
@@ -743,6 +743,31 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             saved = json.loads(cfg_file.read_bytes())
             self.assertEqual(saved["preferred_provider"], "codex")
             self.assertNotIn("provider_cooldowns", saved)
+
+    def test_finishing_old_fallback_session_does_not_overwrite_recovered_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, env, _ = self._start_module_review(tmp)
+            codex = tmp / "home/.local/bin/codex"
+            _write_exec(codex, "#!/bin/sh\nexit 0\n")
+            env = {**env, "OPENAI_API_KEY": "test-credentials"}
+            cfg_file = Path(env["THE_GUARD_REVIEW_CONFIG"])
+            original = json.loads(cfg_file.read_text())
+            self.assertEqual(original["priority_order"][0], "codex")
+            self.assertEqual(original["preferred_provider"], "claude")
+            (repo / "services/a/main.py").write_text("value = 3\n")
+            _git(repo, "commit", "-am", "round 2")
+
+            def finish_after_recovery(*args, **kwargs):
+                self.assertEqual(args[0], "claude")
+                self.assertEqual(kwargs["resume_session_id"], "module-session")
+                record_working_provider(repo, "codex", str(codex), env)
+                return ReviewOutput("GO", "ok", (), ""), "module-session", ""
+
+            with mock.patch("the_guard.review.engine._invoke_provider", side_effect=finish_after_recovery):
+                result = run_architecture_review(repo, env=env)
+            self.assertEqual((result.mode, result.provider), ("incremental", "claude"))
+            self.assertEqual(json.loads(cfg_file.read_text())["preferred_provider"], "codex")
 
     def test_run_index_rotates_atomically_and_retains_four_logs(self) -> None:
         with tempfile.TemporaryDirectory() as td:

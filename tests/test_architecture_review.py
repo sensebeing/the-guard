@@ -2585,6 +2585,72 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             self.assertEqual(persisted["preferred_provider"], "agy")
             self.assertIn("usage limit", persisted["provider_cooldowns"]["codex"]["reason"])
 
+    def test_provider_override_leaves_configuration_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            (repo / "app.py").write_text("value = 1\n")
+            _git(repo, "add", "app.py")
+            _git(repo, "commit", "-m", "Add application code")
+            fake_home = tmp / "home"
+            fake_bin = fake_home / ".local/bin"
+            cfg_file = tmp / "review-agent.json"
+            for provider in ("codex", "claude"):
+                (fake_home / f".{provider}").mkdir(parents=True)
+                _write_exec(fake_bin / provider, "#!/bin/sh\nexit 0\n")
+            (fake_home / ".codex/auth.json").write_text("{}")
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "HOME": str(fake_home),
+                "THE_GUARD_REVIEW_CONFIG": str(cfg_file),
+            }
+            probe_environment(repo, env=env)
+            original = cfg_file.read_bytes()
+            self.assertEqual(json.loads(original)["preferred_provider"], "codex")
+
+            for args, overrides in (
+                (["--provider", "claude"], {}),
+                ([], {"THE_GUARD_REVIEW_PROVIDER": "claude"}),
+            ):
+                for cached, reprobe in ((True, False), (True, True), (False, False)):
+                    with self.subTest(args=args, cached=cached, reprobe=reprobe):
+                        if cached:
+                            cfg_file.write_bytes(original)
+                        else:
+                            cfg_file.unlink(missing_ok=True)
+                        with (
+                            patch.dict(os.environ, {**env, **overrides}, clear=True),
+                            patch("the_guard.review.engine._invoke_provider", return_value=(
+                                ReviewOutput("GO", "ok", (), ""), "", "",
+                            )),
+                            contextlib.redirect_stdout(io.StringIO()) as stdout,
+                        ):
+                            code = review_main([
+                                "run", "--repo-root", str(repo), "--force", "--json", *args,
+                                *(["--reprobe"] if reprobe else []),
+                            ], _from_root_cli=True)
+                        self.assertEqual(code, 0)
+                        self.assertEqual(json.loads(stdout.getvalue())["provider"], "claude")
+                        if cached:
+                            self.assertEqual(cfg_file.read_bytes(), original)
+                        else:
+                            self.assertFalse(cfg_file.exists())
+
+    def test_provider_config_retains_old_bytes_if_atomic_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg_file = root / "review-agent.json"
+            env = {"THE_GUARD_REVIEW_CONFIG": str(cfg_file)}
+            probe_environment(root, env=env, priority_order=["codex", "claude"])
+            original = cfg_file.read_bytes()
+            files_before = set(root.iterdir())
+            with patch.object(review_provider.os, "replace", side_effect=OSError("write failed")):
+                record_working_provider(root, "claude", "/bin/claude", env)
+                self.assertEqual(cfg_file.read_bytes(), original)
+                probe_environment(root, env=env, priority_order=["claude"])
+                self.assertEqual(cfg_file.read_bytes(), original)
+            self.assertEqual(set(root.iterdir()), files_before)
+
     def test_colleague_environment_check_and_fallback_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -2676,6 +2742,25 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             reprobed = json.loads(reset.stdout)
             self.assertFalse(reprobed.get("provider_cooldowns"))
             self.assertEqual(reprobed["preferred_provider"], "codex")
+
+            legacy = {
+                **reprobed,
+                "preferred_provider": "agy",
+                "fallback_expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
+            }
+            cfg_file.write_text(json.dumps(legacy))
+            ordered, effective = resolve_provider_order(repo, env=env)
+            self.assertEqual([provider for provider, _ in ordered], ["codex", "agy", "claude"])
+            self.assertNotIn("fallback_expires_at", effective)
+            self.assertEqual(json.loads(cfg_file.read_bytes()), legacy)
+            with patch("the_guard.review.engine._invoke_provider", return_value=(
+                ReviewOutput("GO", "recovered", (), ""), "", "",
+            )):
+                recovered = run_architecture_review(repo, force=True, env=env)
+            self.assertEqual(recovered.provider, "codex")
+            persisted = json.loads(cfg_file.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["preferred_provider"], "codex")
+            self.assertNotIn("fallback_expires_at", persisted)
 
             models = {
                 "agy": {"model": "gemini-4-argon-high", "effort": "high"},
