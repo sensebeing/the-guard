@@ -56,7 +56,20 @@ def _find_provider_binary(provider: str, env: dict[str, str]) -> str | None:
         os.pathsep.join([path_var, *extra]) if path_var else os.pathsep.join(extra)
     )
     found = shutil.which(provider, path=search_path)
-    return found if found and os.access(found, os.X_OK) else None
+    return str(Path(found).absolute()) if found and os.access(found, os.X_OK) else None
+
+
+def _resolve_provider_binary(
+    provider: str, cached_path: str | None, env: dict[str, str]
+) -> str | None:
+    if (
+        cached_path
+        and os.path.dirname(cached_path)
+        and os.path.isfile(cached_path)
+        and os.access(cached_path, os.X_OK)
+    ):
+        return cached_path
+    return _find_provider_binary(provider, env)
 
 
 def _has_provider_credentials(provider: str, env: dict[str, str]) -> bool:
@@ -535,8 +548,8 @@ def resolve_provider_order(
     if priority and not reprobe:
         cooldowns = _active_cooldowns(payload.get("provider_cooldowns"), datetime.now(UTC))
         for prov in sorted(priority, key=cooldowns.__contains__):
-            bin_path = binaries.get(prov) or _find_provider_binary(prov, eff_env)
-            if bin_path and os.access(bin_path, os.X_OK) and _has_provider_credentials(prov, eff_env):
+            bin_path = _resolve_provider_binary(prov, binaries.get(prov), eff_env)
+            if bin_path and _has_provider_credentials(prov, eff_env):
                 ordered.append((prov, bin_path))
     if not ordered:
         payload = (
@@ -551,7 +564,7 @@ def resolve_provider_order(
     effective = {**payload, "preferred_provider": preferred}
     _set_provider_cooldowns(effective, cooldowns)
     if forced in PROVIDERS:
-        forced_bin = binaries.get(forced) or _find_provider_binary(forced, eff_env)
+        forced_bin = _resolve_provider_binary(forced, binaries.get(forced), eff_env)
         if forced_bin:
             ordered = [
                 (forced, forced_bin),
@@ -581,6 +594,11 @@ def _record_provider_result(
     reason: str = "",
 ) -> None:
     eff_env = dict(os.environ if env is None else env)
+    if binary_path is not None:
+        resolved_path = _resolve_provider_binary(provider, binary_path, eff_env)
+        if resolved_path is None:
+            return
+        binary_path = str(Path(resolved_path).absolute())
     cfg_path = _config_file_path(repo_root, eff_env)
     with contextlib.suppress(OSError), _provider_config_lock(cfg_path):
         existing = _load_config(cfg_path)
