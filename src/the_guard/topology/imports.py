@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from functools import lru_cache
 from pathlib import PurePosixPath
+from types import MappingProxyType
+from typing import NamedTuple
 
 from ..config import GuardConfig
 
 JS_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 DETERMINISTIC_IMPORT_EXTENSIONS = JS_EXTENSIONS | {".py"}
+_SUFFIX_IGNORES_LEADING_DOTS = not PurePosixPath("..py").suffix
 _JS_TOKEN = re.compile(
     r"//[^\n]*|/\*[\s\S]*?\*/|"
     r"'(?:\\[\s\S]|[^'\\\r\n])*'|\"(?:\\[\s\S]|[^\"\\\r\n])*\"|"
@@ -246,22 +250,19 @@ def extract_imports(
     return sorted(set(imports))
 
 
-def owner_module(file_path: str, module_paths: Sequence[str]) -> str | None:
-    return next(
-        (
-            m
-            for m in sorted(module_paths, key=lambda m: (-len(m), m))
-            if file_path == m or file_path.startswith(m + "/")
-        ),
-        None,
-    )
-
-
 def _module_stem(path: str) -> str:
-    suffix = PurePosixPath(path).suffix
-    return (
-        path.removesuffix(suffix) if suffix in DETERMINISTIC_IMPORT_EXTENSIONS else path
-    )
+    name_start = path.rfind("/") + 1
+    dot = path.rfind(".")
+    if dot <= name_start or path[dot:] not in DETERMINISTIC_IMPORT_EXTENSIONS:
+        return path
+    # Python 3.14's pathlib ignores all leading dots when finding a suffix.
+    if (
+        _SUFFIX_IGNORES_LEADING_DOTS
+        and path[name_start] == "."
+        and not path[name_start:dot].strip(".")
+    ):
+        return path
+    return path[:dot]
 
 
 def _module_identities(path: str) -> tuple[str, ...]:
@@ -271,8 +272,31 @@ def _module_identities(path: str) -> tuple[str, ...]:
     return (stem,)
 
 
-def _target_owner(path: str, module_paths: Sequence[str]) -> str | None:
-    stem = _module_stem(path)
+class _ModuleIndex(NamedTuple):
+    owner_paths_by_top: Mapping[str, tuple[str, ...]]
+    identities_by_top: Mapping[str, tuple[tuple[str, str], ...]]
+    unique_alias_roots: Mapping[str, str]
+
+    def owner(self, file_path: str) -> str | None:
+        paths = self.owner_paths_by_top.get(file_path.partition("/")[0], ())
+        return next(
+            (
+                path
+                for path in paths
+                if file_path == path or file_path.startswith(path + "/")
+            ),
+            None,
+        )
+
+
+@lru_cache(maxsize=64)
+def _module_index(
+    module_paths: tuple[str, ...], module_doc_roots: tuple[str, ...]
+) -> _ModuleIndex:
+    owner_paths_by_top: dict[str, list[str]] = {}
+    for path in sorted(module_paths, key=lambda path: (-len(path), path)):
+        owner_paths_by_top.setdefault(path.partition("/")[0], []).append(path)
+
     identities = sorted(
         (
             (identity, module)
@@ -281,6 +305,32 @@ def _target_owner(path: str, module_paths: Sequence[str]) -> str | None:
         ),
         key=lambda item: (-len(item[0]), -len(_module_stem(item[1])), item[1]),
     )
+    identities_by_top: dict[str, list[tuple[str, str]]] = {}
+    alias_roots: dict[str, set[str]] = {}
+    for identity, module in identities:
+        root, sep, rest = identity.partition("/")
+        identities_by_top.setdefault(root, []).append((identity, module))
+        if sep and root in module_doc_roots:
+            name = rest.partition("/")[0]
+            alias_roots.setdefault(name, set()).add(root + "/" + name)
+
+    unique_alias_roots = {
+        name: next(iter(roots)) for name, roots in alias_roots.items() if len(roots) == 1
+    }
+    return _ModuleIndex(
+        MappingProxyType({top: tuple(paths) for top, paths in owner_paths_by_top.items()}),
+        MappingProxyType({top: tuple(pairs) for top, pairs in identities_by_top.items()}),
+        MappingProxyType(unique_alias_roots),
+    )
+
+
+def owner_module(file_path: str, module_paths: Sequence[str]) -> str | None:
+    return _module_index(tuple(module_paths), GuardConfig.module_doc_roots).owner(file_path)
+
+
+def _target_owner(path: str, index: _ModuleIndex) -> str | None:
+    stem = _module_stem(path)
+    identities = index.identities_by_top.get(stem.partition("/")[0], ())
     return next(
         (
             module
@@ -298,10 +348,14 @@ def resolve_target_module(
     module_doc_roots: Sequence[str] = GuardConfig.module_doc_roots,
 ) -> str | None:
     """Resolve literal repo paths or unambiguous package aliases; exclude self edges."""
-    paths = sorted(module_paths, key=lambda m: (-len(_module_stem(m)), m))
-    source = owner_module(file_path, paths)
+    index = _module_index(tuple(module_paths), tuple(module_doc_roots))
     if spec.startswith(("./", "../")):
-        parts = list(PurePosixPath(file_path).parent.parts)
+        parts = [part for part in file_path.split("/") if part not in {"", "."}][:-1]
+        # PurePosixPath preserves exactly two leading slashes as a distinct anchor.
+        if file_path.startswith("//") and not file_path.startswith("///"):
+            parts.insert(0, "//")
+        elif file_path.startswith("/"):
+            parts.insert(0, "/")
         for part in spec.split("/"):
             if part == "..":
                 if not parts:
@@ -309,11 +363,11 @@ def resolve_target_module(
                 parts.pop()
             elif part not in {"", "."}:
                 parts.append(part)
-        target = _target_owner("/".join(parts), paths)
+        target = _target_owner("/".join(parts), index)
     else:
         literal = _module_stem(spec)
         target = _target_owner(
-            literal if "/" in literal else literal.replace(".", "/"), paths
+            literal if "/" in literal else literal.replace(".", "/"), index
         )
         if target is None:
             alias = (
@@ -323,15 +377,7 @@ def resolve_target_module(
             alias = _module_stem(alias)
             alias_path = alias if "/" in alias else alias.replace(".", "/")
             name, _, suffix = alias_path.partition("/")
-            roots = {
-                "/".join(parts[:2])
-                for module in paths
-                for identity in _module_identities(module)
-                if len(parts := identity.split("/")) >= 2
-                and parts[0] in module_doc_roots
-                and parts[1] == name
-            }
-            if len(roots) == 1:
-                prefix = next(iter(roots))
-                target = _target_owner(prefix + ("/" + suffix if suffix else ""), paths)
-    return target if target != source else None
+            prefix = index.unique_alias_roots.get(name)
+            if prefix is not None:
+                target = _target_owner(prefix + ("/" + suffix if suffix else ""), index)
+    return target if target is not None and target != index.owner(file_path) else None

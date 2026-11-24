@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from time import perf_counter
 
 from the_guard.config import GuardConfig, load_config
 from the_guard.cli import main
@@ -21,6 +22,8 @@ from the_guard.topology import (
 from the_guard.topology.configured import check_configured
 from the_guard.git_helpers import BaseFileReader, BaseFileEntry, _compute_changed_lines
 from the_guard.topology.imports import (
+    DETERMINISTIC_IMPORT_EXTENSIONS,
+    _module_stem,
     extract_imports,
     owner_module,
     resolve_target_module,
@@ -1067,6 +1070,61 @@ import '../orca-workspace/index.ts';
                 self.assertEqual(resolve_target_module("packages/core/a.ts", spec, paths), expected)
         self.assertEqual(resolve_target_module("packages/core/a.ts", "@org/host/entry", paths[:3]), "packages/host")
         self.assertEqual(resolve_target_module("packages/core/a.ts", "host.sub", paths[:3]), "packages/host")
+
+    def test_module_stem_preserves_posix_suffix_semantics(self):
+        paths = (
+            ".py", "a/.py", "a/..py", "a/...ts", "a/.hidden.py", "a/b.py",
+            "a/b.ts", "a/b.d.ts", "a/b", "a/b.py/.", "a/b.py/", "a/b.py.txt",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                suffix = PurePosixPath(path).suffix
+                expected = (
+                    path.removesuffix(suffix)
+                    if suffix in DETERMINISTIC_IMPORT_EXTENSIONS
+                    else path
+                )
+                self.assertEqual(_module_stem(path), expected)
+
+    def test_indexed_module_resolution_preserves_precedence(self):
+        paths = (
+            "src/client", "src/tool", "src/tool/__init__.py", "src/tool/nested",
+            "src/tool/nested/config.d.ts", "src/.py", "packages/tool", "///tool",
+            "src/choice.ts", "src/choice.py",
+        )
+        source = "src/client//./run.ts/."
+        cases = (
+            ("src/.py", ("src",), "src/.py"),
+            ("tool", ("src",), "src/tool/__init__.py"),
+            ("@scope/tool/nested/entry.ts", ("src",), "src/tool/nested"),
+            ("../tool//./nested/config.d.ts", (), "src/tool/nested/config.d.ts"),
+            ("./local.ts", ("src",), None),
+            ("../../../tool", ("src",), None),
+            ("tool", ("src", "packages"), None),
+            ("src/tool", ("src", "packages"), "src/tool/__init__.py"),
+            ("tool", ("packages",), "packages/tool"),
+            ("tool", ("src",), "src/tool/__init__.py"),
+            ("src.choice", ("src",), "src/choice.py"),
+        )
+        for spec, roots, expected in cases:
+            with self.subTest(spec=spec, roots=roots):
+                self.assertEqual(resolve_target_module(source, spec, paths, roots), expected)
+        self.assertEqual(
+            owner_module("src/tool/nested/config.d.ts", paths), "src/tool/nested/config.d.ts"
+        )
+        self.assertEqual(
+            resolve_target_module("//src/client/run.ts", "../../tool/file", paths), "///tool"
+        )
+
+    def test_repeated_module_resolution_is_fast(self):
+        source = "src/client/run.ts"
+        paths = ["src/client", "src/tool/nested", *(f"src/module{i}" for i in range(38))]
+        specs = [f"external{i}.entry" for i in range(19)] + ["../tool/nested/index.ts"]
+        start = perf_counter()
+        results = [resolve_target_module(source, spec, paths) for spec in specs * 1_000]
+        elapsed = perf_counter() - start
+        self.assertEqual(results, ([None] * 19 + ["src/tool/nested"]) * 1_000)
+        self.assertLess(elapsed, 1.0, f"20,000 import resolutions took {elapsed:.3f}s")
 
     def test_python_from_and_relative_imports_share_resolution(self):
         code = "from ..storage import rows\nfrom internal import storage\n"
