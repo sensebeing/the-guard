@@ -500,7 +500,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             with redirect_stderr(StringIO()) as stderr:
                 update = f"{original.head_sha} {original.head_sha} refs/heads/main {base}\n"
                 self.assertEqual(main_push_gate(linked, update), 2)
-            self.assertIn("missing review receipt", stderr.getvalue())
+            self.assertIn("blueprint-anchor drift", stderr.getvalue())
 
             fresh = run_architecture_review(linked, reviewer_fn=go)
             self.assertEqual(fresh.verdict, "GO")

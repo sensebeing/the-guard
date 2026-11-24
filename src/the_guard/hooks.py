@@ -10,7 +10,12 @@ from pathlib import Path
 from .config import load_config
 from .git_helpers import changed_files, git_ok, resolve_changed_file
 from .policy import PolicyError, load_policy
-from .review.repository import collect_review_scope, resolve_or_carry_forward_receipt
+from .review.repository import (
+    collect_review_scope,
+    diagnose_missing_receipt,
+    resolve_or_carry_forward_receipt,
+)
+from .review.session import compute_review_contract_digest
 from .topology import check_contract_drift, run_topology_guard
 
 
@@ -118,19 +123,22 @@ def main_push_gate(root: Path | str, input_text: str) -> int:
         scope = collect_review_scope(
             root, main_branch=remote_sha, head_ref=local_sha, config=snapshot_config
         )
-        if (
-            not scope.is_exempt
-            and resolve_or_carry_forward_receipt(
-                root,
-                scope,
-                persist=False,
-                config=snapshot_config,
-                policy=snapshot_policy,
-            )
-            is None
-        ):
+        if scope.is_exempt:
+            continue
+        current_contract_digest = compute_review_contract_digest(
+            snapshot_policy, snapshot_config, repo_root=root, revision=scope.head_sha, scope=scope,
+        )
+        receipt = resolve_or_carry_forward_receipt(
+            root,
+            scope,
+            persist=False,
+            config=snapshot_config,
+            policy=snapshot_policy,
+            contract_digest=current_contract_digest,
+        )
+        if receipt is None:
             print(
-                "NO-GO: missing review receipt for pushed range. Run guard review, address findings or submit --note evidence, then retry.",
+                diagnose_missing_receipt(root, scope, contract_digest=current_contract_digest),
                 file=sys.stderr,
             )
             return 2

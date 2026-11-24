@@ -8,11 +8,19 @@ import logging
 import os
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
+
+from ..auto_update import (
+    _installed_vcs_commit,
+    compute_package_tree_digest,
+    load_auto_update_status,
+)
 from ..config import GuardConfig
+from ..git_helpers import git_stdout
 from ..policy import Policy
 from .contract import BlockingFinding, ReviewScope
 from .documents import (
@@ -257,6 +265,42 @@ def load_valid_receipt(common_dir: Path, patch_digest: str) -> dict[str, Any] | 
     return None
 
 
+def active_guard_runtime() -> dict[str, str]:
+    """Collect best-effort provenance for the package running this review code."""
+    module_path = Path(__file__)
+    with suppress(OSError, RuntimeError):
+        module_path = module_path.resolve()
+    package_dir = module_path.parents[1]
+    tree_digest = ""
+    with suppress(OSError):
+        tree_digest = compute_package_tree_digest(package_dir)
+
+    sha = ""
+    with suppress(OSError):
+        sha = _installed_vcs_commit(package_dir) or ""
+    if not sha:
+        with suppress(OSError):
+            checkout = package_dir.parent.parent
+            if (checkout / ".git").exists():
+                sha = (git_stdout(checkout, [
+                    "git", "-c", "core.fsmonitor=false", "rev-parse", "--short", "HEAD",
+                ]) or "").strip()
+    if not sha and tree_digest:
+        with suppress(OSError, RuntimeError, ValueError):
+            status = load_auto_update_status() or {}
+            for origin in ("installed", "source"):
+                candidate = status.get(f"{origin}_sha")
+                if status.get(f"{origin}_tree_digest") == tree_digest and isinstance(candidate, str):
+                    sha = candidate.strip()
+                    if sha:
+                        break
+    return {
+        "guard_package_dir": str(package_dir),
+        "guard_tree_digest": tree_digest,
+        "guard_sha": sha,
+    }
+
+
 def receipt_payload(
     result: ReviewResult, *, contract_digest: str,
     task_blueprint_anchors: Mapping[str, tuple[str, ...]],
@@ -275,6 +319,7 @@ def receipt_payload(
         "contract_digest": contract_digest,
         "task_blueprint_anchors": dict(task_blueprint_anchors),
         "reviewed_at": datetime.now(UTC).isoformat(),
+        **active_guard_runtime(),
     }
 
 
