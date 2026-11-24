@@ -17,24 +17,31 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
 
 - `config` validates repository-owned settings and reads committed configuration through `git_helpers`.
   `policy` validates manifest and rule documents.
-- `finding` defines the static diagnostic contract. `git_helpers` owns Git subprocess repository isolation, safe repository and snapshot reads, and changed-line diffs. Its environment helper removes inherited repository selectors so each Git command uses its own working directory or arguments.
-  `policy` adapts reader failures into policy diagnostics; `review/documents` consumes the same reader.
+- `finding` defines the static diagnostic contract. `git_helpers` owns Git subprocess repository
+  isolation, batched tree and blob reads, safe snapshot reads, stable patch-ID streaming, and
+  changed-line diffs. Snapshot readers reuse their tree inventory across preload calls.
+  `policy` adapts reader failures into policy diagnostics, and `review/documents` uses the same reader.
 - `topology/imports` owns Python/JS/TS import extraction and longest-prefix module resolution;
   `paths` owns production exclusions; `discovery` reports inventory; `configured` enforces declared
   dependencies and layer ceilings at touched import lines and enforces delete-only module retirements.
   Its import-only API compares owner-edge permissions for constraint rechecks.
-  `runner` applies built-in language diagnostics for rule IDs installed in the target policy;
-  `audit` owns shared dependency evidence for full scans and baseline-aware contract drift,
-  scanning only affected modules and rechecking complete production imports (including changed files
-  and callers affected by target-layer or owner-resolution changes) when constraints tighten; `sync` owns the pure inventory merge shared by sync and init without
-  granting observed imports permission; both validate merged configuration before writing. `config` rejects invalid layer edges before these run.
+  `runner` applies installed language diagnostics, batches target snapshot reads and reads baseline
+  bodies for files present in the target. `audit` owns dependency evidence for full scans and
+  baseline-aware contract drift. It skips inert assets before reading import evidence and checks
+  changed sources and remaining dependency witnesses when ownership is stable. Import permission
+  checks reuse parsed imports when the parser input and resolution roots permit it. Audit rechecks production imports
+  when dependency, layer, or owner-resolution constraints tighten. `sync` owns the inventory merge
+  shared by sync and init without granting observed imports permission. Both validate merged
+  configuration before writing. `config` rejects invalid layer edges before these run.
 - `review/contract` owns the explicit review contract version, reviewer types, wire schema and
   output validation. `review/github` owns GitHub PR target parsing, attributable formatting,
   and publication. `repository` owns Git scope, patch identity, receipt carry-forward and
-  fsmonitor-isolated snapshot Git calls. `documents` owns review document inventory, binding
-  blueprint selection and snapshot reads. `session` owns local evidence persistence.
+  fsmonitor-isolated snapshot Git calls. `documents` owns review document inventory and binding
+  blueprint selection, batching regular-file reads and following safe snapshot symlinks.
+  `session` owns local evidence persistence.
   `provider` owns CLI discovery and configuration. `runner` owns process execution, stdin prompt
-  delivery and provider stream decoding. `prompt` owns snapshot-bound instructions.
+  delivery and provider stream decoding. `prompt` owns snapshot-bound instructions and groups
+  bulk deletions into directory inspection commands while listing active files and pinned anchors.
   `engine` composes review and continuation. These modules do not implement product policy semantics.
 - `init`, `distill`, `hooks` and CLI modules compose those APIs for user workflows. The managed
   `pre-push` hook resolves the push worktree before clearing repository selectors such as
@@ -105,8 +112,10 @@ distinct reviewed body. Inline previews include the bounded baseline body and a 
 from that baseline to each subsequent distinct reviewed revision. Any reviewed body that differs
 from HEAD also includes a bounded diff to HEAD or a deletion marker. Symlink-backed blueprints
 compare resolved bodies.
-The prompt indexes revisions outside the inline previews. Anchor histories
-survive provider restarts, verified rebases, and changes to discovery settings.
+The prompt indexes revisions outside the inline previews. For bulk deletions it groups omitted
+merge-base-only blueprints by directory with commands to recover their paths. The stored anchor
+history retains every applicable revision and survives provider restarts, verified rebases, and
+changes to discovery settings.
 `review.operational_ledgers` excludes explicit repository-relative paths from discovery and
 defaults to `["CHANGELOG.md"]`. A `GO` receipt records the review contract digest and the
 blueprint revisions it covered. Reuse requires coverage of the applicable retained revisions

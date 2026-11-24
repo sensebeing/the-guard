@@ -32,8 +32,18 @@ INERT_MODULE_FILE_EXTENSIONS = {
     ".ini",
     ".cfg",
     ".lock",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico", ".bmp", ".tiff",
+    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".mp3", ".wav", ".m4a", ".ogg", ".flac",
+    ".pdf", ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z", ".rar", ".dmg", ".ipa", ".apk",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".jar", ".war", ".pyc", ".pyo", ".so", ".dylib", ".a", ".o", ".class", ".exe", ".dll",
+    ".bin", ".wasm", ".sqlite", ".db",
 }
 _EVIDENCE_BATCH_SIZE = 128
+
+
+def _is_inert_module_file(path: str) -> bool:
+    return Path(path).suffix.lower() in INERT_MODULE_FILE_EXTENSIONS
 
 
 def _import_targets(
@@ -105,7 +115,7 @@ def _dependency_evidence(
     observed: dict[str, set[str]] = {m: set() for m in modules}
     source_extensions: dict[str, set[str]] = {m: set() for m in modules}
     for path in files:
-        if is_excluded_topology_path(path):
+        if is_excluded_topology_path(path) or _is_inert_module_file(path):
             continue
         source = owner_module(path, paths)
         if source is None:
@@ -117,7 +127,7 @@ def _dependency_evidence(
             _import_targets(path, read(path) or "", paths, config.module_doc_roots)
         )
     for path in coverage_files:
-        if is_excluded_topology_path(path):
+        if is_excluded_topology_path(path) or _is_inert_module_file(path):
             continue
         source = owner_module(path, paths)
         if source is not None:
@@ -129,11 +139,7 @@ def _dependency_evidence(
             for dep in set(m.get("dependencies", []))
             if dep not in observed[m["path"]]
             and source_extensions[m["path"]] & DETERMINISTIC_IMPORT_EXTENSIONS
-            and not (
-                source_extensions[m["path"]]
-                - DETERMINISTIC_IMPORT_EXTENSIONS
-                - INERT_MODULE_FILE_EXTENSIONS
-            )
+            and not (source_extensions[m["path"]] - DETERMINISTIC_IMPORT_EXTENSIONS)
         ),
         key=lambda item: (item["module"], item["unused_dependency"]),
     )
@@ -354,7 +360,7 @@ def _evidence_inventory(
         path for path in inventory
         if not is_excluded_topology_path(path)
         and owner_module(path, modules) == owner
-        and Path(path).suffix not in INERT_MODULE_FILE_EXTENSIONS
+        and not _is_inert_module_file(path)
     }
 
 
@@ -385,6 +391,8 @@ def _incremental_stale_dependencies(
         root, base, revision, set(declared), changed_files
     )
     for path in changed_paths:
+        if _is_inert_module_file(path):
+            continue
         owner = owner_module(path, module_paths)
         if owner in declared:
             changed_by_module.setdefault(owner, set()).add(path)
@@ -394,6 +402,8 @@ def _incremental_stale_dependencies(
         for module, dependencies in declared.items()
     }
     for path in different_inventory:
+        if _is_inert_module_file(path):
+            continue
         owner = owner_module(path, module_paths)
         if owner is None or not (owner in changed_by_module or added_dependencies.get(owner)):
             continue
@@ -502,7 +512,7 @@ def _full_stale_dependencies(
         path for path in sorted(inventory)
         if not is_excluded_topology_path(path)
         and owner_module(path, module_paths) in candidates
-        and Path(path).suffix not in INERT_MODULE_FILE_EXTENSIONS
+        and not _is_inert_module_file(path)
     ]
     if snapshot_reader is not None:
         snapshot_reader.preload(evidence_candidates)
@@ -516,7 +526,7 @@ def _full_stale_dependencies(
             path
             for path in sorted(_module_inventory(root, reader.base, candidates))
             if owner_module(path, baseline_owner_paths) in candidates
-            and Path(path).suffix not in INERT_MODULE_FILE_EXTENSIONS
+            and not _is_inert_module_file(path)
         ]
         reader.preload(baseline_candidates)
         baseline_files = [
@@ -686,7 +696,8 @@ def check_contract_drift(
             if available and modules else (changed_files, set())
         )
         changed_owned = {
-            path for path in changed_paths if owner_module(path, module_paths) is not None
+            path for path in changed_paths
+            if not _is_inert_module_file(path) and owner_module(path, module_paths) is not None
         }
         if available:
             reader.preload(changed_owned)
@@ -704,7 +715,7 @@ def check_contract_drift(
         import_candidates = [
             p
             for p in sorted(inventory)
-            if Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
+            if not _is_inert_module_file(p)
         ]
     else:
         import_candidates = [
@@ -712,7 +723,7 @@ def check_contract_drift(
             for p in sorted(inventory)
             if not is_excluded_topology_path(p)
             and owner_module(p, module_paths) in tightened
-            and Path(p).suffix not in INERT_MODULE_FILE_EXTENSIONS
+            and not _is_inert_module_file(p)
         ]
     baseline_has_retirements = any(m.get("retired", False) for m in old_modules.values())
     if snapshot_reader is not None:

@@ -25,6 +25,7 @@ from .repository import (
     _git,
     _is_unchanged_rebuttal_round,
     _literal_pathspecs,
+    _raw_diff_records,
     _require_submodule_checkout,
     collect_review_scope,
 )
@@ -40,6 +41,10 @@ from .documents import (
     resolved_contract_paths,
 )
 from .session import ReviewSessionState, _snapshot_document_bodies
+
+_BULK_SCOPE_THRESHOLD = 150
+_BULK_ANCHOR_THRESHOLD = 40
+_MAX_BATCH_COMMAND_CHARS = 8_000
 
 _ZERO_BASED_RECONCILIATION = """## Whole-Module & Blueprint Snapshot Inspection
 Inspect the whole module for each touched subsystem at the target Git snapshot. Use
@@ -131,13 +136,22 @@ def _parse_numstat_entries(
     *,
     config: GuardConfig | None = None,
 ) -> list[tuple[int, int, str, int]]:
+    selected = set(paths)
+    if len(selected) > _BULK_SCOPE_THRESHOLD:
+        # Limit Git's blob reads to directories that contain reviewable changes.
+        prefixes = {"/".join(path.split("/")[:3]) for path in selected}
+        pathspecs = _literal_pathspecs(tuple(sorted(prefixes)))
+        if sum(len(arg.encode("utf-8")) + 1 for arg in pathspecs) > 64_000:
+            pathspecs = ()
+    else:
+        pathspecs = _literal_pathspecs(paths)
     proc = _git(
         repo_root,
         "diff",
         "--numstat",
         "--no-renames",
         f"{base_sha}..{head_sha}",
-        *_literal_pathspecs(paths),
+        *pathspecs,
         check=False,
     )
     if proc.returncode:
@@ -156,6 +170,8 @@ def _parse_numstat_entries(
         parts = line.split("\t", 2)
         if len(parts) == 3:
             added, deleted, path = parts
+            if selected and path not in selected:
+                continue
             entries.append(
                 (
                     int(added) if added.isdigit() else 0,
@@ -164,7 +180,7 @@ def _parse_numstat_entries(
                     _classify_file_tier(path, config, contract_paths=contract_paths),
                 )
             )
-    if paths and {e[2] for e in entries} != set(paths):
+    if selected and {e[2] for e in entries} != selected:
         raise RuntimeError(
             "Scope manifest path mismatch; cannot produce a complete read plan"
         )
@@ -174,6 +190,7 @@ def _parse_numstat_entries(
 def _group_entries_into_batches(
     entries: list[tuple[int, int, str, int]],
     *,
+    command_prefix: str,
     max_files: int = 10,
     max_lines: int = 650,
     max_batches: int = 20,
@@ -184,20 +201,44 @@ def _group_entries_into_batches(
     batches = []
     current = []
     added = deleted = 0
+    command_length = len(command_prefix)
     for a, d, path, _ in entries:
-        if (
-            current
-            and len(batches) < max_batches - 1
-            and (len(current) >= max_files or added + deleted + a + d > max_lines)
-        ):
+        argument = shlex.quote(f":(literal){path}")
+        argument_length = 1 + len(argument)
+        if len(command_prefix) + argument_length > _MAX_BATCH_COMMAND_CHARS:
+            raise RuntimeError(f"Cannot generate a bounded diff command for {path}")
+        at_budget = command_length + argument_length > _MAX_BATCH_COMMAND_CHARS
+        at_target = len(batches) < max_batches - 1 and (
+            len(current) >= max_files or added + deleted + a + d > max_lines
+        )
+        if current and (at_budget or at_target):
             batches.append((current, added, deleted))
             current, added, deleted = [], 0, 0
+            command_length = len(command_prefix)
         current.append(path)
+        command_length += argument_length
         added += a
         deleted += d
     if current:
         batches.append((current, added, deleted))
     return batches
+
+
+def _deletion_directory(path: str) -> str:
+    return "/".join(PurePosixPath(path).parts[:-1][:2]) or "."
+
+
+def _deletion_command(
+    repo_root: Path, base_sha: str, head_sha: str, directory: str, option: str,
+) -> str:
+    pathspec = ":(top,glob)*" if directory == "." else f":(literal){directory}/"
+    command = shlex.join([
+        "git", "-C", str(repo_root), "diff", "--no-renames", "--diff-filter=D", option,
+        f"{base_sha}..{head_sha}", "--", pathspec,
+    ])
+    if len(command) > _MAX_BATCH_COMMAND_CHARS:
+        raise RuntimeError(f"Cannot generate a bounded deletion command for {directory}")
+    return command
 
 
 def _render_scope_manifest_section(
@@ -218,6 +259,20 @@ def _render_scope_manifest_section(
         f"\n## {title}: {len(entries)} changed files (production/contracts {len(production)}, tests/fixtures/locks {len(tests)})",
         "```text",
     ]
+    deleted_by_directory: dict[str, list[tuple[str, int]]] = {}
+    if len(entries) > _BULK_SCOPE_THRESHOLD:
+        raw = _git(
+            repo_root, "diff", "--raw", "--no-renames", "--no-abbrev", f"{base_sha}..{head_sha}",
+        ).stdout.decode("utf-8", errors="replace")
+        statuses = {path: fields[4] for fields, path in _raw_diff_records(raw)}
+        if any(path not in statuses for _, _, path, _ in entries):
+            raise RuntimeError("Scope manifest status mismatch; cannot produce a complete read plan")
+        for _, deleted, path, _ in entries:
+            if statuses[path] == "D":
+                deleted_by_directory.setdefault(_deletion_directory(path), []).append((path, deleted))
+        production = [entry for entry in production if statuses[entry[2]] != "D"]
+        tests = [entry for entry in tests if statuses[entry[2]] != "D"]
+
     lines.extend(f"+{a} -{d} {p} [tier={tier}]" for a, d, p, tier in production)
     if tests:
         lines.append("[Test/fixture/lock directory summary and files]")
@@ -229,23 +284,32 @@ def _render_scope_manifest_section(
         for bucket, (count, added, deleted) in sorted(buckets.items()):
             lines.append(f"{bucket}/: {count} files (+{added}/-{deleted})")
         lines.extend(f"+{a} -{d} {p} [tier={tier}]" for a, d, p, tier in tests)
-    lines.extend(["```", "### Session Batch Read Plan"])
-    for label, group in [("Batch", production), ("Test Batch", tests)]:
-        batches = _group_entries_into_batches(group)
-        for index, (paths, added, deleted) in enumerate(batches, 1):
-            command = shlex.join(
-                [
-                    "git",
-                    "-C",
-                    str(repo_root),
-                    "diff",
-                    f"{base_sha}..{head_sha}",
-                    *_literal_pathspecs(tuple(paths)),
-                ]
+    if deleted_by_directory:
+        lines.append("[Deleted files by directory]")
+        for directory, deleted_entries in sorted(deleted_by_directory.items()):
+            deleted_lines = sum(count for _, count in deleted_entries)
+            sample = ", ".join(path for path, _ in deleted_entries[:3])
+            lines.append(
+                f"{directory}/: {len(deleted_entries)} deleted files (-{deleted_lines} lines). Sample: {sample}"
             )
+    lines.extend(["```", "### Session Batch Read Plan"])
+    command_prefix = shlex.join(["git", "-C", str(repo_root), "diff", f"{base_sha}..{head_sha}", "--"])
+    for label, group in [("Batch", production), ("Test Batch", tests)]:
+        batches = _group_entries_into_batches(group, command_prefix=command_prefix)
+        for index, (batch_paths, added, deleted) in enumerate(batches, 1):
+            command = f"{command_prefix} {shlex.join(_literal_pathspecs(tuple(batch_paths))[1:])}"
             lines.append(
                 f"{label} {index}/{len(batches)} (+{added}/-{deleted}): `{command}`"
             )
+    if deleted_by_directory:
+        lines.append(
+            "Inspect each deleted directory's inventory and stats. Read the diff or merge-base "
+            "body of each deleted production or contract path to verify the removal."
+        )
+        for directory in sorted(deleted_by_directory):
+            inventory = _deletion_command(repo_root, base_sha, head_sha, directory, "--name-status")
+            stats = _deletion_command(repo_root, base_sha, head_sha, directory, "--stat")
+            lines.append(f"Deleted {directory}/: `{inventory}` and `{stats}`")
     return "\n".join(lines)
 
 
@@ -452,6 +516,50 @@ class _ReviewSnapshotContext:
     task_blueprint_anchors: dict[str, tuple[str, ...]]
 
 
+def _render_omitted_blueprints(
+    repo_root: Path,
+    scope: ReviewScope,
+    omitted: dict[str, tuple[str, ...]],
+    snapshots: Sequence[TaskBlueprintSnapshot],
+    pinned_paths: Mapping[str, tuple[str, ...]],
+) -> str:
+    heading = (
+        "## Additional previously reviewed task blueprints\n"
+        "Each path lists additional revisions in review order. A revision equal to the merge base "
+        "is immutable Anchor 0. Other revisions record previously reviewed branch blueprints. "
+        "Compare the recorded bodies with HEAD, inspect changes to commitments, references, and "
+        "linked evidence, and apply the Blocking policy below.\n"
+    )
+    if len(omitted) <= _BULK_ANCHOR_THRESHOLD:
+        return heading + json.dumps(omitted, indent=2)
+
+    bulk_deleted = {
+        snapshot.path for snapshot in snapshots
+        if snapshot.head_body is None and snapshot.in_merge_base
+        and snapshot.path not in pinned_paths and omitted.get(snapshot.path) == (scope.merge_base,)
+        and not snapshot.reviewed_revisions
+    }
+    individual = {path: revisions for path, revisions in omitted.items() if path not in bulk_deleted}
+    if not bulk_deleted:
+        return heading + json.dumps(individual, indent=2)
+
+    counts: dict[str, int] = {}
+    for path in bulk_deleted:
+        directory = _deletion_directory(path)
+        counts[directory] = counts.get(directory, 0) + 1
+    lines = [
+        heading + json.dumps(individual, indent=2),
+        "### Deleted merge-base task blueprints",
+        "Enumerate the deleted paths in each directory, apply the blueprint settings in HEAD's "
+        ".guard/config.json, "
+        f"and inspect their Anchor 0 bodies and references at {scope.merge_base}.",
+    ]
+    for directory, count in sorted(counts.items()):
+        command = _deletion_command(repo_root, scope.merge_base, scope.head_sha, directory, "--name-only")
+        lines.append(f"{directory}/: {count} deleted task blueprints. `{command}`")
+    return "\n".join(lines)
+
+
 def _snapshot_context(
     repo_root: Path,
     scope: ReviewScope,
@@ -551,7 +659,7 @@ def _snapshot_context(
                     sections.append(
                         f"## Boundary reference: {path}\n" + _bounded_document(body)
                     )
-    anchors = merge_task_blueprint_anchors(
+    pinned_anchors = merge_task_blueprint_anchors(
         normalize_task_blueprint_anchors(task_blueprint_anchors), scope.task_blueprint_anchors,
     )
     selection = resolve_task_design_blueprints(
@@ -562,7 +670,7 @@ def _snapshot_context(
         config=config,
         initial_reviewed_sha=initial_reviewed_sha,
         prior_reviewed_sha=prior_reviewed_sha,
-        retained_anchors=anchors,
+        retained_anchors=pinned_anchors,
         reviewer_note=reviewer_note,
         excluded_paths=loaded_docs,
     )
@@ -574,7 +682,7 @@ def _snapshot_context(
         if snapshot.head_body is not None and snapshot.head_body not in prior_bodies:
             revisions += (scope.head_sha,)
         reviewed_anchors[snapshot.path] = revisions
-    anchors = merge_task_blueprint_anchors(reviewed_anchors, anchors)
+    anchors = merge_task_blueprint_anchors(reviewed_anchors, pinned_anchors)
     for snapshot in selection.previews:
         sections.append(_render_task_blueprint(repo_root, scope.head_sha, snapshot))
     previewed_revisions = {
@@ -590,14 +698,9 @@ def _snapshot_context(
     }
     omitted = {path: revisions for path, revisions in omitted.items() if revisions}
     if omitted:
-        sections.append(
-            "## Additional previously reviewed task blueprints\n"
-            "Each path lists additional revisions in review order. A revision equal to the merge base "
-            "is immutable Anchor 0. Other revisions record previously reviewed branch blueprints. "
-            "Compare the recorded bodies with HEAD, inspect changes to commitments, references, and "
-            "linked evidence, and apply the Blocking policy below.\n"
-            + json.dumps(omitted, indent=2)
-        )
+        sections.append(_render_omitted_blueprints(
+            repo_root, scope, omitted, selection.anchor_snapshots, pinned_anchors,
+        ))
     # Missing declarations are not evidence of a contract at the reviewed snapshot.
     effective_topology = {
         **rendered_topology,

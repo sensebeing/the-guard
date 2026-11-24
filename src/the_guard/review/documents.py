@@ -11,8 +11,7 @@ from functools import cache
 from pathlib import Path, PurePosixPath
 
 from ..config import GuardConfig, repository_path
-from ..git_helpers import git_stdout
-from ..git_helpers import read_repository_file
+from ..git_helpers import BaseFileReader, git_stdout, read_repository_file, tree_entries_map
 from ..topology.imports import owner_module
 from .contract import CODE_EXTENSIONS, ReviewScope
 
@@ -188,17 +187,17 @@ def resolved_document_paths(root: Path, revision: str, paths: Iterable[str]) -> 
     return paths
 
 
-def _branch_touched_blueprints(
+def changed_document_paths(
     root: Path,
     configured_paths: Collection[str],
     previous: str,
     target: str,
     branch_changed_paths: Collection[str],
 ) -> set[str]:
-    """Keep configured blueprints only when the replayed branch changed them or their targets."""
+    """Keep documents whose paths or resolved targets were changed by the branch."""
     branch_changed = set(branch_changed_paths)
     selected: set[str] = set()
-    for revision in (previous, target):
+    for revision in dict.fromkeys((previous, target)):
         modes: dict[str, str] = {}
         existing_document_paths(
             root, configured_paths, revision, snapshot_modes=modes
@@ -222,6 +221,7 @@ def changed_task_blueprints(
     retained_paths: Collection[str],
     *,
     branch_changed_paths: Collection[str] | None = None,
+    _snapshot_readers: Mapping[str, _SnapshotDocuments] | None = None,
 ) -> set[str]:
     """Compare resolved bodies even when branch diffs omit upstream blueprint changes.
 
@@ -235,7 +235,7 @@ def changed_task_blueprints(
     paths = (
         configured_paths
         if branch_changed_paths is None
-        else _branch_touched_blueprints(
+        else changed_document_paths(
             root, configured_paths, previous, target, branch_changed_paths
         )
     )
@@ -243,24 +243,20 @@ def changed_task_blueprints(
     retained = set(retained_paths)
     before = _tree_entries(root, paths, previous)
     after = _tree_entries(root, paths, target)
-    before_modes = {path: mode for path, (mode, _) in before.items()}
-    after_modes = {path: mode for path, (mode, _) in after.items()}
-    changed: set[str] = set()
-    for path in paths:
-        previous_entry = before.get(path)
-        target_entry = after.get(path)
-        if (
-            path not in retained
-            and target_entry == previous_entry
-            and (target_entry is None or target_entry[0] != "120000")
-        ):
-            continue
-        if (
-            read_document(root, path, previous, snapshot_modes=before_modes)
-            != read_document(root, path, target, snapshot_modes=after_modes)
-        ):
-            changed.add(path)
-    return changed
+    compare_paths = [
+        path for path in paths
+        if path in retained or before.get(path) != after.get(path)
+        or before.get(path, (None,))[0] == "120000"
+    ]
+    readers = _snapshot_readers or {
+        revision: _SnapshotDocuments(root, revision) for revision in (previous, target)
+    }
+    before_reader, after_reader = readers[previous], readers[target]
+    for reader, entries in ((before_reader, before), (after_reader, after)):
+        reader.inventoried_paths.update(paths)
+        reader.modes.update({path: mode for path, (mode, _) in entries.items()})
+        reader.preload(compare_paths)
+    return {path for path in compare_paths if before_reader.read(path) != after_reader.read(path)}
 
 
 @dataclass(frozen=True)
@@ -397,10 +393,15 @@ def resolve_task_design_blueprints(
         if changed is None:
             raise ValueError(f"Cannot inspect task blueprint changes at {base_sha}...{revision}")
         historical_changes.extend(changed.split("\0"))
+    readers = {
+        revision: _SnapshotDocuments(repo_root, revision)
+        for revision in dict.fromkeys((base_sha, *reviewed_commits, head_sha))
+    }
+    modes_by_revision = {revision: reader.modes for revision, reader in readers.items()}
     head_changes = dict.fromkeys(changed_files)
     if blueprint_globs:
         head_changes.update(dict.fromkeys(sorted(changed_task_blueprints(
-            repo_root, config, base_sha, head_sha, (),
+            repo_root, config, base_sha, head_sha, (), _snapshot_readers=readers,
         ))))
     markdown_changes = dict.fromkeys(
         path for path in (*head_changes, *historical_changes)
@@ -409,17 +410,16 @@ def resolve_task_design_blueprints(
     changed_candidates = dict.fromkeys(path for path in markdown_changes if matches_blueprint(path))
     changed_candidates.update(dict.fromkeys(anchors))
 
-    modes_by_revision: dict[str, dict[str, str]] = {
-        revision: {} for revision in dict.fromkeys((base_sha, *reviewed_commits, head_sha))
-    }
-
     def inventory(paths: Collection[str]) -> None:
-        for revision, modes in modes_by_revision.items():
-            existing_document_paths(repo_root, paths, revision, snapshot_modes=modes)
+        for revision, reader in readers.items():
+            pending = set(paths).difference(reader.inventoried_paths)
+            existing_document_paths(repo_root, pending, revision, snapshot_modes=reader.modes)
+            reader.inventoried_paths.update(pending)
+            reader.preload(paths)
 
     @cache
     def read_body(path: str, revision: str) -> str | None:
-        return read_document(repo_root, path, revision, snapshot_modes=modes_by_revision[revision])
+        return readers[revision].read(path)
 
     def resolve_candidates(paths: Iterable[str]) -> list[TaskBlueprintSnapshot]:
         snapshots = []
@@ -523,54 +523,36 @@ def resolve_task_design_blueprints(
     )
 
 
-def _parse_tree_entries(
-    output: str, *, restrict: set[str] | None = None
-) -> dict[str, tuple[str, str]]:
-    entries: dict[str, tuple[str, str]] = {}
-    for entry in output.split("\0"):
-        metadata, separator, path = entry.partition("\t")
-        if not separator or metadata.startswith("040000 "):
-            continue
-        if restrict is not None and path not in restrict:
-            continue
-        fields = metadata.split()
-        entries[path] = (fields[0], fields[2] if len(fields) > 2 else "")
-    return entries
+class _SnapshotDocuments:
+    """Batch regular file bodies while retaining safe symlink resolution."""
+
+    def __init__(self, root: Path, revision: str):
+        self.modes: dict[str, str] = {}
+        self.inventoried_paths: set[str] = set()
+        self.reader = BaseFileReader(root, revision, exact=True, strict_text=True)
+
+    def preload(self, paths: Iterable[str]) -> None:
+        self.reader.preload(path for path in paths if self.modes.get(path) in {"100644", "100755"})
+
+    def read(self, path: str) -> str | None:
+        if self.modes.get(path) in {"100644", "100755"}:
+            body = self.reader.read(path)
+            if body is None:
+                raise ValueError(f"Cannot read {path} at revision {self.reader.base}")
+            return body
+        return read_document(
+            self.reader.root, path, self.reader.base, snapshot_modes=self.modes,
+        )
 
 
 def _tree_entries(
     root: Path, paths: Iterable[str], revision: str | None
 ) -> dict[str, tuple[str, str]]:
     """Map candidate paths to their snapshot mode and blob object id in one tree query."""
-    candidates = sorted(set(paths))
-    if revision is None:
-        entries: dict[str, tuple[str, str]] = {}
-        for path in candidates:
-            candidate = repository_path(root, path)
-            if candidate.is_file():
-                entries[path] = ("120000" if candidate.is_symlink() else "100644", "")
-        return entries
-    if not candidates:
-        return {}
-    if len(candidates) > 128:
-        output = git_stdout(root, ["git", "ls-tree", "-r", "-z", revision])
-        if output is None:
-            raise ValueError(f"Cannot inspect architecture documents at {revision}")
-        return _parse_tree_entries(output, restrict=set(candidates))
-    output = git_stdout(
-        root,
-        [
-            "git",
-            "ls-tree",
-            "-z",
-            revision,
-            "--",
-            *[f":(literal){path}" for path in candidates],
-        ],
-    )
-    if output is None:
-        raise ValueError(f"Cannot inspect architecture documents at {revision}")
-    return _parse_tree_entries(output)
+    return {
+        path: entry for path, entry in tree_entries_map(root, paths, revision).items()
+        if entry[0] != "040000"
+    }
 
 
 def existing_document_paths(

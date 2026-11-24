@@ -56,18 +56,25 @@ def run_topology_guard(
         if revision is not None
         else None
     )
-    findings = []
+    resolved_paths: dict[str, Path] = {}
     for raw in dict.fromkeys(changed_files):
+        relative = Path(raw)
         resolved = (
-            (raw, root / raw)
+            (relative.as_posix(), root / relative)
             if snapshot_reader
-            and not Path(raw).is_absolute()
-            and ".." not in Path(raw).parts
+            and not relative.is_absolute()
+            and ".." not in relative.parts
             else resolve_changed_file(root, raw)
         )
         if resolved is None:
             raise ValueError(f"Changed path escapes repository: {raw}")
         path, absolute = resolved
+        resolved_paths[path] = absolute
+
+    if snapshot_reader is not None:
+        snapshot_reader.preload(resolved_paths)
+    present: dict[str, str] = {}
+    for path, absolute in resolved_paths.items():
         if snapshot_reader is not None:
             text = snapshot_reader.read(path)
             if text is None:
@@ -78,6 +85,12 @@ def run_topology_guard(
             text = str((root / path).readlink())
         else:
             continue
+        present[path] = text
+    if base_available:
+        reader.preload(present)
+
+    findings = []
+    for path, text in present.items():
         baseline = reader.read(path) if base_available else None
         changed = (
             compute_changed_lines(baseline, text) if baseline is not None else None
