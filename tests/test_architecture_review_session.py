@@ -1326,12 +1326,18 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             "retarget_onto_changed_boundary",
             "converging_architecture_blueprints",
             "retarget_onto_branch_edited_target",
+            "retarget_both_onto_branch_edited_file",
         ):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as td:
                 repo, env, _ = self._start_module_review(Path(td))
                 _git(repo, "switch", "main")
-                (repo / "ARCHITECTURE.md").write_text("independent root architecture\n")
-                _git(repo, "add", "ARCHITECTURE.md")
+                if scenario == "retarget_both_onto_branch_edited_file":
+                    (repo / "ARCHITECTURE.md").symlink_to("docs/a-owner.md")
+                    (repo / "docs/other-target.md").write_text("prior other body B\n")
+                    _git(repo, "add", "ARCHITECTURE.md", "docs/other-target.md")
+                else:
+                    (repo / "ARCHITECTURE.md").write_text("independent root architecture\n")
+                    _git(repo, "add", "ARCHITECTURE.md")
                 if scenario == "converging_architecture_blueprints":
                     (repo / "docs/architecture.md").write_text("secondary architecture\n")
                     _git(repo, "add", "docs/architecture.md")
@@ -1355,6 +1361,13 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     (repo / "ARCHITECTURE.md").symlink_to("docs/architecture.md")
                     _git(repo, "add", "docs/architecture.md", "ARCHITECTURE.md")
                     _git(repo, "commit", "-m", "converge two architecture blueprints onto one target")
+                elif scenario == "retarget_both_onto_branch_edited_file":
+                    (repo / "ARCHITECTURE.md").unlink()
+                    (repo / "ARCHITECTURE.md").symlink_to("docs/other-target.md")
+                    (repo / "services/a/CLAUDE.md").unlink()
+                    (repo / "services/a/CLAUDE.md").symlink_to("../../docs/other-target.md")
+                    _git(repo, "add", "ARCHITECTURE.md", "services/a/CLAUDE.md")
+                    _git(repo, "commit", "-m", "retarget both architecture and boundary onto other target")
                 else:
                     (repo / "ARCHITECTURE.md").unlink()
                     (repo / "ARCHITECTURE.md").symlink_to("docs/a-owner.md")
@@ -1366,6 +1379,9 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 if scenario == "retarget_onto_branch_edited_target":
                     (repo / "docs/a-owner.md").write_text("branch edited boundary target\n")
                     _git(repo, "commit", "-am", "edit retargeted boundary target on branch")
+                elif scenario == "retarget_both_onto_branch_edited_file":
+                    (repo / "docs/other-target.md").write_text("branch edited body C\n")
+                    _git(repo, "commit", "-am", "edit retargeted file B to C on branch")
                 self.assertIsNone(resolve_or_carry_forward_receipt(repo, collect_review_scope(repo)))
 
                 second = run_architecture_review(repo, env=env)
@@ -1383,6 +1399,8 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     self.assertIn("-independent root architecture\n+converged architecture", prompt)
                     self.assertIn("### Architecture blueprint diff outside the verified branch delta: `docs/architecture.md`", prompt)
                     self.assertIn("-secondary architecture\n+converged architecture", prompt)
+                elif scenario == "retarget_both_onto_branch_edited_file":
+                    self.assertIn("-a original boundary\n+branch edited body C", prompt)
                 else:
                     self.assertIn("### Architecture blueprint diff outside the verified branch delta: `ARCHITECTURE.md`", prompt)
                     self.assertIn("-independent root architecture\n+branch edited boundary target", prompt)

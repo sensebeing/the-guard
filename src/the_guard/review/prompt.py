@@ -1139,8 +1139,8 @@ def _render_module_context_delta(
         }
         current_blueprints = architecture_blueprint_paths(current_config)
         blueprint_paths = architecture_blueprint_paths(prior_config) | current_blueprints
-        blueprint_sources = {context.documents[p].source_path for p in current_blueprints if p in context.documents}
-        prior_bodies = _snapshot_document_bodies(repo_root, prior_paths | blueprint_paths | blueprint_sources, prior_head)
+        doc_sources = {context.documents[p].source_path for p in (*current_docs, *current_blueprints) if p in context.documents}
+        prior_bodies = _snapshot_document_bodies(repo_root, prior_paths | blueprint_paths | doc_sources, prior_head)
         current_bodies = _snapshot_document_bodies(repo_root, (prior_paths | blueprint_paths) - context.documents.keys(), head)
     except (OSError, RuntimeError, ValueError, CalledProcessError) as exc:
         raise _PriorModuleContextUnavailable(str(exc)) from exc
@@ -1255,18 +1255,19 @@ def _render_module_context_delta(
             message += f" Read its resolved snapshot with `git show {shlex.quote(f'{head}:{source}')}`."
         return f"Changed {kind} `{path}`. {message}"
 
+    def in_verified_scope(path: str, source: str, prior_body: str | None) -> bool:
+        return (path == source and path in reviewed_paths) or (source in reviewed_paths and prior_bodies.get(source) == prior_body)
+
     for path in changed_docs:
         doc = current_docs.get(path)
         source = doc.source_path if doc else path
         prior_body, current_body = prior_bodies.get(path), current_bodies.get(path)
         rendered_transitions.add((source, prior_body, current_body))
-        if path in reviewed_paths or source in reviewed_paths:
+        if in_verified_scope(path, source, prior_body):
             budget.append(scope_pointer("boundary document", path, source))
         else:
             diff = _resolved_document_diff(path, prior_head, prior_body, head, current_body)
-            budget.append(
-                f"### Boundary diff outside the verified branch delta: `{path}`\n{_bounded_document_diff(diff)}"
-            )
+            budget.append(f"### Boundary diff outside the verified branch delta: `{path}`\n{_bounded_document_diff(diff)}")
     if changed_blueprints:
         for path in changed_blueprints:
             doc = context.documents.get(path)
@@ -1283,13 +1284,11 @@ def _render_module_context_delta(
                     budget.document(f"## Architecture blueprint: {path}", source, current_body, head, MAX_SECONDARY_DOC_BYTES)
             elif prior_body is not None and current_body is None:
                 budget.append(f"Removed architecture blueprint `{path}` (no longer present at HEAD).")
-            elif path in reviewed_paths or (source in reviewed_paths and prior_bodies.get(source) == prior_body):
+            elif in_verified_scope(path, source, prior_body):
                 budget.append(scope_pointer("architecture blueprint", path, source))
             else:
                 diff = _resolved_document_diff(path, prior_head, prior_body, head, current_body)
-                budget.append(
-                    f"### Architecture blueprint diff outside the verified branch delta: `{path}`\n{_bounded_document_diff(diff)}"
-                )
+                budget.append(f"### Architecture blueprint diff outside the verified branch delta: `{path}`\n{_bounded_document_diff(diff)}")
         if budget.omitted != omitted_before:
             raise _PriorModuleContextUnavailable("Architecture blueprint changes exceed the document budget")
     if role_changes:
