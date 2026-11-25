@@ -1137,13 +1137,11 @@ def _render_module_context_delta(
             path for module in common_modules
             for path in boundary_document_paths(prior_modules.get(module, {"path": module}))
         }
-        prior_blueprints = architecture_blueprint_paths(prior_config)
         current_blueprints = architecture_blueprint_paths(current_config)
-        blueprint_paths = prior_blueprints | current_blueprints
-        prior_bodies = _snapshot_document_bodies(repo_root, prior_paths | blueprint_paths, prior_head)
-        current_bodies = _snapshot_document_bodies(
-            repo_root, (prior_paths | blueprint_paths) - context.documents.keys(), head
-        )
+        blueprint_paths = architecture_blueprint_paths(prior_config) | current_blueprints
+        blueprint_sources = {context.documents[p].source_path for p in current_blueprints if p in context.documents}
+        prior_bodies = _snapshot_document_bodies(repo_root, prior_paths | blueprint_paths | blueprint_sources, prior_head)
+        current_bodies = _snapshot_document_bodies(repo_root, (prior_paths | blueprint_paths) - context.documents.keys(), head)
     except (OSError, RuntimeError, ValueError, CalledProcessError) as exc:
         raise _PriorModuleContextUnavailable(str(exc)) from exc
 
@@ -1176,8 +1174,7 @@ def _render_module_context_delta(
         (
             module,
             "upstream/downstream" if relation == "upstream" and module in current_downstream else relation,
-            prior_modules.get(module, {}).get("role") or "",
-            declarations.get(module, {}).get("role") or "",
+            prior_role, current_role,
         )
         for relation, modules in (
             ("touched", sorted(common_modules)),
@@ -1185,7 +1182,8 @@ def _render_module_context_delta(
             ("downstream", sorted(current_downstream - current_upstream)),
         )
         for module in modules
-        if (prior_modules.get(module, {}).get("role") or "") != (declarations.get(module, {}).get("role") or "")
+        if (prior_role := prior_modules.get(module, {}).get("role") or "")
+        != (current_role := declarations.get(module, {}).get("role") or "")
     ]
 
     def declared_bindings(modules: Mapping[str, dict], touched: set[str]) -> set[tuple[str, str]]:
@@ -1242,13 +1240,14 @@ def _render_module_context_delta(
             + "\n```json\n" + json.dumps(new_topology, indent=2) + "\n```"
         )
     loaded_sources = set()
+    rendered_transitions: set[tuple[str, str | None, str | None]] = set()
     for doc in current_docs.values():
         if doc.path in new_docs and doc.source_path not in loaded_sources:
             doc.render(budget, head)
             loaded_sources.add(doc.source_path)
+            rendered_transitions.add((doc.source_path, None, doc.body))
 
     reviewed_paths = set(inc_scope.reviewable_files) if inc_scope is not None else set()
-    rendered_sources = set(loaded_sources)
 
     def scope_pointer(kind: str, path: str, source: str) -> str:
         message = "See the verified incremental scope."
@@ -1259,13 +1258,12 @@ def _render_module_context_delta(
     for path in changed_docs:
         doc = current_docs.get(path)
         source = doc.source_path if doc else path
-        rendered_sources.add(source)
+        prior_body, current_body = prior_bodies.get(path), current_bodies.get(path)
+        rendered_transitions.add((source, prior_body, current_body))
         if path in reviewed_paths or source in reviewed_paths:
             budget.append(scope_pointer("boundary document", path, source))
         else:
-            diff = _resolved_document_diff(
-                path, prior_head, prior_bodies.get(path), head, current_bodies.get(path),
-            )
+            diff = _resolved_document_diff(path, prior_head, prior_body, head, current_body)
             budget.append(
                 f"### Boundary diff outside the verified branch delta: `{path}`\n{_bounded_document_diff(diff)}"
             )
@@ -1273,10 +1271,11 @@ def _render_module_context_delta(
         for path in changed_blueprints:
             doc = context.documents.get(path)
             source = doc.source_path if doc else path
-            if source in rendered_sources:
-                continue
-            rendered_sources.add(source)
             prior_body, current_body = prior_bodies.get(path), current_bodies.get(path)
+            transition = (source, prior_body, current_body)
+            if transition in rendered_transitions:
+                continue
+            rendered_transitions.add(transition)
             if prior_body is None and current_body is not None:
                 if doc is not None:
                     doc.render(budget, head)
@@ -1284,7 +1283,7 @@ def _render_module_context_delta(
                     budget.document(f"## Architecture blueprint: {path}", source, current_body, head, MAX_SECONDARY_DOC_BYTES)
             elif prior_body is not None and current_body is None:
                 budget.append(f"Removed architecture blueprint `{path}` (no longer present at HEAD).")
-            elif path in reviewed_paths or source in reviewed_paths:
+            elif path in reviewed_paths or (source in reviewed_paths and prior_bodies.get(source) == prior_body):
                 budget.append(scope_pointer("architecture blueprint", path, source))
             else:
                 diff = _resolved_document_diff(path, prior_head, prior_body, head, current_body)

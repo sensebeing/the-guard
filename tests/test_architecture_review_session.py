@@ -1321,6 +1321,76 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 assert receipt is not None
                 self.assertNotEqual(receipt["contract_digest"], old_digest)
 
+    def test_architecture_blueprint_distinct_transitions_never_deduplicated_away(self) -> None:
+        for scenario in (
+            "retarget_onto_changed_boundary",
+            "converging_architecture_blueprints",
+            "retarget_onto_branch_edited_target",
+        ):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as td:
+                repo, env, _ = self._start_module_review(Path(td))
+                _git(repo, "switch", "main")
+                (repo / "ARCHITECTURE.md").write_text("independent root architecture\n")
+                _git(repo, "add", "ARCHITECTURE.md")
+                if scenario == "converging_architecture_blueprints":
+                    (repo / "docs/architecture.md").write_text("secondary architecture\n")
+                    _git(repo, "add", "docs/architecture.md")
+                _git(repo, "commit", "-m", "add distinct baseline architecture blueprints")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                first = run_architecture_review(repo, env=env, force=True)
+                old_digest = load_valid_receipt(repo, first.patch_digest)["contract_digest"]
+
+                _git(repo, "switch", "main")
+                if scenario == "retarget_onto_changed_boundary":
+                    (repo / "docs/a-owner.md").write_text("revised module boundary\n")
+                    (repo / "ARCHITECTURE.md").unlink()
+                    (repo / "ARCHITECTURE.md").symlink_to("docs/a-owner.md")
+                    _git(repo, "add", "docs/a-owner.md", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "retarget architecture blueprint onto changed boundary")
+                elif scenario == "converging_architecture_blueprints":
+                    (repo / "docs/architecture.md").write_text("converged architecture\n")
+                    (repo / "ARCHITECTURE.md").unlink()
+                    (repo / "ARCHITECTURE.md").symlink_to("docs/architecture.md")
+                    _git(repo, "add", "docs/architecture.md", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "converge two architecture blueprints onto one target")
+                else:
+                    (repo / "ARCHITECTURE.md").unlink()
+                    (repo / "ARCHITECTURE.md").symlink_to("docs/a-owner.md")
+                    _git(repo, "add", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "retarget architecture blueprint onto boundary target")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                if scenario == "retarget_onto_branch_edited_target":
+                    (repo / "docs/a-owner.md").write_text("branch edited boundary target\n")
+                    _git(repo, "commit", "-am", "edit retargeted boundary target on branch")
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, collect_review_scope(repo)))
+
+                second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                self.assertEqual((second.mode, meta["full_review_reason"]), ("incremental", ""))
+                self.assertEqual(second.session_id, first.session_id)
+                prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                if scenario == "retarget_onto_changed_boundary":
+                    self.assertIn("### Boundary diff outside the verified branch delta: `services/a/CLAUDE.md`", prompt)
+                    self.assertIn("-a original boundary\n+revised module boundary", prompt)
+                    self.assertIn("### Architecture blueprint diff outside the verified branch delta: `ARCHITECTURE.md`", prompt)
+                    self.assertIn("-independent root architecture\n+revised module boundary", prompt)
+                elif scenario == "converging_architecture_blueprints":
+                    self.assertIn("### Architecture blueprint diff outside the verified branch delta: `ARCHITECTURE.md`", prompt)
+                    self.assertIn("-independent root architecture\n+converged architecture", prompt)
+                    self.assertIn("### Architecture blueprint diff outside the verified branch delta: `docs/architecture.md`", prompt)
+                    self.assertIn("-secondary architecture\n+converged architecture", prompt)
+                else:
+                    self.assertIn("### Architecture blueprint diff outside the verified branch delta: `ARCHITECTURE.md`", prompt)
+                    self.assertIn("-independent root architecture\n+branch edited boundary target", prompt)
+                receipt = load_valid_receipt(repo, second.patch_digest)
+                self.assertIsNotNone(receipt)
+                assert receipt is not None
+                self.assertNotEqual(receipt["contract_digest"], old_digest)
+
     def test_architecture_blueprint_and_role_delta_overflow_fail_closed_to_full(self) -> None:
         for kind in ("architecture_blueprint", "module_role"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as td:
