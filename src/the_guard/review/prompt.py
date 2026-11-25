@@ -36,12 +36,14 @@ from .documents import (
     MAX_TASK_DESIGN_DOCS,
     TaskBlueprintSnapshot,
     TaskBlueprintSelection,
+    architecture_blueprint_paths,
     architecture_document_paths,
     boundary_document_paths,
     existing_document_paths,
     merge_task_blueprint_anchors,
     normalize_task_blueprint_anchors,
     read_document,
+    resolve_module_neighbours,
     resolve_scope_modules,
     resolve_task_design_blueprints,
     resolved_contract_paths,
@@ -1049,11 +1051,12 @@ def _incremental_context_delta(
     session: ReviewSessionState,
     inc_scope: IncrementalReviewScope | None,
     *,
+    config: GuardConfig,
     receipt_contract_changed: bool,
 ) -> list[str]:
     budget = _DocumentBudget()
     if receipt_contract_changed:
-        _render_module_context_delta(context, session, inc_scope, budget)
+        _render_module_context_delta(context, session, inc_scope, budget, config)
 
     prior_head = session.last_head_sha
     head = context.scope.head_sha
@@ -1117,6 +1120,7 @@ def _render_module_context_delta(
     session: ReviewSessionState,
     inc_scope: IncrementalReviewScope | None,
     budget: _DocumentBudget,
+    current_config: GuardConfig,
 ) -> None:
     repo_root = context.repo_root
     prior_head = session.last_head_sha
@@ -1133,8 +1137,13 @@ def _render_module_context_delta(
             path for module in common_modules
             for path in boundary_document_paths(prior_modules.get(module, {"path": module}))
         }
-        prior_bodies = _snapshot_document_bodies(repo_root, prior_paths, prior_head)
-        current_bodies = _snapshot_document_bodies(repo_root, prior_paths - current_docs.keys(), head)
+        prior_blueprints = architecture_blueprint_paths(prior_config)
+        current_blueprints = architecture_blueprint_paths(current_config)
+        blueprint_paths = prior_blueprints | current_blueprints
+        prior_bodies = _snapshot_document_bodies(repo_root, prior_paths | blueprint_paths, prior_head)
+        current_bodies = _snapshot_document_bodies(
+            repo_root, (prior_paths | blueprint_paths) - context.documents.keys(), head
+        )
     except (OSError, RuntimeError, ValueError, CalledProcessError) as exc:
         raise _PriorModuleContextUnavailable(str(exc)) from exc
 
@@ -1148,13 +1157,36 @@ def _render_module_context_delta(
         path for path, doc in current_docs.items()
         if doc.source_path not in known_sources
     }
-    current_bodies.update({path: doc.body for path, doc in current_docs.items()})
+    current_bodies.update({
+        path: doc.body for path, doc in context.documents.items()
+        if path in current_docs or path in current_blueprints
+    })
     changed_docs = sorted(
         path for path in prior_paths
         if prior_bodies.get(path) != current_bodies.get(path)
         and path not in new_docs and path not in prior_architecture
     )
+    changed_blueprints = sorted(
+        path for path in blueprint_paths
+        if prior_bodies.get(path) != current_bodies.get(path)
+    )
     declarations = {module["path"]: module for module in context.topology.get("modules", ())}
+    current_upstream, current_downstream = resolve_module_neighbours(context.touched, declarations)
+    role_changes = [
+        (
+            module,
+            "upstream/downstream" if relation == "upstream" and module in current_downstream else relation,
+            prior_modules.get(module, {}).get("role") or "",
+            declarations.get(module, {}).get("role") or "",
+        )
+        for relation, modules in (
+            ("touched", sorted(common_modules)),
+            ("upstream", sorted(current_upstream)),
+            ("downstream", sorted(current_downstream - current_upstream)),
+        )
+        for module in modules
+        if (prior_modules.get(module, {}).get("role") or "") != (declarations.get(module, {}).get("role") or "")
+    ]
 
     def declared_bindings(modules: Mapping[str, dict], touched: set[str]) -> set[tuple[str, str]]:
         return {
@@ -1174,7 +1206,10 @@ def _render_module_context_delta(
             {path for _, path in current_bindings}, current_docs, prior_architecture, changed_docs,
         )
     )
-    if not (new_modules or new_docs or changed_docs or removed_bindings or added_bindings):
+    if not (
+        new_modules or new_docs or changed_docs or removed_bindings or added_bindings
+        or changed_blueprints or role_changes
+    ):
         return
 
     omitted_before = budget.omitted
@@ -1213,14 +1248,20 @@ def _render_module_context_delta(
             loaded_sources.add(doc.source_path)
 
     reviewed_paths = set(inc_scope.reviewable_files) if inc_scope is not None else set()
+    rendered_sources = set(loaded_sources)
+
+    def scope_pointer(kind: str, path: str, source: str) -> str:
+        message = "See the verified incremental scope."
+        if source != path:
+            message += f" Read its resolved snapshot with `git show {shlex.quote(f'{head}:{source}')}`."
+        return f"Changed {kind} `{path}`. {message}"
+
     for path in changed_docs:
         doc = current_docs.get(path)
         source = doc.source_path if doc else path
+        rendered_sources.add(source)
         if path in reviewed_paths or source in reviewed_paths:
-            message = "See the verified incremental scope."
-            if source != path:
-                message += f" Read its resolved snapshot with `git show {shlex.quote(f'{head}:{source}')}`."
-            budget.append(f"Changed boundary document `{path}`. {message}")
+            budget.append(scope_pointer("boundary document", path, source))
         else:
             diff = _resolved_document_diff(
                 path, prior_head, prior_bodies.get(path), head, current_bodies.get(path),
@@ -1228,6 +1269,40 @@ def _render_module_context_delta(
             budget.append(
                 f"### Boundary diff outside the verified branch delta: `{path}`\n{_bounded_document_diff(diff)}"
             )
+    if changed_blueprints:
+        for path in changed_blueprints:
+            doc = context.documents.get(path)
+            source = doc.source_path if doc else path
+            if source in rendered_sources:
+                continue
+            rendered_sources.add(source)
+            prior_body, current_body = prior_bodies.get(path), current_bodies.get(path)
+            if prior_body is None and current_body is not None:
+                if doc is not None:
+                    doc.render(budget, head)
+                else:
+                    budget.document(f"## Architecture blueprint: {path}", source, current_body, head, MAX_SECONDARY_DOC_BYTES)
+            elif prior_body is not None and current_body is None:
+                budget.append(f"Removed architecture blueprint `{path}` (no longer present at HEAD).")
+            elif path in reviewed_paths or source in reviewed_paths:
+                budget.append(scope_pointer("architecture blueprint", path, source))
+            else:
+                diff = _resolved_document_diff(path, prior_head, prior_body, head, current_body)
+                budget.append(
+                    f"### Architecture blueprint diff outside the verified branch delta: `{path}`\n{_bounded_document_diff(diff)}"
+                )
+        if budget.omitted != omitted_before:
+            raise _PriorModuleContextUnavailable("Architecture blueprint changes exceed the document budget")
+    if role_changes:
+        budget.append("\n".join([
+            "Declared module role changes",
+            *(
+                f"- `{module}` ({relation}): {json.dumps(prior_role, ensure_ascii=False)} -> {json.dumps(current_role, ensure_ascii=False)}"
+                for module, relation, prior_role, current_role in role_changes
+            ),
+        ]))
+        if budget.omitted != omitted_before:
+            raise _PriorModuleContextUnavailable("Module role changes exceed the document budget")
 
 
 def build_incremental_review_prompt(
@@ -1297,6 +1372,7 @@ def build_incremental_review_prompt(
         )
         context_delta = _incremental_context_delta(
             snapshot_context, session, inc_scope,
+            config=config,
             receipt_contract_changed=receipt_contract_changed,
         )
         if boundary_refresh and not context_delta:

@@ -1116,18 +1116,20 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
 
     def test_rebase_only_invalidates_for_related_module_declarations(self) -> None:
         for module, mode, reason in (
-            ("services/a", "full", "contract_changed"),
+            ("services/a", "incremental", ""),
             ("touched layer", "full", "contract_changed"),
             ("touched dependencies", "full", "contract_changed"),
-            ("services/b", "full", "contract_changed"),
+            ("services/b", "incremental", ""),
+            ("downstream role", "incremental", ""),
             ("services/c", "incremental", ""),
             ("services/new", "full", "contract_changed"),
             ("remove downstream", "full", "contract_changed"),
         ):
             with self.subTest(module=module), tempfile.TemporaryDirectory() as td:
-                repo, env, _ = self._start_module_review(
-                    Path(td), with_downstream=module == "remove downstream"
+                repo, env, first = self._start_module_review(
+                    Path(td), with_downstream=module in {"remove downstream", "downstream role"}
                 )
+                old_digest = load_valid_receipt(repo, first.patch_digest)["contract_digest"]
                 _git(repo, "switch", "main")
                 path = repo / ".guard/config.json"
                 config = json.loads(path.read_text())
@@ -1144,6 +1146,8 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     modules[0]["layer"] = "domain"
                 elif module == "touched dependencies":
                     modules[0]["dependencies"] = []
+                elif module == "downstream role":
+                    next(item for item in modules if item["path"] == "services/c")["role"] = "updated owner"
                 else:
                     next(item for item in modules if item["path"] == module)["role"] = "updated owner"
                 if module == "services/c":
@@ -1154,12 +1158,200 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
                 _git(repo, "switch", "topic")
                 _git(repo, "rebase", "main")
+                if module in {"services/a", "services/b", "downstream role"}:
+                    self.assertIsNone(resolve_or_carry_forward_receipt(repo, collect_review_scope(repo)))
                 (repo / "services/a/main.py").write_text("value = 3\n")
                 _git(repo, "commit", "-am", "round 2")
 
                 second = run_architecture_review(repo, env=env)
                 meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
                 self.assertEqual((second.mode, meta["full_review_reason"]), (mode, reason))
+                if module in {"services/a", "services/b", "downstream role"}:
+                    self.assertEqual(second.session_id, first.session_id)
+                    prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                    target, relation, prior_role = {
+                        "services/a": ("services/a", "touched", "feature owner"),
+                        "services/b": ("services/b", "upstream", "dependency owner"),
+                        "downstream role": ("services/c", "downstream", "other owner"),
+                    }[module]
+                    self.assertIn("Declared module role changes", prompt)
+                    self.assertIn(f'- `{target}` ({relation}): "{prior_role}" -> "updated owner"', prompt)
+                    receipt = load_valid_receipt(repo, second.patch_digest)
+                    self.assertIsNotNone(receipt)
+                    assert receipt is not None
+                    self.assertNotEqual(receipt["contract_digest"], old_digest)
+
+    def test_rebased_architecture_blueprint_change_resumes_and_replaces_receipt(self) -> None:
+        for branch_delta in (False, True):
+            with self.subTest(branch_delta=branch_delta), tempfile.TemporaryDirectory() as td:
+                repo, env, _ = self._start_module_review(Path(td))
+                _git(repo, "switch", "main")
+                (repo / "ARCHITECTURE.md").write_text("original architecture\n")
+                _git(repo, "add", "ARCHITECTURE.md")
+                _git(repo, "commit", "-m", "add root architecture blueprint")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                first = run_architecture_review(repo, env=env, force=True)
+                old_digest = load_valid_receipt(repo, first.patch_digest)["contract_digest"]
+
+                _git(repo, "switch", "main")
+                (repo / "ARCHITECTURE.md").write_text("updated architecture\n" + "more topology\n" * 1_000)
+                _git(repo, "commit", "-am", "update root architecture blueprint upstream")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                rebased = collect_review_scope(repo)
+                self.assertEqual(rebased.patch_digest, first.patch_digest)
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, rebased))
+                if branch_delta:
+                    (repo / "services/a/main.py").write_text("value = 3\n")
+                    _git(repo, "commit", "-am", "round 2")
+
+                second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                self.assertEqual((second.mode, meta["full_review_reason"]), ("incremental", ""))
+                self.assertEqual(second.session_id, first.session_id)
+                prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                update = prompt.split("## Updated Module Scope & Boundary Context", 1)[1].split("\n## ", 1)[0]
+                self.assertIn("### Architecture blueprint diff outside the verified branch delta: `ARCHITECTURE.md`", update)
+                diff = update.split("```diff\n", 1)[1].split("\n```", 1)[0]
+                self.assertIn("-original architecture\n+updated architecture", diff)
+                self.assertIn("[truncated", diff)
+                self.assertLessEqual(len(diff), 8_000)
+                receipt = load_valid_receipt(repo, second.patch_digest)
+                self.assertIsNotNone(receipt)
+                assert receipt is not None
+                self.assertNotEqual(receipt["contract_digest"], old_digest)
+                self.assertEqual(receipt["head_sha"], second.head_sha)
+                if not branch_delta:
+                    self.assertIn("Rebased branch patch unchanged", prompt)
+                    self.assertNotIn("## Verified incremental scope", prompt)
+
+    def test_branch_local_architecture_blueprint_edit_resumes_without_duplicating_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, _ = self._start_module_review(Path(td))
+            _git(repo, "switch", "main")
+            (repo / "ARCHITECTURE.md").write_text("original architecture\n")
+            _git(repo, "add", "ARCHITECTURE.md")
+            _git(repo, "commit", "-m", "add root architecture blueprint")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            first = run_architecture_review(repo, env=env, force=True)
+            old_digest = load_valid_receipt(repo, first.patch_digest)["contract_digest"]
+
+            (repo / "ARCHITECTURE.md").write_text("branch architecture revision\n")
+            _git(repo, "commit", "-am", "edit architecture blueprint on branch")
+            self.assertIsNone(resolve_or_carry_forward_receipt(repo, collect_review_scope(repo)))
+
+            second = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((second.mode, meta["full_review_reason"]), ("incremental", ""))
+            self.assertEqual(second.session_id, first.session_id)
+            prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+            self.assertIn("Changed architecture blueprint `ARCHITECTURE.md`. See the verified incremental scope.", prompt)
+            self.assertNotIn("### Architecture blueprint diff outside the verified branch delta", prompt)
+            self.assertEqual(prompt.count("+branch architecture revision"), 1)
+            receipt = load_valid_receipt(repo, second.patch_digest)
+            self.assertIsNotNone(receipt)
+            assert receipt is not None
+            self.assertNotEqual(receipt["contract_digest"], old_digest)
+
+    def test_architecture_blueprint_symlink_edit_and_upstream_deletion_resume(self) -> None:
+        for scenario in ("symlink_edit", "symlink_dedup_boundary", "upstream_delete", "upstream_create"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as td:
+                repo, env, _ = self._start_module_review(Path(td))
+                _git(repo, "switch", "main")
+                if scenario == "symlink_edit":
+                    (repo / "docs/arch-source.md").write_text("original symlinked arch\n")
+                    (repo / "ARCHITECTURE.md").symlink_to("docs/arch-source.md")
+                    _git(repo, "add", "docs/arch-source.md", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "add symlinked architecture blueprint")
+                elif scenario == "symlink_dedup_boundary":
+                    (repo / "ARCHITECTURE.md").symlink_to("docs/a-owner.md")
+                    _git(repo, "add", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "alias architecture blueprint to touched boundary target")
+                elif scenario == "upstream_delete":
+                    (repo / "ARCHITECTURE.md").write_text("original architecture\n")
+                    _git(repo, "add", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "add root architecture blueprint")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                first = run_architecture_review(repo, env=env, force=True)
+                old_digest = load_valid_receipt(repo, first.patch_digest)["contract_digest"]
+
+                _git(repo, "switch", "main")
+                if scenario == "symlink_edit":
+                    (repo / "docs/arch-source.md").write_text("revised symlinked arch\n")
+                    _git(repo, "commit", "-am", "edit symlinked architecture target upstream")
+                elif scenario == "symlink_dedup_boundary":
+                    (repo / "docs/a-owner.md").write_text("shared boundary and arch revision\n")
+                    _git(repo, "commit", "-am", "edit shared boundary and architecture target upstream")
+                elif scenario == "upstream_delete":
+                    _git(repo, "rm", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "remove architecture blueprint upstream")
+                else:
+                    (repo / "ARCHITECTURE.md").write_text("new root architecture\n")
+                    _git(repo, "add", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "create architecture blueprint upstream")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, collect_review_scope(repo)))
+
+                second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                self.assertEqual((second.mode, meta["full_review_reason"]), ("incremental", ""))
+                self.assertEqual(second.session_id, first.session_id)
+                prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                if scenario == "symlink_edit":
+                    self.assertIn("### Architecture blueprint diff outside the verified branch delta: `ARCHITECTURE.md`", prompt)
+                    self.assertIn("-original symlinked arch\n+revised symlinked arch", prompt)
+                elif scenario == "symlink_dedup_boundary":
+                    self.assertEqual(prompt.count("+shared boundary and arch revision"), 1)
+                    self.assertNotIn("### Architecture blueprint diff outside the verified branch delta", prompt)
+                elif scenario == "upstream_delete":
+                    self.assertIn("Removed architecture blueprint `ARCHITECTURE.md`", prompt)
+                else:
+                    self.assertIn("## Architecture blueprint: ARCHITECTURE.md\nnew root architecture", prompt)
+                receipt = load_valid_receipt(repo, second.patch_digest)
+                self.assertIsNotNone(receipt)
+                assert receipt is not None
+                self.assertNotEqual(receipt["contract_digest"], old_digest)
+
+    def test_architecture_blueprint_and_role_delta_overflow_fail_closed_to_full(self) -> None:
+        for kind in ("architecture_blueprint", "module_role"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as td:
+                repo, env, _ = self._start_module_review(Path(td))
+                _git(repo, "switch", "main")
+                if kind == "architecture_blueprint":
+                    (repo / "ARCHITECTURE.md").write_text("original architecture\n")
+                    _git(repo, "add", "ARCHITECTURE.md")
+                    _git(repo, "commit", "-m", "add root architecture blueprint")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+                run_architecture_review(repo, env=env, force=True)
+
+                _git(repo, "switch", "main")
+                if kind == "architecture_blueprint":
+                    (repo / "ARCHITECTURE.md").write_text("updated architecture blueprint details\n")
+                else:
+                    path = repo / ".guard/config.json"
+                    config = json.loads(path.read_text())
+                    config["topology"]["modules"][0]["role"] = "updated feature owner role prose"
+                    path.write_text(json.dumps(config))
+                _git(repo, "commit", "-am", f"upstream {kind} edit")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                _git(repo, "switch", "topic")
+                _git(repo, "rebase", "main")
+
+                with mock.patch("the_guard.review.prompt.MAX_SNAPSHOT_DOCS_TOTAL_BYTES", 220):
+                    second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                self.assertEqual((second.mode, meta["full_review_reason"]), ("full", "contract_changed"))
 
     def test_unrelated_module_contract_changes_allow_incremental_rebase_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as td:

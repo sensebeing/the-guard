@@ -165,9 +165,11 @@ def _session_contract_changed(
     prior_upstream, prior_downstream = resolve_module_neighbours(touched, prior_declarations)
     modules = touched, upstream | prior_upstream, downstream | prior_downstream
     return _scoped_config_payload(
-        prior_config, scope, *modules, include_touched_boundary_docs=False,
+        prior_config, scope, *modules,
+        include_touched_boundary_docs=False, include_module_roles=False,
     ) != _scoped_config_payload(
-        config, scope, *modules, include_touched_boundary_docs=False,
+        config, scope, *modules,
+        include_touched_boundary_docs=False, include_module_roles=False,
     )
 
 

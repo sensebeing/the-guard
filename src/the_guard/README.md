@@ -54,13 +54,19 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   architecture documents, touched-module boundary documents and touched and one-hop module
   declarations. Routine upgrades preserve `GO` receipts when the version and scoped contract
   match. Scoped retired-table, forbidden-pattern and forbidden-import rules affect receipts for
-  the applicable modules. The session digest covers global rules and root contracts. Branch
-  configuration edits can resume when the changed declarations and scoped rules belong to
-  currently or previously touched modules. A rebase also checks touched modules and one-hop
-  neighbours. Upstream changes limited to a touched module's declared `boundary_docs` preserve
-  an eligible session and require a new receipt. Sessions saved before the root digest was
-  introduced require an exact scoped digest match to continue. A full review retains binding
-  blueprint revisions for a valid branch baseline.
+  the applicable modules. The session digest covers `REVIEW_CONTRACT_VERSION`, global rules,
+  root configuration (including `topology.architecture_docs` declarations) and root
+  instructions (`manifest_file`). Narrative architecture blueprint bodies
+  (`architecture_blueprint_paths`) and touched or one-hop-neighbour `role` prose edits preserve
+  an eligible warm session while still invalidating the receipt and delivering bounded deltas
+  for incremental refresh, failing closed to a full review on document-budget overflow or
+  unreadable history. Branch configuration edits can resume when the changed declarations and
+  scoped rules belong to currently or previously touched modules. A rebase also checks touched
+  modules and one-hop neighbours for structural changes. Upstream changes limited to a touched
+  module's declared `boundary_docs`, architecture blueprint bodies, or touched/one-hop-neighbour
+  `role` prose preserve an eligible session and require a new receipt. Sessions saved before
+  the root digest was introduced require an exact scoped digest match to continue. A full
+  review retains binding blueprint revisions for a valid branch baseline.
 
 Without a local checkout, `guard self-update` runs `uv tool upgrade the-guard` and records the
 installed package's PEP 610 commit, package-tree digest and CLI update status.
@@ -113,10 +119,13 @@ module boundaries. Root instructions, root `ARCHITECTURE.md` and touched module
 documents have a 24,000 UTF-8 byte limit. The document section has a 180,000 UTF-8 byte budget.
 Oversized documents use a heading index with line numbers and a snapshot read command.
 Incremental prompts send prior findings, rebuttal evidence, the verified change, and new or
-changed boundary and blueprint context. A same-patch rebase with updated touched boundaries
-resumes when the verified session can inspect the document delta. The prompt shows declared
-boundary additions and removals by module, including transfers of unchanged documents.
-An unchanged-head rebuttal uses the session history.
+changed boundary, architecture blueprint, declared module `role`, and task blueprint context.
+A same-patch rebase with updated touched boundaries, architecture blueprints, or
+touched/one-hop-neighbour `role` prose resumes when the verified session can inspect the
+bounded delta without overflowing the document budget (failing closed to a full review
+otherwise). The prompt shows declared boundary additions and removals by module, including
+transfers of unchanged documents, as well as declared module role changes and bounded
+architecture blueprint diffs. An unchanged-head rebuttal uses the session history.
 The manifest supplies the allowed finding IDs for prompts, output schemas and verdict validation.
 A `NO-GO` verdict requires at least one blocking finding.
 
