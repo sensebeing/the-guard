@@ -142,6 +142,7 @@ def _scoped_config_payload(
     downstream: set[str],
     *,
     include_touched_boundary_docs: bool = True,
+    include_module_roles: bool = True,
 ) -> dict[str, Any]:
     """Keep the reviewed module contract while dropping unrelated module declarations."""
     payload = asdict(config)
@@ -163,18 +164,23 @@ def _scoped_config_payload(
         declared = declared_modules.get(module_path)
         if declared is None:
             return {"path": module_path, "missing": True}
-        return {
+        projection = {
             "path": module_path,
             "layer": declared.get("layer"),
-            "role": declared.get("role"),
             "dependencies": list(declared.get("dependencies", [])),
             "retired": declared.get("retired", False),
         }
+        if include_module_roles:
+            projection["role"] = declared.get("role")
+        return projection
 
     touched_modules = [declared_modules.get(module, {"path": module}) for module in sorted(touched)]
     if not include_touched_boundary_docs:
         for module in touched_modules:
             module.pop("boundary_docs", None)
+    if not include_module_roles:
+        for module in touched_modules:
+            module.pop("role", None)
     topology["modules"] = {
         "touched": touched_modules,
         "upstream": [neighbour_projection(module) for module in sorted(upstream)],
@@ -267,7 +273,7 @@ def compute_session_contract_digest(
     config_payload["topology"].pop("modules", None)
     config_payload["topology"].update(scoped_topology_rules(config_payload["topology"], ()))
     documents = _snapshot_document_bodies(
-        repo_root, architecture_document_paths(config), revision
+        repo_root, {config.manifest_file}, revision
     )
     return _hash_contract(policy, config_payload, documents, include_rule_checker=True)
 

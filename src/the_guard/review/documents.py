@@ -31,6 +31,10 @@ def architecture_document_paths(config: GuardConfig) -> set[str]:
     }
 
 
+def architecture_blueprint_paths(config: GuardConfig) -> set[str]:
+    return architecture_document_paths(config) - {config.manifest_file}
+
+
 def boundary_document_paths(module: dict) -> set[str]:
     if module.get("retired", False):
         return set()
