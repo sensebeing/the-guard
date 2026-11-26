@@ -30,7 +30,12 @@ from .hooks import edit_guard, main_push_gate
 from .init import initialize
 from .policy import PolicyError, load_policy
 from .review.cli import main as review_main, should_update_after_review
-from .review.github import publish_github_pr_review, resolve_github_publish_mode
+from .review.github import (
+    DETERMINISTIC_CHECK_RUN_NAME,
+    DETERMINISTIC_CHECK_TITLE,
+    publish_github_pr_review,
+    resolve_github_publish_mode,
+)
 from .topology import check_contract_drift, audit_topology, run_topology_guard, sync_topology
 
 
@@ -110,35 +115,46 @@ def _extract_optional_path(values: list[str], option: str) -> str | None:
     return None
 
 
-def _publish_check_github_review(
-    root: Path,
-    target: str | None,
-    *,
-    base: str,
-    findings: Sequence[Finding],
-    dry_run: bool,
-    publish_mode: str,
-) -> dict[str, Any] | None:
-    if not target:
-        return None
-    head_sha = None
+def _resolve_head_commit(root: Path) -> str:
     try:
         head_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
             cwd=root,
             env=clean_git_env(),
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            "Cannot publish GitHub check without a resolvable committed HEAD"
+        ) from exc
+    if not head_sha:
+        raise RuntimeError(
+            "Cannot publish GitHub check without a resolvable committed HEAD"
+        )
+    return head_sha
+
+
+def _publish_check_github_review(
+    target: str | None,
+    *,
+    base: str,
+    findings: Sequence[Finding],
+    head_sha: str | None,
+    policy_only: bool,
+    dry_run: bool,
+    publish_mode: str,
+) -> dict[str, Any] | None:
+    if not target:
+        return None
     verdict = "NO-GO" if findings else "GO"
-    summary = (
-        f"Deterministic policy and topology check found {len(findings)} blocking violation(s) (base {base})."
-        if findings
-        else f"Deterministic policy and topology check passed with 0 findings (base {base})."
-    )
+    if policy_only:
+        summary = "Policy manifest validation passed (topology checks skipped via --policy-only)."
+    elif findings:
+        summary = f"Deterministic policy and topology check found {len(findings)} blocking violation(s) (base {base})."
+    else:
+        summary = f"Deterministic policy and topology check passed with 0 findings (base {base})."
     return publish_github_pr_review(
         target,
         verdict=verdict,
@@ -147,6 +163,8 @@ def _publish_check_github_review(
         commit_id=head_sha,
         dry_run=dry_run,
         publish_mode=publish_mode,
+        check_name=DETERMINISTIC_CHECK_RUN_NAME,
+        title_prefix=DETERMINISTIC_CHECK_TITLE,
     )
 
 
@@ -270,29 +288,45 @@ def main(argv: list[str] | None = None) -> int:
                     else "Topology audit: FAIL"
                 )
             return 0 if report["passed"] else 2
-        cfg = load_config(root)
+        check_revision = (
+            _resolve_head_commit(root)
+            if args.command == "check" and args.github_pr
+            else None
+        )
+        cfg = load_config(root, revision=check_revision)
         if args.command == "check":
-            load_policy(root)
+            load_policy(root, revision=check_revision, config=cfg)
         base = (
             args.base or cfg.main_branch
             if args.command == "check" and args.policy_only
             else resolve_changed_base(root, args.base, main_branch=cfg.main_branch)
         )
-        findings = (
-            []
-            if args.command == "check" and args.policy_only
-            else run_topology_guard(
-                root, args.file or changed_files(root, base), base=base, config=cfg
+        if args.command == "check" and args.policy_only:
+            findings: list[Finding] = []
+        else:
+            target_files = (
+                list(args.file)
+                if args.file
+                else changed_files(
+                    root, base, main_branch=cfg.main_branch, head=check_revision
+                )
             )
-        )
-        if not args.file and not (args.command == "check" and args.policy_only):
-            findings.extend(check_contract_drift(root, changed_files(root, base), base=base, config=cfg))
+            findings = run_topology_guard(
+                root, target_files, base=base, config=cfg, revision=check_revision
+            )
+            if not args.file:
+                findings.extend(
+                    check_contract_drift(
+                        root, target_files, base=base, config=cfg, revision=check_revision
+                    )
+                )
         should_trigger_auto_update = args.command == "check"
         gh_receipt = _publish_check_github_review(
-            root,
             args.github_pr if args.command == "check" else None,
             base=base,
             findings=findings,
+            head_sha=check_revision,
+            policy_only=args.policy_only if args.command == "check" else False,
             dry_run=args.github_dry_run if args.command == "check" else False,
             publish_mode=resolve_github_publish_mode(
                 args.github_publish_mode if args.command == "check" else None,

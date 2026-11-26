@@ -103,8 +103,9 @@ Choose how reviewed changes reach `main`; `--integration-mode` sets the mode exp
 GitHub PR mode writes `.github/workflows/the-guard-review.yml` (with `checks: write` and
 `pull-requests: write`) and expects the `THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository
 secrets. By default `--github-pr` publishes a silent **GitHub Check Run** (`check-run`) with inline
-annotations and full findings output so repeated runs do not spam PR review emails; the GitHub App
-or Actions token must grant `checks: write`. Set `review.github_publish_mode: "pr-review"` in
+annotations and full findings output so repeated runs do not spam PR review emails (`the-guard review`
+for independent reviews, `the-guard check` for snapshot-bound deterministic `guard check` runs); the
+GitHub App or Actions token must grant `checks: write`. Set `review.github_publish_mode: "pr-review"` in
 `.guard/config.json` or pass `--github-publish-mode pr-review` to opt into PR review comments.
 
 If you maintain a custom `pre-push` hook, resolve the worktree root with

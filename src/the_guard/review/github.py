@@ -20,13 +20,17 @@ from .contract import BlockingFinding
 
 THE_GUARD_REVIEW_MARKER = "<!-- the-guard-review -->"
 DEFAULT_CHECK_RUN_NAME = "the-guard review"
+DETERMINISTIC_CHECK_RUN_NAME = "the-guard check"
+DEFAULT_REVIEW_TITLE = "The Guard Architecture Review"
+DETERMINISTIC_CHECK_TITLE = "The Guard Deterministic Check"
 _MAX_CHECK_RUN_ANNOTATIONS_PER_REQUEST = 50
 _MAX_CHECK_RUN_TEXT_CHARS = 65_535
 _GITHUB_API_URL = "https://api.github.com"
 _GITHUB_APP_CONFIG_RELATIVE_PATH = Path(".config/the-guard/github-app.json")
 _TARGET_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^/#\s]+)#(?P<number>\d+)\s*$")
 _URL_RE = re.compile(r"^https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+)/pull/(?P<number>\d+)(?:/[^\s]*)?\s*$")
-_HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 def resolve_github_publish_mode(
@@ -84,9 +88,17 @@ def _finding_location(finding: BlockingFinding | dict[str, Any]) -> tuple[str, i
     return file, line
 
 
-def _valid_commit_sha(commit_id: str | None) -> str:
-    value = commit_id.strip() if isinstance(commit_id, str) else ""
-    return value if _HEX_SHA_RE.fullmatch(value) else ""
+def _parse_commit_id(commit_id: str | None) -> str:
+    if commit_id is None:
+        return ""
+    if not isinstance(commit_id, str):
+        raise ValueError(f"Invalid commit_id {commit_id!r}; expected a 7-40 character hex commit SHA")
+    value = commit_id.strip()
+    if not value:
+        return ""
+    if not _COMMIT_SHA_RE.fullmatch(value):
+        raise ValueError(f"Invalid commit_id {commit_id!r}; expected a 7-40 character hex commit SHA")
+    return value
 
 
 def _truncate_check_run_text(text: str, limit: int = _MAX_CHECK_RUN_TEXT_CHARS) -> str:
@@ -142,10 +154,11 @@ def _build_check_run_payload_and_annotations(
     *,
     commit_id: str | None = None,
     check_name: str = DEFAULT_CHECK_RUN_NAME,
+    title_prefix: str = DEFAULT_REVIEW_TITLE,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     all_annotations = _build_check_run_annotations(findings)
     output: dict[str, Any] = {
-        "title": f"The Guard Architecture Review: {verdict}",
+        "title": f"{title_prefix}: {verdict}",
         "summary": _truncate_check_run_text(f"{THE_GUARD_REVIEW_MARKER}\n{summary}"),
     }
     if findings:
@@ -155,7 +168,7 @@ def _build_check_run_payload_and_annotations(
         output["annotations"] = all_annotations[:_MAX_CHECK_RUN_ANNOTATIONS_PER_REQUEST]
     payload: dict[str, Any] = {
         "name": check_name,
-        "head_sha": _valid_commit_sha(commit_id),
+        "head_sha": _parse_commit_id(commit_id),
         "status": "completed",
         "conclusion": "success" if verdict == "GO" else "failure",
         "output": output,
@@ -170,15 +183,28 @@ def build_github_check_run_payload(
     *,
     commit_id: str | None = None,
     check_name: str = DEFAULT_CHECK_RUN_NAME,
+    title_prefix: str = DEFAULT_REVIEW_TITLE,
 ) -> dict[str, Any]:
     payload, _ = _build_check_run_payload_and_annotations(
-        verdict, summary, findings, commit_id=commit_id, check_name=check_name
+        verdict,
+        summary,
+        findings,
+        commit_id=commit_id,
+        check_name=check_name,
+        title_prefix=title_prefix,
     )
     return payload
 
 
-def build_github_review_payload(verdict: str, summary: str, findings: Sequence[BlockingFinding | dict[str, Any]], *, commit_id: str | None = None) -> dict[str, Any]:
-    body = f"{THE_GUARD_REVIEW_MARKER}\n## The Guard Architecture Review: {verdict}\n\n{summary}"
+def build_github_review_payload(
+    verdict: str,
+    summary: str,
+    findings: Sequence[BlockingFinding | dict[str, Any]],
+    *,
+    commit_id: str | None = None,
+    title_prefix: str = DEFAULT_REVIEW_TITLE,
+) -> dict[str, Any]:
+    body = f"{THE_GUARD_REVIEW_MARKER}\n## {title_prefix}: {verdict}\n\n{summary}"
     comments: list[dict[str, Any]] = []
     body_findings: list[str] = []
     for finding in findings:
@@ -191,9 +217,9 @@ def build_github_review_payload(verdict: str, summary: str, findings: Sequence[B
     if body_findings:
         body += "\n\n" + "\n\n---\n\n".join(body_findings)
     payload: dict[str, Any] = {"event": "COMMENT", "body": body, "comments": comments}
-    valid_sha = _valid_commit_sha(commit_id)
-    if valid_sha:
-        payload["commit_id"] = valid_sha
+    parsed_sha = _parse_commit_id(commit_id)
+    if parsed_sha:
+        payload["commit_id"] = parsed_sha
     return payload
 
 
@@ -355,11 +381,39 @@ def _resolve_pr_head_sha(
             f"Failed to resolve head SHA for {owner}/{repo}#{pr_number}: {detail}"
         )
     head_sha = (result.stdout or "").strip()
-    if not _HEX_SHA_RE.fullmatch(head_sha):
+    if not _FULL_SHA_RE.fullmatch(head_sha):
         raise RuntimeError(
             f"GitHub PR {owner}/{repo}#{pr_number} returned invalid head SHA: {head_sha!r}"
         )
     return head_sha
+
+
+def _resolve_commit_sha(
+    owner: str, repo: str, commit_sha: str, *, env: dict[str, str] | None
+) -> str:
+    if _FULL_SHA_RE.fullmatch(commit_sha):
+        return commit_sha
+    command = [
+        "gh",
+        "api",
+        f"/repos/{owner}/{repo}/commits/{commit_sha}",
+        "--jq",
+        ".sha",
+    ]
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to resolve commit {commit_sha!r} in {owner}/{repo}: {detail}"
+        )
+    resolved = (result.stdout or "").strip()
+    if not _FULL_SHA_RE.fullmatch(resolved) or not resolved.lower().startswith(
+        commit_sha.lower()
+    ):
+        raise RuntimeError(
+            f"GitHub commit lookup for {commit_sha!r} in {owner}/{repo} returned mismatched SHA: {resolved!r}"
+        )
+    return resolved
 
 
 def _publish_github_check_run(
@@ -373,9 +427,15 @@ def _publish_github_check_run(
     commit_id: str | None,
     dry_run: bool,
     check_name: str,
+    title_prefix: str,
 ) -> dict[str, Any]:
     payload, all_annotations = _build_check_run_payload_and_annotations(
-        verdict, summary, findings, commit_id=commit_id, check_name=check_name
+        verdict,
+        summary,
+        findings,
+        commit_id=commit_id,
+        check_name=check_name,
+        title_prefix=title_prefix,
     )
     base = {
         "owner": owner,
@@ -394,7 +454,11 @@ def _publish_github_check_run(
     app_token = resolve_github_app_token(owner, repo)
     process_env = {**os.environ, "GH_TOKEN": app_token} if app_token else None
     auth_mode = "github_app" if app_token else "gh_cli"
-    if not payload["head_sha"]:
+    if payload["head_sha"]:
+        payload["head_sha"] = _resolve_commit_sha(
+            owner, repo, payload["head_sha"], env=process_env
+        )
+    else:
         payload["head_sha"] = _resolve_pr_head_sha(
             owner, repo, pr_number, env=process_env
         )
@@ -510,8 +574,11 @@ def _publish_github_review_comment(
     findings: Sequence[BlockingFinding | dict[str, Any]],
     commit_id: str | None,
     dry_run: bool,
+    title_prefix: str,
 ) -> dict[str, Any]:
-    payload = build_github_review_payload(verdict, summary, findings, commit_id=commit_id)
+    payload = build_github_review_payload(
+        verdict, summary, findings, commit_id=commit_id, title_prefix=title_prefix
+    )
     base = {
         "owner": owner,
         "repo": repo,
@@ -524,6 +591,10 @@ def _publish_github_review_comment(
     app_token = resolve_github_app_token(owner, repo)
     process_env = {**os.environ, "GH_TOKEN": app_token} if app_token else None
     auth_mode = "github_app" if app_token else "gh_cli"
+    if payload.get("commit_id"):
+        payload["commit_id"] = _resolve_commit_sha(
+            owner, repo, payload["commit_id"], env=process_env
+        )
     command = ["gh", "api", f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews", "--method", "POST", "--input", "-"]
     result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, env=process_env)
     if result.returncode == 0:
@@ -554,6 +625,7 @@ def publish_github_pr_review(
     dry_run: bool = False,
     publish_mode: str = DEFAULT_GITHUB_PUBLISH_MODE,
     check_name: str = DEFAULT_CHECK_RUN_NAME,
+    title_prefix: str = DEFAULT_REVIEW_TITLE,
 ) -> dict[str, Any]:
     owner, repo, pr_number = parse_github_pr_target(target)
     if publish_mode not in GITHUB_PUBLISH_MODES:
@@ -571,6 +643,7 @@ def publish_github_pr_review(
             commit_id=commit_id,
             dry_run=dry_run,
             check_name=check_name,
+            title_prefix=title_prefix,
         )
     return _publish_github_review_comment(
         owner,
@@ -581,4 +654,5 @@ def publish_github_pr_review(
         findings=findings,
         commit_id=commit_id,
         dry_run=dry_run,
+        title_prefix=title_prefix,
     )

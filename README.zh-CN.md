@@ -99,7 +99,7 @@ guard init --preset full --with-hooks
 | `github-pr` | `guard init --with-github-workflow` | 推送功能分支、创建 GitHub PR，用 `guard review --github-pr <owner/repo#number>` 默认以静默 `"the-guard review"` GitHub Check Run（`the-guard-reviewer[bot]`）发布审查，再用 `gh pr merge` 合入；本地 `pre-push` 钩子仍会拒绝直接推送主分支。 |
 | `both` | `guard init --with-hooks --with-github-workflow` | 安装 GitHub PR 审查工作流，直接推送主分支仍需本地 `GO` 回执。 |
 
-GitHub PR 模式会写入 `.github/workflows/the-guard-review.yml`（含 `checks: write` 与 `pull-requests: write`），需要 `THE_GUARD_APP_ID` 与 `THE_GUARD_PRIVATE_KEY` 仓库密钥。`--github-pr` 默认发布静默的 **GitHub Check Run**（`check-run`，携带行内 annotations 与完整 findings，避免频繁触发 PR 审查邮件），要求 GitHub App 或 Actions Token 具备 `checks: write` 权限；如需切回 PR 评论模式，可在 `.guard/config.json` 配置 `review.github_publish_mode: "pr-review"` 或显式传 `--github-publish-mode pr-review`。
+GitHub PR 模式会写入 `.github/workflows/the-guard-review.yml`（含 `checks: write` 与 `pull-requests: write`），需要 `THE_GUARD_APP_ID` 与 `THE_GUARD_PRIVATE_KEY` 仓库密钥。`--github-pr` 默认发布静默的 **GitHub Check Run**（`check-run`，携带行内 annotations 与完整 findings，避免频繁触发 PR 审查邮件；独立审查发布为 `the-guard review`，确定性快照检查 `guard check` 发布为 `the-guard check`），要求 GitHub App 或 Actions Token 具备 `checks: write` 权限；如需切回 PR 评论模式，可在 `.guard/config.json` 配置 `review.github_publish_mode: "pr-review"` 或显式传 `--github-publish-mode pr-review`。
 
 自定义 `pre-push` 钩子应先用 `git rev-parse --show-toplevel` 解析工作区根目录，再清除
 `GIT_DIR`、`GIT_WORK_TREE` 等继承的 [Git 仓库定位变量](src/the_guard/git_helpers.py)。调用全局

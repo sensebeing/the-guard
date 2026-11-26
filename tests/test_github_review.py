@@ -21,8 +21,11 @@ from the_guard.review.cli import main as review_main
 from the_guard.cli import main as guard_main
 from the_guard.config import GuardConfig
 from the_guard.finding import Finding
+from the_guard.init import initialize
 from the_guard.review.github import (
     DEFAULT_CHECK_RUN_NAME,
+    DETERMINISTIC_CHECK_RUN_NAME,
+    DETERMINISTIC_CHECK_TITLE,
     _MAX_CHECK_RUN_TEXT_CHARS,
     build_github_check_run_payload,
     build_github_review_payload,
@@ -138,7 +141,12 @@ class GithubReviewTests(unittest.TestCase):
         gh_receipt = json.loads(output.getvalue())["github_review"]
         self.assertEqual(gh_receipt["delivery_mode"], "dry_run")
         self.assertEqual(gh_receipt["publish_mode"], "check-run")
-        self.assertEqual(gh_receipt["payload"]["name"], DEFAULT_CHECK_RUN_NAME)
+        self.assertEqual(gh_receipt["payload"]["name"], DETERMINISTIC_CHECK_RUN_NAME)
+        self.assertEqual(
+            gh_receipt["payload"]["output"]["title"],
+            f"{DETERMINISTIC_CHECK_TITLE}: GO",
+        )
+        self.assertIn("--policy-only", gh_receipt["payload"]["output"]["summary"])
         self.assertEqual(gh_receipt["payload"]["conclusion"], "success")
 
         override_output = io.StringIO()
@@ -151,6 +159,55 @@ class GithubReviewTests(unittest.TestCase):
         override_receipt = json.loads(override_output.getvalue())["github_review"]
         self.assertEqual(override_receipt["publish_mode"], "pr-review")
         self.assertEqual(override_receipt["payload"]["event"], "COMMENT")
+        self.assertIn(f"## {DETERMINISTIC_CHECK_TITLE}: GO", override_receipt["payload"]["body"])
+
+    def test_guard_check_github_publication_evaluates_committed_head_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+                ).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            initialize(repo)
+            cfg_path = repo / ".guard/config.json"
+            cfg_data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            cfg_data.setdefault("topology", {})["forbidden_imports"] = [
+                {"scope_prefixes": ["src/"], "imports": ["forbidden"]}
+            ]
+            cfg_path.write_text(json.dumps(cfg_data), encoding="utf-8")
+            (repo / "src").mkdir()
+            (repo / "src/app.py").write_text("value = 1\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            (repo / "src/app.py").write_text("import forbidden\n", encoding="utf-8")
+            git("add", "src/app.py")
+            git("commit", "-m", "committed violation")
+            head_sha = git("rev-parse", "HEAD")
+
+            # Repair the violation ONLY in the uncommitted working tree.
+            (repo / "src/app.py").write_text("value = 2\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = guard_main([
+                    "check", "--repo-root", str(repo), "--base", base_sha,
+                    "--github-pr", "owner/repo#42", "--github-dry-run", "--json",
+                ])
+            self.assertEqual(code, 2)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["status"], "NO-GO")
+            self.assertEqual(len(result["findings"]), 1)
+            gh_payload = result["github_review"]["payload"]
+            self.assertEqual(gh_payload["name"], DETERMINISTIC_CHECK_RUN_NAME)
+            self.assertEqual(gh_payload["head_sha"], head_sha)
+            self.assertEqual(gh_payload["conclusion"], "failure")
+            self.assertEqual(len(gh_payload["output"]["annotations"]), 1)
 
     def test_parse_targets_and_rejects_invalid_values(self) -> None:
         self.assertEqual(parse_github_pr_target("owner/repo#42"), ("owner", "repo", 42))
@@ -280,7 +337,7 @@ class GithubReviewTests(unittest.TestCase):
             {"rule_id": "guard.rule", "file": "src/c.py", "line": 0, "issue": "whole file", "required_fix": "fix file"},
             {"rule_id": "guard.rule", "file": "", "line": 4, "issue": "no path", "required_fix": "fix path"},
         ]
-        nogo_payload = build_github_check_run_payload("NO-GO", "blocking issues", findings, commit_id="short")
+        nogo_payload = build_github_check_run_payload("NO-GO", "blocking issues", findings, commit_id=None)
         self.assertEqual(nogo_payload["head_sha"], "")
         self.assertEqual(nogo_payload["conclusion"], "failure")
         self.assertEqual(len(nogo_payload["output"]["annotations"]), 2)
@@ -446,6 +503,57 @@ class GithubReviewTests(unittest.TestCase):
                 "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=None, dry_run=True,
             )
         self.assertEqual(dry["delivery_mode"], "dry_run")
+        run.assert_not_called()
+
+    def test_abbreviated_commit_sha_resolves_exact_commit_and_rejects_invalid_identities(self) -> None:
+        abbreviated = "1ed0fe99"
+        full_sha = "1ed0fe99" + "a" * 32
+        commit_lookup = subprocess.CompletedProcess([], 0, stdout=f"{full_sha}\n", stderr="")
+        post_resp = subprocess.CompletedProcess([], 0, stdout='{"id": 702, "html_url": "https://example/runs/702"}', stderr="")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value="ghs_app_token"), \
+                mock.patch("the_guard.review.github.subprocess.run", side_effect=[commit_lookup, post_resp]) as run:
+            result = publish_github_pr_review(
+                "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=abbreviated,
+            )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            ["gh", "api", f"/repos/owner/repo/commits/{abbreviated}", "--jq", ".sha"],
+        )
+        posted = json.loads(run.call_args_list[1].kwargs["input"])
+        self.assertEqual(posted["head_sha"], full_sha)
+
+        mismatched = subprocess.CompletedProcess([], 0, stdout="f" * 40 + "\n", stderr="")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value=None), \
+                mock.patch("the_guard.review.github.subprocess.run", return_value=mismatched) as run:
+            with self.assertRaisesRegex(RuntimeError, "mismatched SHA"):
+                publish_github_pr_review(
+                    "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=abbreviated,
+                )
+        self.assertEqual(run.call_count, 1)
+
+        unresolvable = subprocess.CompletedProcess([], 1, stdout="", stderr="404 Not Found")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value=None), \
+                mock.patch("the_guard.review.github.subprocess.run", return_value=unresolvable) as run:
+            with self.assertRaisesRegex(RuntimeError, "Failed to resolve commit"):
+                publish_github_pr_review(
+                    "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=abbreviated,
+                )
+        self.assertEqual(run.call_count, 1)
+
+        with mock.patch("the_guard.review.github.subprocess.run") as run:
+            dry_abbrev = publish_github_pr_review(
+                "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=abbreviated, dry_run=True,
+            )
+        self.assertEqual(dry_abbrev["payload"]["head_sha"], abbreviated)
+        run.assert_not_called()
+
+        with mock.patch("the_guard.review.github.subprocess.run") as run:
+            for bad_sha in ("short", "not-a-sha", "HEAD"):
+                with self.assertRaisesRegex(ValueError, "Invalid commit_id"):
+                    publish_github_pr_review(
+                        "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=bad_sha,
+                    )
         run.assert_not_called()
 
     def test_resolve_github_publish_mode_precedence_and_validation(self) -> None:

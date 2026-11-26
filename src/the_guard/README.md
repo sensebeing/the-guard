@@ -36,8 +36,9 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   configuration before writing. `config` rejects invalid layer edges before these run.
 - `review/contract` owns the explicit review contract version, reviewer types, wire schema and
   output validation. `review/github` owns GitHub PR target parsing, publish mode resolution
-  (`check-run` default for silent Check Runs, `pr-review` explicit fallback), attributable
-  formatting, and publication. `repository` owns Git scope, patch identity, receipt carry-forward and
+  (`check-run` default for silent Check Runs, `pr-review` explicit fallback), commit SHA
+  preservation/resolution, attributable formatting (`the-guard review` for independent reviews and
+  `the-guard check` for deterministic checks), and publication. `repository` owns Git scope, patch identity, receipt carry-forward and
   fsmonitor-isolated snapshot Git calls. `documents` owns review document inventory and binding
   blueprint selection, batching regular-file reads and following safe snapshot symlinks.
   `session` owns scoped contract hashes, rule scope projection and local evidence persistence.
@@ -191,7 +192,7 @@ paths and inbound imports trigger service-boundary checks. A new retirement also
 unchanged inbound imports throughout the repository. Active declarations cannot be nested
 within a retired path.
 
-Review CLI, check-push and protected-push checks read the exact target Git snapshot directly,
+Review CLI, `guard check --github-pr`, check-push and protected-push checks read the exact target Git snapshot directly,
 without creating temporary worktrees. `guard review check-push --head <rev>` verifies a
 specific commit or ref and defaults to `HEAD` when omitted. Exact snapshot reads use committed
 submodule metadata, reject unavailable blobs and disable working-tree rename inference for both

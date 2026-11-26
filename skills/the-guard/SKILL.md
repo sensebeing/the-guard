@@ -108,7 +108,8 @@ integrated through GitHub pull requests rather than direct pushes:
 
 1. Commit on the topic branch, push it, and open a PR with `gh pr create`.
 2. Run `guard review --github-pr <owner/repo#number>` to audit the committed diff and publish a
-   silent `"the-guard review"` GitHub Check Run as `the-guard-reviewer[bot]` (requires
+   silent `"the-guard review"` GitHub Check Run as `the-guard-reviewer[bot]` (snapshot-bound
+   `guard check --github-pr` publishes a separate `"the-guard check"` Check Run; requires
    `checks: write` on the GitHub App or Actions token; use `review.github_publish_mode: "pr-review"`
    or `--github-publish-mode pr-review` for explicit PR review comments). Resolve blocking findings
    or submit `--note` evidence and rerun until `GO`.
