@@ -34,7 +34,7 @@ runs:
           publish_mode_args=(--github-publish-mode "$THE_GUARD_PUBLISH_MODE")
         fi
         if guard probe --priority-order "${{ inputs.provider }}" >/dev/null 2>&1; then
-          guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" ${publish_mode_args[@]+"${publish_mode_args[@]}"} --json
+          guard review --main-branch "${GITHUB_BASE_REF:-main}" --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" ${publish_mode_args[@]+"${publish_mode_args[@]}"} --json
         else
           guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" ${publish_mode_args[@]+"${publish_mode_args[@]}"} --json
         fi
