@@ -97,11 +97,16 @@ Choose how reviewed changes reach `main`; `--integration-mode` sets the mode exp
 | Mode | Install | Integration boundary |
 | --- | --- | --- |
 | `local-hooks` | `guard init --with-hooks` | The local `pre-push` hook verifies a `GO` receipt for the pushed range before a push to the main branch. |
-| `github-pr` | `guard init --with-github-workflow` | Push topic branches, open a GitHub PR, publish `guard review --github-pr <owner/repo#number>` as `the-guard-reviewer[bot]`, and merge with `gh pr merge`; the local `pre-push` hook still rejects direct pushes to the main branch. |
+| `github-pr` | `guard init --with-github-workflow` | Push topic branches, open a GitHub PR, publish `guard review --github-pr <owner/repo#number>` silently as a `"the-guard review"` GitHub Check Run (`the-guard-reviewer[bot]`), and merge with `gh pr merge`; the local `pre-push` hook still rejects direct pushes to the main branch. |
 | `both` | `guard init --with-hooks --with-github-workflow` | The GitHub PR review workflow is installed, and direct pushes to the main branch still require a local `GO` receipt. |
 
-GitHub PR mode writes `.github/workflows/the-guard-review.yml` and expects the
-`THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository secrets.
+GitHub PR mode writes `.github/workflows/the-guard-review.yml` (with `checks: write` and
+`pull-requests: write`) and expects the `THE_GUARD_APP_ID` and `THE_GUARD_PRIVATE_KEY` repository
+secrets. By default `--github-pr` publishes a silent **GitHub Check Run** (`check-run`) with inline
+annotations and full findings output so repeated runs do not spam PR review emails (`the-guard review`
+for independent reviews, `the-guard check` for snapshot-bound deterministic `guard check` runs); the
+GitHub App or Actions token must grant `checks: write`. Set `review.github_publish_mode: "pr-review"` in
+`.guard/config.json` or pass `--github-publish-mode pr-review` to opt into PR review comments.
 
 If you maintain a custom `pre-push` hook, resolve the worktree root with
 `git rev-parse --show-toplevel` before clearing inherited [Git repository selectors](src/the_guard/git_helpers.py)
@@ -314,6 +319,9 @@ declarative topology constraints. See the multi-service [configuration example](
 
 The optional `review.integration_mode` key accepts `local-hooks`, `github-pr`, or `both` and
 selects the integration boundary that `guard init` records and the `pre-push` gate enforces.
+The optional `review.github_publish_mode` key accepts `check-run` (default, silent GitHub Check
+Runs requiring `checks: write`) or `pr-review` (explicit PR review comments); CLI
+`--github-publish-mode` overrides the configured value.
 
 `review.blueprint_globs` opts task blueprint discovery into repository-relative glob patterns.
 The default empty array skips discovery. `review.operational_ledgers` lists repository-relative
@@ -416,12 +424,12 @@ prior review evidence.
 | Command | Purpose |
 | --- | --- |
 | `guard init` | Initialize policy manifest and rule files (`--preset core\|full`, `--with-hooks`, `--with-github-workflow`, `--integration-mode`, `--rules-dir`, `--manifest-file`). |
-| `guard check` | Validate policy manifest and run deterministic topology checks on changed files (`--policy-only`, `--base`, `--file`, `--json`). |
+| `guard check` | Validate policy manifest and run deterministic topology checks on changed files (`--policy-only`, `--base`, `--file`, `--github-pr`, `--github-publish-mode`, `--json`). |
 | `guard topology sync` / `check` / `audit` | Safely refresh inventory, check changed scope, or audit the whole repository. |
 | `guard distill` | Emit repository module inventory, tooling signals, and code samples for agent-assisted rule distillation. |
-| `guard review` / `guard review run` | Run independent agent architecture review on committed changes (`--provider`, `--force`, `--note`). |
+| `guard review` / `guard review run` | Run independent agent architecture review on committed changes (`--provider`, `--force`, `--note`, `--github-pr`, `--github-publish-mode`). |
 | `guard check-push` | Verify that current `HEAD` has a matching `GO` review receipt or is review-exempt (ordinary prose or lockfile-only changes). |
-| `guard review publish-github` | Publish an attributable GitHub PR review from JSON input (`--pr`, `--input-json`, `--dry-run`, `--json`). |
+| `guard review publish-github` | Publish an attributable GitHub Check Run or PR review from JSON input (`--pr`, `--input-json`, `--github-publish-mode`, `--dry-run`, `--json`). |
 | `guard probe` | Discover and configure local reviewer agent CLIs (`--priority-order`, `--provider-model`, `--reprobe`). |
 | `guard hook edit-guard` | Post-edit hook for coding agents (reads `tool_input.file_path` from JSON stdin). |
 | `guard hook main-push-gate` | Git `pre-push` hook enforcing valid review receipts before pushing to protected branches. |

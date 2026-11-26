@@ -283,6 +283,23 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
                 self.assertEqual(data["verdict"], "NO-GO")
                 self.assertIn("forbidden", data["blocking_findings"][0]["issue"])
                 publish.assert_called_once()
+                self.assertEqual(publish.call_args.kwargs["publish_mode"], "check-run")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        review_main(
+                            [
+                                "--repo-root",
+                                str(repo),
+                                "--json",
+                                "--github-pr",
+                                "org/repo#1",
+                                "--github-publish-mode",
+                                "pr-review",
+                            ]
+                        ),
+                        2,
+                    )
+                self.assertEqual(publish.call_args.kwargs["publish_mode"], "pr-review")
                 with contextlib.redirect_stderr(io.StringIO()) as errors:
                     self.assertEqual(
                         review_main(["check-push", "--repo-root", str(repo)]), 2

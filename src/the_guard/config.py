@@ -17,6 +17,8 @@ DEFAULT_SCHEMA = "the-guard-policy/v1"
 DEFAULT_DETAIL_MANIFEST = "AGENTS.md#engineering-quality-policy"
 DEFAULT_RULE_PREFIX = "guard."
 REVIEW_INTEGRATION_MODES = ("local-hooks", "github-pr", "both")
+GITHUB_PUBLISH_MODES = ("check-run", "pr-review")
+DEFAULT_GITHUB_PUBLISH_MODE = "check-run"
 
 
 @dataclass(frozen=True)
@@ -145,6 +147,13 @@ def _validate_sections(data: dict[str, Any]) -> None:
     ):
         raise ValueError(
             "review.integration_mode must be local-hooks, github-pr, or both"
+        )
+    if (
+        "github_publish_mode" in review
+        and review["github_publish_mode"] not in GITHUB_PUBLISH_MODES
+    ):
+        raise ValueError(
+            "review.github_publish_mode must be check-run or pr-review"
         )
     for key in (
         "reviewable_extensions",

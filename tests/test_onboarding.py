@@ -112,9 +112,12 @@ class GithubPrIntegrationModeTests(unittest.TestCase):
     def test_github_workflow_onboarding_sets_github_pr_mode(self):
         initialize(self.root, with_github_workflow=True)
         workflow = self.root / ".github/workflows/the-guard-review.yml"
-        self.assertEqual(workflow.read_text(), WORKFLOW_TEMPLATE)
+        workflow_text = workflow.read_text()
+        self.assertEqual(workflow_text, WORKFLOW_TEMPLATE)
+        self.assertIn("checks: write", workflow_text)
+        self.assertIn("ref: ${{ github.event.pull_request.head.sha }}", workflow_text)
         self.assertEqual(
-            workflow.read_text(),
+            workflow_text,
             (Path(__file__).resolve().parents[1] / "examples/the-guard-review.yml").read_text(),
         )
         self.assertEqual(
@@ -228,6 +231,22 @@ class GithubPrIntegrationModeTests(unittest.TestCase):
             load_config(self.root)
         with self.assertRaises(ValueError):
             initialize(self.root, integration_mode="server-side")
+
+    def test_github_publish_mode_validation_accepts_known_and_rejects_unknown(self):
+        for mode in ("check-run", "pr-review"):
+            self.write(
+                ".guard/config.json",
+                json.dumps({"review": {"github_publish_mode": mode}}),
+            )
+            self.assertEqual(load_config(self.root).review["github_publish_mode"], mode)
+        self.write(
+            ".guard/config.json",
+            json.dumps({"review": {"github_publish_mode": "issue-comment"}}),
+        )
+        with self.assertRaisesRegex(
+            ValueError, "review.github_publish_mode must be check-run or pr-review"
+        ):
+            load_config(self.root)
 
 
 if __name__ == "__main__":
