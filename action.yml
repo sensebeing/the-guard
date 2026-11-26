@@ -12,6 +12,8 @@ inputs:
     default: ''
   publish-review:
     default: 'true'
+  publish-mode:
+    default: ''
 runs:
   using: composite
   steps:
@@ -25,18 +27,23 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         THE_GUARD_GITHUB_APP_ID: ${{ inputs.app-id }}
         THE_GUARD_GITHUB_PRIVATE_KEY: ${{ inputs.private-key }}
+        THE_GUARD_PUBLISH_MODE: ${{ inputs.publish-mode }}
       run: |
+        publish_mode_args=()
+        if [ -n "$THE_GUARD_PUBLISH_MODE" ]; then
+          publish_mode_args=(--github-publish-mode "$THE_GUARD_PUBLISH_MODE")
+        fi
         if guard probe --priority-order "${{ inputs.provider }}" >/dev/null 2>&1; then
           check_status=0
           guard check --base "origin/${GITHUB_BASE_REF:-main}" || check_status=$?
           if [ "$check_status" -ne 0 ]; then
-            guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json || exit "$check_status"
+            guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" ${publish_mode_args[@]+"${publish_mode_args[@]}"} --json || exit "$check_status"
             exit "$check_status"
           fi
-          guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json
+          guard review --provider "${{ inputs.provider }}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" ${publish_mode_args[@]+"${publish_mode_args[@]}"} --json
           exit "$check_status"
         else
-          guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" --json
+          guard check --base "origin/${GITHUB_BASE_REF:-main}" --github-pr "${{ github.repository }}#${{ github.event.pull_request.number }}" ${publish_mode_args[@]+"${publish_mode_args[@]}"} --json
         fi
     - if: inputs.publish-review != 'true' || github.event_name != 'pull_request'
       shell: bash

@@ -28,6 +28,7 @@ on:
     types: [opened, synchronize, reopened]
 permissions:
   contents: read
+  checks: write
   pull-requests: write
 jobs:
   review:
@@ -35,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: sensebeing/the-guard@main
         with:

@@ -10,10 +10,10 @@ import sys
 from pathlib import Path
 from dataclasses import asdict
 
-from .github import publish_github_pr_review
+from .github import publish_github_pr_review, resolve_github_publish_mode
 
 from ..auto_update import maybe_delegate_to_checkout, maybe_trigger_background_auto_update
-from ..config import load_config
+from ..config import GITHUB_PUBLISH_MODES, load_config
 from ..policy import PolicyError, load_policy
 from ..topology import run_topology_guard, check_contract_drift
 from .contract import PROVIDERS, BlockingFinding, validate_review_output
@@ -65,6 +65,11 @@ def main(argv: list[str] | None = None, *, _from_root_cli: bool = False) -> int:
             p.add_argument("--pr", required=True)
             p.add_argument("--input-json", default=None)
             p.add_argument("--dry-run", action="store_true")
+            p.add_argument(
+                "--github-publish-mode",
+                choices=list(GITHUB_PUBLISH_MODES),
+                default=None,
+            )
             p.add_argument("--json", action="store_true")
         if name == "run":
             p.add_argument("--provider", choices=PROVIDERS)
@@ -73,6 +78,11 @@ def main(argv: list[str] | None = None, *, _from_root_cli: bool = False) -> int:
             p.add_argument("--json", action="store_true")
             p.add_argument("--github-pr", default=None, help="Publish attributable review to GitHub PR (owner/repo#number or URL)")
             p.add_argument("--github-dry-run", action="store_true")
+            p.add_argument(
+                "--github-publish-mode",
+                choices=list(GITHUB_PUBLISH_MODES),
+                default=None,
+            )
         if name == "probe":
             p.add_argument("--priority-order", type=_parse_priority_order)
             p.add_argument(
@@ -127,10 +137,17 @@ def _run_review(args: argparse.Namespace, root: Path) -> int:
                 else:
                     allowed_rule_ids = tuple(rule.id for rule in publish_policy.rules)
             output = validate_review_output(data, allowed_rule_ids=allowed_rule_ids)
+            publish_mode = resolve_github_publish_mode(
+                args.github_publish_mode, config
+            )
             receipt = publish_github_pr_review(
-                args.pr, verdict=output.verdict, summary=output.summary,
-                findings=output.blocking_findings, commit_id=output.reviewed_head_sha,
+                args.pr,
+                verdict=output.verdict,
+                summary=output.summary,
+                findings=output.blocking_findings,
+                commit_id=output.reviewed_head_sha,
                 dry_run=args.dry_run,
+                publish_mode=publish_mode,
             )
             if args.json:
                 print(json.dumps(receipt, indent=2))
@@ -245,7 +262,18 @@ def _run_review(args: argparse.Namespace, root: Path) -> int:
             )
         gh_receipt = None
         if args.github_pr:
-            gh_receipt = publish_github_pr_review(args.github_pr, verdict=result.verdict, summary=result.summary, findings=result.blocking_findings, commit_id=getattr(result, "reviewed_head_sha", None) or getattr(result, "head_sha", None), dry_run=args.github_dry_run)
+            publish_mode = resolve_github_publish_mode(
+                args.github_publish_mode, snapshot_config
+            )
+            gh_receipt = publish_github_pr_review(
+                args.github_pr,
+                verdict=result.verdict,
+                summary=result.summary,
+                findings=result.blocking_findings,
+                commit_id=getattr(result, "reviewed_head_sha", None) or getattr(result, "head_sha", None),
+                dry_run=args.github_dry_run,
+                publish_mode=publish_mode,
+            )
         if args.json:
             output = asdict(result)
             output["reviewed_head_sha"] = output.pop("head_sha")

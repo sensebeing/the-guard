@@ -96,10 +96,10 @@ guard init --preset full --with-hooks
 | 模式 | 安装方式 | 合入边界 |
 | --- | --- | --- |
 | `local-hooks` | `guard init --with-hooks` | 本地 `pre-push` 钩子在推送主分支前核验该范围的 `GO` 回执。 |
-| `github-pr` | `guard init --with-github-workflow` | 推送功能分支、创建 GitHub PR，用 `guard review --github-pr <owner/repo#number>` 以 `the-guard-reviewer[bot]` 发布审查，再用 `gh pr merge` 合入；本地 `pre-push` 钩子仍会拒绝直接推送主分支。 |
+| `github-pr` | `guard init --with-github-workflow` | 推送功能分支、创建 GitHub PR，用 `guard review --github-pr <owner/repo#number>` 默认以静默 `"the-guard review"` GitHub Check Run（`the-guard-reviewer[bot]`）发布审查，再用 `gh pr merge` 合入；本地 `pre-push` 钩子仍会拒绝直接推送主分支。 |
 | `both` | `guard init --with-hooks --with-github-workflow` | 安装 GitHub PR 审查工作流，直接推送主分支仍需本地 `GO` 回执。 |
 
-GitHub PR 模式会写入 `.github/workflows/the-guard-review.yml`，需要 `THE_GUARD_APP_ID` 与 `THE_GUARD_PRIVATE_KEY` 仓库密钥。
+GitHub PR 模式会写入 `.github/workflows/the-guard-review.yml`（含 `checks: write` 与 `pull-requests: write`），需要 `THE_GUARD_APP_ID` 与 `THE_GUARD_PRIVATE_KEY` 仓库密钥。`--github-pr` 默认发布静默的 **GitHub Check Run**（`check-run`，携带行内 annotations 与完整 findings，避免频繁触发 PR 审查邮件），要求 GitHub App 或 Actions Token 具备 `checks: write` 权限；如需切回 PR 评论模式，可在 `.guard/config.json` 配置 `review.github_publish_mode: "pr-review"` 或显式传 `--github-publish-mode pr-review`。
 
 自定义 `pre-push` 钩子应先用 `git rev-parse --show-toplevel` 解析工作区根目录，再清除
 `GIT_DIR`、`GIT_WORK_TREE` 等继承的 [Git 仓库定位变量](src/the_guard/git_helpers.py)。调用全局
@@ -307,6 +307,7 @@ guard review check-push
 ```
 
 可选的 `review.integration_mode` 取值为 `local-hooks`、`github-pr` 或 `both`，决定 `guard init` 记录的合入边界以及 `pre-push` 门禁的执行方式。
+可选的 `review.github_publish_mode` 取值为 `check-run`（默认，静默发布 GitHub Check Run，需 `checks: write` 权限）或 `pr-review`（显式发布 PR 评论）；命令行 `--github-publish-mode` 优先于配置文件。
 
 策略清单嵌在 `AGENTS.md` 的 `<!-- the-guard-policy:start -->` 与 `<!-- the-guard-policy:end -->` 之间：
 
@@ -383,12 +384,12 @@ Python AST 与 JS/TS 字面量导入共用模块解析，覆盖相对路径、�
 | 命令 | 用途 |
 | --- | --- |
 | `guard init` | 初始化策略清单与规则文档（`--preset core\|full`、`--with-hooks`、`--with-github-workflow`、`--integration-mode`、`--rules-dir`、`--manifest-file`）。 |
-| `guard check` | 校验策略清单并对变更文件运行确定性拓扑检查（`--policy-only`、`--base`、`--file`、`--json`）。 |
+| `guard check` | 校验策略清单并对变更文件运行确定性拓扑检查（`--policy-only`、`--base`、`--file`、`--github-pr`、`--github-publish-mode`、`--json`）。 |
 | `guard topology sync` / `check` / `audit` | 安全刷新模块清单、检查变更范围，或审计整个仓库。 |
 | `guard distill` | 输出模块清单、工具链信号与代码样本，供 Agent 提炼项目专属架构规则。 |
-| `guard review` / `guard review run` | 对已提交变更执行独立 Agent 架构审查（`--provider`、`--force`、`--note`）。 |
+| `guard review` / `guard review run` | 对已提交变更执行独立 Agent 架构审查（`--provider`、`--force`、`--note`、`--github-pr`、`--github-publish-mode`）。 |
 | `guard check-push` | 校验当前 `HEAD` 是否具备有效 `GO` 审查回执或属于免审范围（普通文档或纯锁文件变更）。 |
-| `guard review publish-github` | 从 JSON 输入发布可归因的 GitHub PR 审查（`--pr`、`--input-json`、`--dry-run`、`--json`）。 |
+| `guard review publish-github` | 从 JSON 输入发布可归因的 GitHub Check Run 或 PR 审查（`--pr`、`--input-json`、`--github-publish-mode`、`--dry-run`、`--json`）。 |
 | `guard probe` | 探测并配置本机可用的审查 Agent CLI（`--priority-order`、`--provider-model`、`--reprobe`）。 |
 | `guard hook edit-guard` | 供编码 Agent 挂载的编辑后置钩子（从标准输入 JSON 读取 `tool_input.file_path`）。 |
 | `guard hook main-push-gate` | Git `pre-push` 门禁钩子，保护主分支在缺少有效回执时拒绝推送。 |

@@ -15,7 +15,8 @@ Layer ceilings do not grant dependencies: each module has a minimal explicit all
 import package exports or CLI. `config.VERSION` owns the version re-exported by the surface.
 
 
-- `config` validates repository-owned settings and reads committed configuration through `git_helpers`.
+- `config` validates repository-owned settings (including optional `review.integration_mode` and
+  `review.github_publish_mode`) and reads committed configuration through `git_helpers`.
   `policy` validates manifest and rule documents.
 - `finding` defines the static diagnostic contract. `git_helpers` owns Git subprocess repository
   isolation, batched tree and blob reads, safe snapshot reads, stable patch-ID streaming, and
@@ -34,8 +35,9 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
   shared by sync and init without granting observed imports permission. Both validate merged
   configuration before writing. `config` rejects invalid layer edges before these run.
 - `review/contract` owns the explicit review contract version, reviewer types, wire schema and
-  output validation. `review/github` owns GitHub PR target parsing, attributable formatting,
-  and publication. `repository` owns Git scope, patch identity, receipt carry-forward and
+  output validation. `review/github` owns GitHub PR target parsing, publish mode resolution
+  (`check-run` default for silent Check Runs, `pr-review` explicit fallback), attributable
+  formatting, and publication. `repository` owns Git scope, patch identity, receipt carry-forward and
   fsmonitor-isolated snapshot Git calls. `documents` owns review document inventory and binding
   blueprint selection, batching regular-file reads and following safe snapshot symlinks.
   `session` owns scoped contract hashes, rule scope projection and local evidence persistence.

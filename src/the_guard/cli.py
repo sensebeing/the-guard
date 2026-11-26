@@ -17,7 +17,12 @@ from .auto_update import (
     maybe_trigger_background_auto_update,
     self_update,
 )
-from .config import REVIEW_INTEGRATION_MODES, VERSION, load_config
+from .config import (
+    GITHUB_PUBLISH_MODES,
+    REVIEW_INTEGRATION_MODES,
+    VERSION,
+    load_config,
+)
 from .distill import distill
 from .finding import Finding
 from .git_helpers import changed_files, clean_git_env, resolve_changed_base
@@ -25,7 +30,7 @@ from .hooks import edit_guard, main_push_gate
 from .init import initialize
 from .policy import PolicyError, load_policy
 from .review.cli import main as review_main, should_update_after_review
-from .review.github import publish_github_pr_review
+from .review.github import publish_github_pr_review, resolve_github_publish_mode
 from .topology import check_contract_drift, audit_topology, run_topology_guard, sync_topology
 
 
@@ -57,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--policy-only", action="store_true")
             p.add_argument("--github-pr", default=None)
             p.add_argument("--github-dry-run", action="store_true")
+            p.add_argument(
+                "--github-publish-mode",
+                choices=list(GITHUB_PUBLISH_MODES),
+                default=None,
+            )
         if name == "init":
             p.add_argument("--preset", choices=["core", "full"], default="core")
             p.add_argument("--rules-dir", default="docs/standards/rules")
@@ -107,6 +117,7 @@ def _publish_check_github_review(
     base: str,
     findings: Sequence[Finding],
     dry_run: bool,
+    publish_mode: str,
 ) -> dict[str, Any] | None:
     if not target:
         return None
@@ -135,6 +146,7 @@ def _publish_check_github_review(
         findings=findings,
         commit_id=head_sha,
         dry_run=dry_run,
+        publish_mode=publish_mode,
     )
 
 
@@ -282,6 +294,10 @@ def main(argv: list[str] | None = None) -> int:
             base=base,
             findings=findings,
             dry_run=args.github_dry_run if args.command == "check" else False,
+            publish_mode=resolve_github_publish_mode(
+                args.github_publish_mode if args.command == "check" else None,
+                cfg,
+            ),
         )
         if args.json:
             output = {

@@ -19,12 +19,17 @@ from unittest import mock
 
 from the_guard.review.cli import main as review_main
 from the_guard.cli import main as guard_main
+from the_guard.config import GuardConfig
 from the_guard.finding import Finding
 from the_guard.review.github import (
+    DEFAULT_CHECK_RUN_NAME,
+    _MAX_CHECK_RUN_TEXT_CHARS,
+    build_github_check_run_payload,
     build_github_review_payload,
     parse_github_pr_target,
     publish_github_pr_review,
     resolve_github_app_token,
+    resolve_github_publish_mode,
 )
 
 EMPTY_APP_ENV = {
@@ -130,7 +135,22 @@ class GithubReviewTests(unittest.TestCase):
                 "--github-dry-run", "--json",
             ])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(output.getvalue())["github_review"]["delivery_mode"], "dry_run")
+        gh_receipt = json.loads(output.getvalue())["github_review"]
+        self.assertEqual(gh_receipt["delivery_mode"], "dry_run")
+        self.assertEqual(gh_receipt["publish_mode"], "check-run")
+        self.assertEqual(gh_receipt["payload"]["name"], DEFAULT_CHECK_RUN_NAME)
+        self.assertEqual(gh_receipt["payload"]["conclusion"], "success")
+
+        override_output = io.StringIO()
+        with contextlib.redirect_stdout(override_output):
+            code = guard_main([
+                "check", "--policy-only", "--github-pr", "owner/repo#42",
+                "--github-dry-run", "--github-publish-mode", "pr-review", "--json",
+            ])
+        self.assertEqual(code, 0)
+        override_receipt = json.loads(override_output.getvalue())["github_review"]
+        self.assertEqual(override_receipt["publish_mode"], "pr-review")
+        self.assertEqual(override_receipt["payload"]["event"], "COMMENT")
 
     def test_parse_targets_and_rejects_invalid_values(self) -> None:
         self.assertEqual(parse_github_pr_target("owner/repo#42"), ("owner", "repo", 42))
@@ -165,6 +185,10 @@ class GithubReviewTests(unittest.TestCase):
         result = publish_github_pr_review("owner/repo#42", verdict="GO", summary="ok", findings=[], dry_run=True)
         self.assertEqual(result["delivery_mode"], "dry_run")
         self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["publish_mode"], "check-run")
+        self.assertEqual(result["annotation_count"], 0)
+        self.assertEqual(result["payload"]["name"], DEFAULT_CHECK_RUN_NAME)
+        self.assertEqual(result["payload"]["conclusion"], "success")
 
     def test_publish_inline_success(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout='{"id": 9, "html_url": "https://example/review"}', stderr="")
@@ -173,7 +197,9 @@ class GithubReviewTests(unittest.TestCase):
             result = publish_github_pr_review(
                 "owner/repo#42", verdict="NO-GO", summary="needs work",
                 findings=[{"rule_id": "guard.rule", "file": "a.py", "line": 3, "issue": "bad", "required_fix": "fix"}],
+                publish_mode="pr-review",
             )
+        self.assertEqual(result["publish_mode"], "pr-review")
         self.assertEqual(result["delivery_mode"], "inline")
         self.assertEqual(result["review_id"], 9)
         self.assertEqual(result["auth_mode"], "gh_cli")
@@ -190,7 +216,9 @@ class GithubReviewTests(unittest.TestCase):
                     {"rule_id": "guard.rule", "file": "a.py", "line": 3, "issue": "inline issue", "required_fix": "fix"},
                     {"rule_id": "guard.rule", "file": "", "line": 0, "issue": "body issue", "required_fix": "fix"},
                 ],
+                publish_mode="pr-review",
             )
+        self.assertEqual(result["publish_mode"], "pr-review")
         self.assertEqual(result["delivery_mode"], "fallback_body")
         fallback = json.loads(run.call_args_list[1].kwargs["input"])
         self.assertEqual(fallback["comments"], [])
@@ -202,13 +230,19 @@ class GithubReviewTests(unittest.TestCase):
         with mock.patch("the_guard.review.github.resolve_github_app_token", return_value=None), \
                 mock.patch("the_guard.review.github.subprocess.run", return_value=completed):
             with self.assertRaises(RuntimeError):
-                publish_github_pr_review("owner/repo#42", verdict="GO", summary="ok", findings=[])
+                publish_github_pr_review(
+                    "owner/repo#42", verdict="GO", summary="ok", findings=[],
+                    publish_mode="pr-review",
+                )
 
     def test_publish_uses_github_app_token_when_resolved(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout='{"id": 11, "html_url": "https://example/review"}', stderr="")
         with mock.patch("the_guard.review.github.resolve_github_app_token", return_value="ghs_app_token") as resolve, \
                 mock.patch("the_guard.review.github.subprocess.run", return_value=completed) as run:
-            result = publish_github_pr_review("owner/repo#42", verdict="GO", summary="ok", findings=[])
+            result = publish_github_pr_review(
+                "owner/repo#42", verdict="GO", summary="ok", findings=[],
+                publish_mode="pr-review",
+            )
         resolve.assert_called_once_with("owner", "repo")
         self.assertEqual(result["auth_mode"], "github_app")
         self.assertEqual(run.call_args.kwargs["env"], {**os.environ, "GH_TOKEN": "ghs_app_token"})
@@ -221,11 +255,252 @@ class GithubReviewTests(unittest.TestCase):
             result = publish_github_pr_review(
                 "owner/repo#42", verdict="NO-GO", summary="needs work",
                 findings=[{"rule_id": "guard.rule", "file": "a.py", "line": 3, "issue": "bad", "required_fix": "fix"}],
+                publish_mode="pr-review",
             )
         self.assertEqual(result["delivery_mode"], "fallback_body")
         self.assertEqual(result["auth_mode"], "github_app")
         for call in run.call_args_list:
             self.assertEqual(call.kwargs["env"]["GH_TOKEN"], "ghs_app_token")
+
+    def test_check_run_payload_go_and_no_go_with_annotations_and_text(self) -> None:
+        sha = "a" * 40
+        go_payload = build_github_check_run_payload("GO", "all clear", [], commit_id=sha)
+        self.assertEqual(go_payload["name"], DEFAULT_CHECK_RUN_NAME)
+        self.assertEqual(go_payload["head_sha"], sha)
+        self.assertEqual(go_payload["status"], "completed")
+        self.assertEqual(go_payload["conclusion"], "success")
+        self.assertEqual(go_payload["output"]["title"], "The Guard Architecture Review: GO")
+        self.assertIn("<!-- the-guard-review -->", go_payload["output"]["summary"])
+        self.assertNotIn("text", go_payload["output"])
+        self.assertNotIn("annotations", go_payload["output"])
+
+        findings = [
+            {"rule_id": "guard.rule", "file": "src/a.py", "line": 7, "issue": "bad import", "required_fix": "fix import"},
+            Finding("guard.service-boundaries", "src/b.py", 12, "boundary crossing"),
+            {"rule_id": "guard.rule", "file": "src/c.py", "line": 0, "issue": "whole file", "required_fix": "fix file"},
+            {"rule_id": "guard.rule", "file": "", "line": 4, "issue": "no path", "required_fix": "fix path"},
+        ]
+        nogo_payload = build_github_check_run_payload("NO-GO", "blocking issues", findings, commit_id="short")
+        self.assertEqual(nogo_payload["head_sha"], "")
+        self.assertEqual(nogo_payload["conclusion"], "failure")
+        self.assertEqual(len(nogo_payload["output"]["annotations"]), 2)
+        self.assertEqual(
+            nogo_payload["output"]["annotations"][0],
+            {
+                "path": "src/a.py",
+                "start_line": 7,
+                "end_line": 7,
+                "annotation_level": "failure",
+                "title": "[guard.rule]",
+                "message": "bad import\n\nRequired fix: fix import",
+            },
+        )
+        self.assertEqual(
+            nogo_payload["output"]["annotations"][1],
+            {
+                "path": "src/b.py",
+                "start_line": 12,
+                "end_line": 12,
+                "annotation_level": "failure",
+                "title": "[guard.service-boundaries]",
+                "message": "boundary crossing",
+            },
+        )
+        for text_fragment in ("bad import", "boundary crossing", "whole file", "no path"):
+            self.assertIn(text_fragment, nogo_payload["output"]["text"])
+
+    def test_check_run_truncates_oversized_summary_and_text(self) -> None:
+        oversized = "x" * (_MAX_CHECK_RUN_TEXT_CHARS + 500)
+        payload = build_github_check_run_payload(
+            "NO-GO",
+            oversized,
+            [{"rule_id": "guard.rule", "file": "a.py", "line": 1, "issue": oversized, "required_fix": "fix"}],
+            commit_id="a" * 40,
+        )
+        self.assertLessEqual(len(payload["output"]["summary"]), _MAX_CHECK_RUN_TEXT_CHARS)
+        self.assertLessEqual(len(payload["output"]["text"]), _MAX_CHECK_RUN_TEXT_CHARS)
+
+    def test_check_run_publish_success_and_batches_over_50_annotations(self) -> None:
+        sha = "b" * 40
+        findings = [
+            {"rule_id": "guard.rule", "file": f"src/f{i}.py", "line": i + 1, "issue": f"issue {i}", "required_fix": "fix"}
+            for i in range(120)
+        ]
+        post_resp = subprocess.CompletedProcess([], 0, stdout='{"id": 501, "html_url": "https://example/runs/501"}', stderr="")
+        patch1 = subprocess.CompletedProcess([], 0, stdout='{"id": 501, "html_url": "https://example/runs/501"}', stderr="")
+        patch2 = subprocess.CompletedProcess([], 0, stdout='{"id": 501, "html_url": "https://example/runs/501"}', stderr="")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value="ghs_app_token") as resolve, \
+                mock.patch("the_guard.review.github.subprocess.run", side_effect=[post_resp, patch1, patch2]) as run:
+            result = publish_github_pr_review(
+                "owner/repo#42", verdict="NO-GO", summary="many findings",
+                findings=findings, commit_id=sha,
+            )
+        resolve.assert_called_once_with("owner", "repo")
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["publish_mode"], "check-run")
+        self.assertEqual(result["delivery_mode"], "check_run")
+        self.assertEqual(result["auth_mode"], "github_app")
+        self.assertEqual(result["check_run_id"], 501)
+        self.assertEqual(result["html_url"], "https://example/runs/501")
+        self.assertEqual(result["annotation_count"], 120)
+        self.assertEqual(run.call_count, 3)
+
+        first_cmd = run.call_args_list[0].args[0]
+        self.assertEqual(first_cmd, ["gh", "api", "/repos/owner/repo/check-runs", "--method", "POST", "--input", "-"])
+        first_body = json.loads(run.call_args_list[0].kwargs["input"])
+        self.assertEqual(first_body["head_sha"], sha)
+        self.assertEqual(len(first_body["output"]["annotations"]), 50)
+        self.assertIn("issue 119", first_body["output"]["text"])
+
+        for idx, expected_count in ((1, 50), (2, 20)):
+            patch_cmd = run.call_args_list[idx].args[0]
+            self.assertEqual(
+                patch_cmd,
+                ["gh", "api", "/repos/owner/repo/check-runs/501", "--method", "PATCH", "--input", "-"],
+            )
+            patch_body = json.loads(run.call_args_list[idx].kwargs["input"])
+            self.assertEqual(patch_body["name"], DEFAULT_CHECK_RUN_NAME)
+            self.assertEqual(len(patch_body["output"]["annotations"]), expected_count)
+            self.assertIn("issue 119", patch_body["output"]["text"])
+            self.assertEqual(run.call_args_list[idx].kwargs["env"]["GH_TOKEN"], "ghs_app_token")
+
+    def test_check_run_422_annotation_fallback_and_empty_annotations_fail_closed(self) -> None:
+        sha = "c" * 40
+        first = subprocess.CompletedProcess([], 1, stdout="", stderr="422 Unprocessable Entity: invalid annotation line")
+        second = subprocess.CompletedProcess([], 0, stdout='{"id": 601, "html_url": "https://example/runs/601"}', stderr="")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value="ghs_app_token"), \
+                mock.patch("the_guard.review.github.subprocess.run", side_effect=[first, second]) as run:
+            result = publish_github_pr_review(
+                "owner/repo#42", verdict="NO-GO", summary="needs work",
+                findings=[{"rule_id": "guard.rule", "file": "a.py", "line": 999, "issue": "off-diff issue", "required_fix": "fix"}],
+                commit_id=sha,
+            )
+        self.assertEqual(result["delivery_mode"], "check_run_summary")
+        self.assertEqual(result["annotation_count"], 0)
+        self.assertEqual(result["check_run_id"], 601)
+        retry_body = json.loads(run.call_args_list[1].kwargs["input"])
+        self.assertNotIn("annotations", retry_body["output"])
+        self.assertIn("off-diff issue", retry_body["output"]["text"])
+
+        unpushed_422 = subprocess.CompletedProcess([], 1, stdout="", stderr="422 Unprocessable Entity: No commit found for SHA")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value="ghs_app_token"), \
+                mock.patch("the_guard.review.github.subprocess.run", return_value=unpushed_422) as run:
+            with self.assertRaisesRegex(RuntimeError, "No commit found for SHA"):
+                publish_github_pr_review(
+                    "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=sha,
+                )
+        self.assertEqual(run.call_count, 1)
+
+    def test_check_run_403_raises_explicit_guidance_and_never_falls_back_to_pr_review(self) -> None:
+        forbidden = subprocess.CompletedProcess([], 1, stdout="", stderr="gh: Resource not accessible by integration (HTTP 403)")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value="ghs_app_token"), \
+                mock.patch("the_guard.review.github.subprocess.run", return_value=forbidden) as run:
+            with self.assertRaises(RuntimeError) as app_err:
+                publish_github_pr_review(
+                    "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id="d" * 40,
+                )
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("Checks: Read and write", str(app_err.exception))
+        self.assertIn("--github-publish-mode pr-review", str(app_err.exception))
+
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value=None), \
+                mock.patch("the_guard.review.github.subprocess.run", return_value=forbidden) as run:
+            with self.assertRaises(RuntimeError) as cli_err:
+                publish_github_pr_review(
+                    "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id="d" * 40,
+                )
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("personal access tokens cannot create Check Runs", str(cli_err.exception))
+        self.assertIn("--github-publish-mode pr-review", str(cli_err.exception))
+
+    def test_check_run_resolves_pr_head_sha_when_commit_id_omitted(self) -> None:
+        resolved_sha = "e" * 40
+        pr_lookup = subprocess.CompletedProcess([], 0, stdout=f"{resolved_sha}\n", stderr="")
+        post_resp = subprocess.CompletedProcess([], 0, stdout='{"id": 701, "html_url": "https://example/runs/701"}', stderr="")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value="ghs_app_token"), \
+                mock.patch("the_guard.review.github.subprocess.run", side_effect=[pr_lookup, post_resp]) as run:
+            result = publish_github_pr_review(
+                "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=None,
+            )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["check_run_id"], 701)
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            ["gh", "api", "/repos/owner/repo/pulls/42", "--jq", ".head.sha"],
+        )
+        self.assertEqual(run.call_args_list[0].kwargs["env"]["GH_TOKEN"], "ghs_app_token")
+        posted = json.loads(run.call_args_list[1].kwargs["input"])
+        self.assertEqual(posted["head_sha"], resolved_sha)
+
+        bad_lookup = subprocess.CompletedProcess([], 0, stdout="not-a-sha\n", stderr="")
+        with mock.patch("the_guard.review.github.resolve_github_app_token", return_value=None), \
+                mock.patch("the_guard.review.github.subprocess.run", return_value=bad_lookup) as run:
+            with self.assertRaisesRegex(RuntimeError, "invalid head SHA"):
+                publish_github_pr_review(
+                    "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=None,
+                )
+        self.assertEqual(run.call_count, 1)
+
+        with mock.patch("the_guard.review.github.subprocess.run") as run:
+            dry = publish_github_pr_review(
+                "owner/repo#42", verdict="GO", summary="ok", findings=[], commit_id=None, dry_run=True,
+            )
+        self.assertEqual(dry["delivery_mode"], "dry_run")
+        run.assert_not_called()
+
+    def test_resolve_github_publish_mode_precedence_and_validation(self) -> None:
+        self.assertEqual(resolve_github_publish_mode(None, None), "check-run")
+        self.assertEqual(resolve_github_publish_mode(None, GuardConfig()), "check-run")
+        self.assertEqual(
+            resolve_github_publish_mode(None, GuardConfig(review={"github_publish_mode": "pr-review"})),
+            "pr-review",
+        )
+        self.assertEqual(
+            resolve_github_publish_mode("check-run", GuardConfig(review={"github_publish_mode": "pr-review"})),
+            "check-run",
+        )
+        self.assertEqual(
+            resolve_github_publish_mode("pr-review", GuardConfig(review={"github_publish_mode": "check-run"})),
+            "pr-review",
+        )
+        with self.assertRaises(ValueError):
+            resolve_github_publish_mode("invalid", GuardConfig())
+        with self.assertRaises(ValueError):
+            publish_github_pr_review(
+                "owner/repo#42", verdict="GO", summary="ok", findings=[], dry_run=True, publish_mode="invalid",
+            )
+
+    def test_cli_publish_github_honors_config_and_cli_publish_mode(self) -> None:
+        payload = {
+            "verdict": "GO",
+            "summary": "configured mode",
+            "blocking_findings": [],
+            "reviewed_head_sha": "f" * 40,
+        }
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "review.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            cfg = GuardConfig(review={"github_publish_mode": "pr-review"})
+
+            out_from_cfg = io.StringIO()
+            with mock.patch("the_guard.review.cli.load_config", return_value=cfg), \
+                    contextlib.redirect_stdout(out_from_cfg):
+                code = review_main([
+                    "publish-github", "--pr", "sensebeing/the-guard#1",
+                    "--input-json", str(path), "--dry-run", "--json",
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out_from_cfg.getvalue())["publish_mode"], "pr-review")
+
+            out_from_cli = io.StringIO()
+            with mock.patch("the_guard.review.cli.load_config", return_value=cfg), \
+                    contextlib.redirect_stdout(out_from_cli):
+                code = review_main([
+                    "publish-github", "--pr", "sensebeing/the-guard#1",
+                    "--input-json", str(path), "--dry-run", "--github-publish-mode", "check-run", "--json",
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out_from_cli.getvalue())["publish_mode"], "check-run")
 
     def test_resolve_github_app_token_from_config_file(self) -> None:
         signing = subprocess.CompletedProcess([], 0, stdout=b"rsa-signature", stderr=b"")
