@@ -14,7 +14,7 @@ from subprocess import CalledProcessError
 from typing import Any
 
 from ..config import GuardConfig, load_config
-from ..policy import Policy, load_policy
+from ..policy import Policy, Rule, load_policy
 from .contract import (
     DEFAULT_INCREMENTAL_DIFF_MAX_CHARS,
     MAX_REVIEWER_NOTE_CHARS,
@@ -52,6 +52,7 @@ from .session import (
     ReviewSessionState,
     _rule_entries,
     _snapshot_document_bodies,
+    applicable_policy_rules,
     rule_applies_to_modules,
     scoped_topology_rules,
 )
@@ -132,7 +133,8 @@ already exists nearby. Ground the boundary in the repository's declared owner co
 
 ## High-Signal Blocking Only
 Block concrete violations of configured rules or owner contracts with precise code evidence.
-Do not block style preferences, hypothetical defenses, or already-correct implementations.
+- Hard-blocking defects: security/auth/tenancy/isolation breaks; data corruption, loss, or concurrency races; API, schema, or persistence contract breaks; concrete declared architecture, single-source-of-truth, or layer-boundary violations (such as dual writes, parallel state machines, upward/adapter coupling, incomplete required retirements, or silent fallbacks fabricating outcomes); and broken or false-passing tests.
+- Non-blocking suggestions (never emit in `blocking_findings`): naming/style preferences, hypothetical defenses without a concrete reachable failure, marginal micro-optimizations without demonstrated hot-path impact, speculative rollout/operational choreography not required by an explicit repository contract or concrete locking/corruption hazard, and already-correct implementations.
 Preserve authentication, tenancy, authorization, idempotency, and concurrency protections.
 Authorized simplification with equivalent protection is not a defect merely because it
 removes a historical check. Explain the invariant and causal impact of every finding.
@@ -160,9 +162,11 @@ def _sanitize_reviewer_note(note: str) -> str:
     )
 
 
-def _render_policy_sections(policy: Policy) -> list[str]:
+def _render_policy_sections(
+    policy: Policy, rules: Sequence[Rule] | None = None,
+) -> list[str]:
     sections = ["\n## Blocking policy (authoritative manifest and rule details)"]
-    for rule in policy.rules:
+    for rule in (policy.rules if rules is None else rules):
         sections.append(
             f"### {rule.id} [{', '.join(rule.scope)}]\n{rule.summary}\n{rule.detail_body}"
         )
@@ -1007,7 +1011,11 @@ def build_review_prompt(
             snapshot_context.unbound,
             _policy_rule(config.rule_id_prefix, allowed_rule_ids, "test-case-quality", "the applicable test rule"),
         ))
-    sections.extend(_render_policy_sections(policy))
+    applicable_rules = applicable_policy_rules(
+        policy, scope, config, snapshot_context.touched,
+        repo_root=repo_root, revision=scope.head_sha,
+    )
+    sections.extend(_render_policy_sections(policy, applicable_rules))
     if prior_session:
         sections.extend(
             _render_prior_findings_section(
@@ -1052,11 +1060,12 @@ def _incremental_context_delta(
     inc_scope: IncrementalReviewScope | None,
     *,
     config: GuardConfig,
+    policy: Policy,
     receipt_contract_changed: bool,
 ) -> list[str]:
     budget = _DocumentBudget()
     if receipt_contract_changed:
-        _render_module_context_delta(context, session, inc_scope, budget, config)
+        _render_module_context_delta(context, session, inc_scope, budget, config, policy)
 
     prior_head = session.last_head_sha
     head = context.scope.head_sha
@@ -1121,6 +1130,7 @@ def _render_module_context_delta(
     inc_scope: IncrementalReviewScope | None,
     budget: _DocumentBudget,
     current_config: GuardConfig,
+    current_policy: Policy,
 ) -> None:
     repo_root = context.repo_root
     prior_head = session.last_head_sha
@@ -1130,6 +1140,7 @@ def _render_module_context_delta(
     }
     try:
         previous_scope, prior_config = previous_review_scope(repo_root, session)
+        prior_policy = load_policy(repo_root, revision=prior_head, config=prior_config)
         prior_touched, _, _ = resolve_scope_modules(repo_root, previous_scope, prior_config)
         prior_modules = {module["path"]: module for module in prior_config.topology.get("modules", ())}
         common_modules = prior_touched & context.touched
@@ -1142,8 +1153,30 @@ def _render_module_context_delta(
         doc_sources = {context.documents[p].source_path for p in (*current_docs, *current_blueprints) if p in context.documents}
         prior_bodies = _snapshot_document_bodies(repo_root, prior_paths | blueprint_paths | doc_sources, prior_head)
         current_bodies = _snapshot_document_bodies(repo_root, (prior_paths | blueprint_paths) - context.documents.keys(), head)
+        curr_applicable_rules = applicable_policy_rules(
+            current_policy, context.scope, current_config, context.touched,
+            repo_root=repo_root, revision=head,
+        )
     except (OSError, RuntimeError, ValueError, CalledProcessError) as exc:
         raise _PriorModuleContextUnavailable(str(exc)) from exc
+
+    prior_rules_by_id = {rule.id: rule for rule in prior_policy.rules}
+    policy_rule_changes: list[tuple[Rule, str]] = []
+    for rule in curr_applicable_rules:
+        prior_rule = prior_rules_by_id.get(rule.id)
+        if prior_rule is None:
+            raise _PriorModuleContextUnavailable(
+                f"Applicable policy rule {rule.id} was absent at prior head"
+            )
+        if prior_rule.detail_body != rule.detail_body:
+            diff = _resolved_document_diff(
+                rule.details, prior_head, prior_rule.detail_body, head, rule.detail_body,
+            )
+            if len(diff) > 8_000:
+                raise _PriorModuleContextUnavailable(
+                    f"Policy rule diff for {rule.id} exceeds 8000 chars"
+                )
+            policy_rule_changes.append((rule, diff))
 
     new_modules = context.touched - prior_touched
     prior_architecture = architecture_document_paths(prior_config)
@@ -1204,14 +1237,16 @@ def _render_module_context_delta(
             {path for _, path in current_bindings}, current_docs, prior_architecture, changed_docs,
         )
     )
-    if not (
+    has_module_changes = bool(
         new_modules or new_docs or changed_docs or removed_bindings or added_bindings
         or changed_blueprints or role_changes
-    ):
+    )
+    if not (has_module_changes or policy_rule_changes):
         return
 
     omitted_before = budget.omitted
-    budget.append("## Updated Module Scope & Boundary Context")
+    if has_module_changes:
+        budget.append("## Updated Module Scope & Boundary Context")
     if removed_bindings or added_bindings:
         budget.append("\n".join([
             "Declared `boundary_docs` changes by module",
@@ -1301,6 +1336,18 @@ def _render_module_context_delta(
         ]))
         if budget.omitted != omitted_before:
             raise _PriorModuleContextUnavailable("Module role changes exceed the document budget")
+    if policy_rule_changes:
+        omitted_before_policy = budget.omitted
+        budget.append(
+            "## Updated Policy Rules\n"
+            "Re-verify the reviewed branch against the updated policy rule requirements below."
+        )
+        for rule, diff in policy_rule_changes:
+            budget.append(
+                f"### {rule.id} (`{rule.details}`)\n```diff\n{diff.rstrip()}\n```"
+            )
+        if budget.omitted != omitted_before_policy:
+            raise _PriorModuleContextUnavailable("Policy rule changes exceed the document budget")
 
 
 def build_incremental_review_prompt(
@@ -1311,12 +1358,15 @@ def build_incremental_review_prompt(
     *,
     snapshot_context: _ReviewSnapshotContext | None = None,
     receipt_contract_changed: bool = True,
+    same_branch_patch: bool = False,
     reviewer_note: str = "",
     policy: Policy | None = None,
     config: GuardConfig | None = None,
 ) -> str:
     boundary_refresh = inc_scope is None and _is_boundary_refresh_round(
-        repo_root, scope, session, receipt_contract_changed=receipt_contract_changed,
+        repo_root, scope, session,
+        receipt_contract_changed=receipt_contract_changed,
+        same_branch_patch=same_branch_patch,
     )
     if inc_scope is None and not boundary_refresh and not _is_unchanged_rebuttal_round(
         scope, session, reviewer_note
@@ -1341,6 +1391,17 @@ def build_incremental_review_prompt(
         f"with changed responsibilities. Apply {boundary_rule} or {ownership_rule}. "
         + _BATCH_READ_INSTRUCTIONS,
         _ZERO_BASED_RECONCILIATION,
+        "## High-Signal Blocking & Anti-Escalation\n"
+        "Emit `blocking_findings` only for concrete hard-blocking defects (security/auth/tenancy/isolation breaks, "
+        "data corruption/loss/concurrency races, API/schema/persistence contract breaks, concrete declared "
+        "architecture/single-source-of-truth/layer-boundary violations such as dual writes, parallel state machines, "
+        "upward/adapter coupling, incomplete required retirements, or silent fallbacks fabricating outcomes, and "
+        "broken/false-passing tests). Never block on naming/style preferences, hypothetical defenses without concrete "
+        "reachable failure, marginal micro-optimizations without demonstrated hot-path impact, or speculative "
+        "rollout/operational choreography not required by an explicit repo contract or concrete locking/corruption hazard. "
+        "Anti-Escalation: do not escalate a fix that satisfies the prior finding's invariant into secondary hardening, "
+        "follow-up refactors, or speculative operational choreography; `introduced_by_delta` is strictly for concrete "
+        "regressions or incomplete fixes directly caused by the delta.",
         "## Incremental Session Continuation",
         f"Continue round {session.round_count + 1}. Verify the implementation at HEAD {scope.head_sha}.",
         (
@@ -1350,6 +1411,15 @@ def build_incremental_review_prompt(
             "causality, including when surviving code outside the changed lines shows that the delta "
             "leaves a required consolidation incomplete."
         ),
+    ]
+    if session.last_verdict == "GO":
+        sections.append(
+            "## Prior-GO Scope Guardrail\n"
+            "The prior round already reached `GO` (0 blocking findings). Treat untouched previously approved "
+            "code outside the verified delta and updated contract context as settled. Only block concrete "
+            "defects introduced by the conflict resolution/delta or newly violated by the updated contract context."
+        )
+    sections.extend([
         *_render_prior_findings_section(
             session, scope, inc_scope, reviewer_note=reviewer_note, boundary_refresh=boundary_refresh,
         ),
@@ -1357,7 +1427,7 @@ def build_incremental_review_prompt(
         "Unchanged root instructions, policy, topology, boundary documents and task blueprints carry forward "
         "from this session. After native context compaction, recover the relevant snapshot material "
         f"with `git show {scope.head_sha}:<path>` or use the recorded revision for historical evidence.",
-    ]
+    ])
     if inc_scope is not None or boundary_refresh:
         snapshot_context = snapshot_context or _snapshot_context(
             repo_root,
@@ -1371,6 +1441,7 @@ def build_incremental_review_prompt(
         context_delta = _incremental_context_delta(
             snapshot_context, session, inc_scope,
             config=config,
+            policy=policy,
             receipt_contract_changed=receipt_contract_changed,
         )
         if boundary_refresh and not context_delta:

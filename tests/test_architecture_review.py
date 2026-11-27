@@ -3483,3 +3483,55 @@ class ArchitectureReviewGateTests(ArchitectureReviewTestCase):
             {"type": "user", "message": {"content": [{"type": "tool_result"}]}}
         )
         self.assertIsNone(_summarize_stream_line(user_noise_ev))
+
+    def test_prompts_include_high_signal_blocking_anti_escalation_and_prior_go_guardrails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, _ = self._init_repo(Path(td))
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/main.py").write_text("VALUE = 1\n", encoding="utf-8")
+            _git(repo, "add", "services/a/main.py")
+            _git(repo, "commit", "-m", "round 1")
+
+            r1 = run_architecture_review(
+                repo,
+                reviewer_fn=lambda _p: {
+                    "verdict": "NO-GO",
+                    "summary": "needs fix",
+                    "blocking_findings": [{
+                        "rule_id": "guard.single-source-of-truth",
+                        "file": "services/a/main.py",
+                        "line": 1,
+                        "issue": "wrong constant",
+                        "required_fix": "set VALUE = 2",
+                    }],
+                },
+            )
+            full_prompt = build_review_prompt(repo, collect_review_scope(repo))
+            self.assertIn("Hard-blocking defects", full_prompt)
+            self.assertIn("Non-blocking suggestions", full_prompt)
+
+            nogo_session = load_review_session(repo)
+            assert nogo_session is not None
+            (repo / "services/a/main.py").write_text("VALUE = 2\n", encoding="utf-8")
+            _git(repo, "commit", "-am", "round 2")
+            scope2 = collect_review_scope(repo)
+            delta2 = collect_incremental_scope(repo, scope2, nogo_session)
+            assert delta2 is not None
+
+            nogo_inc_prompt = build_incremental_review_prompt(
+                repo, scope2, nogo_session, delta2, receipt_contract_changed=False
+            )
+            self.assertIn("## High-Signal Blocking & Anti-Escalation", nogo_inc_prompt)
+            self.assertIn("Anti-Escalation:", nogo_inc_prompt)
+            self.assertNotIn("## Prior-GO Scope Guardrail", nogo_inc_prompt)
+
+            go_session = replace(nogo_session, last_verdict="GO", last_blocking_findings=())
+            go_inc_prompt = build_incremental_review_prompt(
+                repo, scope2, go_session, delta2, receipt_contract_changed=False
+            )
+            self.assertIn("## High-Signal Blocking & Anti-Escalation", go_inc_prompt)
+            self.assertIn("## Prior-GO Scope Guardrail", go_inc_prompt)
+            self.assertIn("already reached `GO`", go_inc_prompt)
+            self.assertEqual(r1.verdict, "NO-GO")

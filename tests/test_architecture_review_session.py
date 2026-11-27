@@ -41,7 +41,7 @@ from the_guard.review.repository import (
 from the_guard.review.session import ReviewResult, ReviewRunLogger
 from the_guard.config import GuardConfig, load_config
 from the_guard.hooks import main_push_gate
-from the_guard.policy import load_policy
+from the_guard.policy import Policy, Rule, load_policy
 from architecture_review_support import (
     ArchitectureReviewTestCase,
     _git,
@@ -2589,3 +2589,656 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
             self.assertEqual(len(failed), 1)
             self.assertEqual(failed[0]["mode"], "incremental")
             self.assertEqual(failed[0]["full_review_reason"], "")
+
+    def _make_fake_claude_env(
+        self, tmp: Path, *, first_verdict: str = "GO"
+    ) -> tuple[dict[str, str], Path]:
+        fake_home = tmp / "home"
+        (fake_home / ".claude").mkdir(parents=True, exist_ok=True)
+        fake_bin = fake_home / ".local/bin"
+        calls_file = tmp / "claude_calls.jsonl"
+        _write_exec(
+            fake_bin / "claude",
+            "#!/usr/bin/env python3\n"
+            "import json, os, subprocess, sys\n"
+            "if '--version' in sys.argv:\n"
+            "    print('2.0.0')\n"
+            "    raise SystemExit(0)\n"
+            "args = sys.argv[1:]\n"
+            "prompt = sys.stdin.read()\n"
+            "resume_id = args[args.index('--resume') + 1] if '--resume' in args else ''\n"
+            "calls_path = os.environ['CLAUDE_CALLS_FILE']\n"
+            "with open(calls_path, 'a', encoding='utf-8') as f:\n"
+            "    f.write(json.dumps({'resume_id': resume_id, 'prompt': prompt}) + '\\n')\n"
+            "if os.environ.get('FAIL_IF_INVOKED') == '1':\n"
+            "    raise SystemExit('provider should not be invoked')\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': resume_id or 'slice-session'}))\n"
+            "verdict = os.environ.get('NEXT_VERDICT', 'GO')\n"
+            "findings = [] if verdict == 'GO' else [{\n"
+            "    'rule_id': 'guard.single-source-of-truth', 'file': 'services/x/main.py', 'line': 1,\n"
+            "    'issue': 'needs fix', 'required_fix': 'fix it', 'finding_origin': 'initial_full_scope',\n"
+            "}]\n"
+            "print(json.dumps({'type': 'result', 'result': {'structured_output': {\n"
+            "    'reviewed_head_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n"
+            "    'verdict': verdict, 'summary': 'review complete', 'blocking_findings': findings,\n"
+            "}}}))\n",
+        )
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "HOME": str(fake_home),
+            "THE_GUARD_REVIEW_CONFIG": str(fake_home / ".config/the-guard/review-agent.json"),
+            "THE_GUARD_REVIEW_LOG_DIR": str(tmp / "logs"),
+            "CLAUDE_CALLS_FILE": str(calls_file),
+            "NEXT_VERDICT": first_verdict,
+        }
+        return env, calls_file
+
+    def _init_branch_config_repo(
+        self, tmp: Path, *, first_verdict: str = "GO"
+    ) -> tuple[Path, dict[str, str], Path, ReviewResult]:
+        repo, _ = self._init_repo(tmp)
+        _git(repo, "switch", "main")
+        (repo / ".guard").mkdir()
+        base_config = {
+            "topology": {
+                "layers": {"core": ["core"], "service": ["core", "service"]},
+                "modules": [
+                    {"path": "services/b", "layer": "core", "role": "dependency owner", "dependencies": []},
+                    {"path": "services/c", "layer": "service", "role": "other owner", "dependencies": ["services/b"]},
+                ],
+                "retired_tables": [{"tables": ["c_only"], "scope_prefixes": ["services/c"]}],
+            }
+        }
+        (repo / ".guard/config.json").write_text(json.dumps(base_config, indent=2) + "\n")
+        for mod in ("b", "c"):
+            d = repo / "services" / mod
+            d.mkdir(parents=True)
+            (d / "main.py").write_text("value = 1\n")
+            (d / "CLAUDE.md").write_text(f"{mod} original boundary\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "baseline modules")
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        _git(repo, "switch", "topic")
+        _git(repo, "rebase", "main")
+        x_dir = repo / "services/x"
+        x_dir.mkdir(parents=True)
+        (x_dir / "main.py").write_text("value = 1\n")
+        (x_dir / "CLAUDE.md").write_text("x owner boundary\n")
+        branch_cfg = json.loads((repo / ".guard/config.json").read_text())
+        branch_cfg["topology"]["modules"].append(
+            {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": ["services/b"]}
+        )
+        (repo / ".guard/config.json").write_text(json.dumps(branch_cfg, indent=2) + "\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "add services/x module and declaration")
+
+        env, calls_file = self._make_fake_claude_env(tmp, first_verdict=first_verdict)
+        first = run_architecture_review(repo, env=env)
+        self.assertEqual((first.mode, first.verdict, first.session_id), ("full", first_verdict, "slice-session"))
+        return repo, env, calls_file, first
+
+    def _rebase_topic_resolving_config(self, repo: Path, merged_config: dict) -> None:
+        proc = subprocess.run(
+            ["git", "rebase", "main"], cwd=repo, capture_output=True, text=True, check=False,
+        )
+        if proc.returncode != 0:
+            (repo / ".guard/config.json").write_text(json.dumps(merged_config, indent=2) + "\n")
+            _git(repo, "add", ".guard/config.json")
+            env = {**os.environ, "GIT_EDITOR": "true"}
+            subprocess.run(
+                ["git", "rebase", "--continue"], cwd=repo, env=env, check=True, capture_output=True, text=True,
+            )
+
+    def test_branch_config_edit_rebase_ignores_unrelated_main_changes_and_comma_shift(self) -> None:
+        for verdict in ("GO", "NO-GO"):
+            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as td:
+                repo, env, calls_file, first = self._init_branch_config_repo(Path(td), first_verdict=verdict)
+                prior = load_review_session(repo)
+                assert prior is not None
+
+                _git(repo, "switch", "main")
+                cfg = json.loads((repo / ".guard/config.json").read_text())
+                cfg["topology"]["modules"][1]["role"] = "other owner updated upstream"
+                cfg["topology"]["modules"].append(
+                    {"path": "services/z", "layer": "service", "role": "unrelated z owner", "dependencies": []}
+                )
+                cfg["topology"]["retired_tables"].append(
+                    {"tables": ["z_retired"], "scope_prefixes": ["services/z"]}
+                )
+                (repo / "services/z").mkdir(parents=True)
+                (repo / "services/z/main.py").write_text("value = 1\n")
+                (repo / "services/c/CLAUDE.md").write_text("c boundary updated upstream\n")
+                (repo / ".guard/config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", "unrelated upstream config and boundary changes")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+                _git(repo, "switch", "topic")
+                merged_cfg = json.loads(json.dumps(cfg))
+                merged_cfg["topology"]["modules"].append(
+                    {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": ["services/b"]}
+                )
+                self._rebase_topic_resolving_config(repo, merged_cfg)
+
+                rebased = collect_review_scope(repo)
+                self.assertNotEqual(rebased.patch_digest, first.patch_digest)
+                self.assertFalse(
+                    _is_same_per_file_branch_patch(
+                        repo,
+                        old_range=f"{first.merge_base}..{first.head_sha}",
+                        new_range=f"{rebased.merge_base}..{rebased.head_sha}",
+                        path=".guard/config.json",
+                    )
+                )
+                current_digest = compute_review_contract_digest(
+                    load_policy(repo, revision=rebased.head_sha),
+                    load_config(repo, revision=rebased.head_sha),
+                    repo_root=repo,
+                    revision=rebased.head_sha,
+                    scope=rebased,
+                )
+                self.assertEqual(current_digest, prior.contract_digest)
+
+                if verdict == "GO":
+                    carried = resolve_or_carry_forward_receipt(repo, rebased, persist=False)
+                    self.assertIsNotNone(carried)
+                    reused = run_architecture_review(repo, env={**env, "FAIL_IF_INVOKED": "1"})
+                    self.assertEqual((reused.verdict, reused.mode), ("GO", "carried-forward"))
+                    self.assertEqual(len(calls_file.read_text().splitlines()), 1)
+                else:
+                    (repo / "services/x/main.py").write_text("value = 2\n")
+                    _git(repo, "commit", "-am", "fix finding in services/x")
+                    second = run_architecture_review(repo, env={**env, "NEXT_VERDICT": "GO"})
+                    meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                    self.assertEqual((second.mode, second.verdict, meta["full_review_reason"]), ("incremental", "GO", ""))
+                    self.assertEqual(second.session_id, first.session_id)
+                    prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                    self.assertIn("Incremental files (1): `services/x/main.py`", prompt)
+                    self.assertNotIn("`.guard/config.json`", prompt.split("Incremental files", 1)[1].splitlines()[0])
+
+    def test_branch_config_edit_rebase_resumes_on_related_prose_and_restarts_on_structural(self) -> None:
+        scenarios = (
+            ("neighbour_role_comma_shift", "incremental", ""),
+            ("touched_boundary_doc_comma_shift", "incremental", ""),
+            ("neighbour_layer", "full", "contract_changed"),
+            ("neighbour_dependencies", "full", "contract_changed"),
+            ("neighbour_retired", "full", "contract_changed"),
+            ("add_downstream", "full", "contract_changed"),
+        )
+        for scenario, expected_mode, expected_reason in scenarios:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as td:
+                repo, env, _, first = self._init_branch_config_repo(Path(td), first_verdict="GO")
+                if scenario == "touched_boundary_doc_comma_shift":
+                    # Move services/x onto main first so main can update its boundary_docs.
+                    _git(repo, "switch", "main")
+                    cfg_main = json.loads((repo / ".guard/config.json").read_text())
+                    cfg_main["topology"]["modules"].append(
+                        {"path": "services/a", "layer": "service", "role": "a owner", "dependencies": ["services/b"]}
+                    )
+                    (repo / "services/a").mkdir(parents=True)
+                    (repo / "services/a/main.py").write_text("value = 1\n")
+                    (repo / ".guard/config.json").write_text(json.dumps(cfg_main, indent=2) + "\n")
+                    _git(repo, "add", ".")
+                    _git(repo, "commit", "-m", "add services/a on main")
+                    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                    _git(repo, "switch", "topic")
+                    merged = json.loads(json.dumps(cfg_main))
+                    merged["topology"]["modules"].append(
+                        {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": ["services/b"]}
+                    )
+                    self._rebase_topic_resolving_config(repo, merged)
+                    (repo / "services/a/main.py").write_text("value = 2\n")
+                    _git(repo, "commit", "-am", "touch services/a too")
+                    first = run_architecture_review(repo, env=env, force=True)
+
+                _git(repo, "switch", "main")
+                cfg = json.loads((repo / ".guard/config.json").read_text())
+                if scenario == "neighbour_role_comma_shift":
+                    cfg["topology"]["modules"][0]["role"] = "refined dependency owner"
+                    cfg["topology"]["modules"].append(
+                        {"path": "services/z", "layer": "service", "role": "z owner", "dependencies": []}
+                    )
+                    (repo / "services/z").mkdir(parents=True)
+                    (repo / "services/z/main.py").write_text("value = 1\n")
+                elif scenario == "touched_boundary_doc_comma_shift":
+                    (repo / "docs/a-extra.md").write_text("Extra boundary rule for a.\n")
+                    next(m for m in cfg["topology"]["modules"] if m["path"] == "services/a")["boundary_docs"] = ["docs/a-extra.md"]
+                    cfg["topology"]["modules"].append(
+                        {"path": "services/z", "layer": "service", "role": "z owner", "dependencies": []}
+                    )
+                    (repo / "services/z").mkdir(parents=True)
+                    (repo / "services/z/main.py").write_text("value = 1\n")
+                elif scenario == "neighbour_layer":
+                    cfg["topology"]["layers"]["infra"] = ["infra"]
+                    cfg["topology"]["layers"]["core"] = ["core", "infra"]
+                    cfg["topology"]["layers"]["service"] = ["core", "service", "infra"]
+                    cfg["topology"]["modules"][0]["layer"] = "infra"
+                elif scenario == "neighbour_dependencies":
+                    cfg["topology"]["modules"].append(
+                        {"path": "services/d", "layer": "core", "role": "d owner", "dependencies": []}
+                    )
+                    (repo / "services/d").mkdir(parents=True)
+                    (repo / "services/d/main.py").write_text("value = 1\n")
+                    cfg["topology"]["modules"][0]["dependencies"] = ["services/d"]
+                elif scenario == "neighbour_retired":
+                    cfg["topology"]["modules"][1]["dependencies"] = []
+                    cfg["topology"]["modules"][0]["retired"] = True
+                elif scenario == "add_downstream":
+                    # Add a module depending on services/x? services/x is on branch, so add one depending on services/b?
+                    # Instead add services/a on main before or make topic touch services/c and main add a caller of services/c.
+                    cfg["topology"]["modules"].append(
+                        {"path": "services/d", "layer": "service", "role": "caller of b", "dependencies": ["services/c"]}
+                    )
+                    (repo / "services/d").mkdir(parents=True)
+                    (repo / "services/d/main.py").write_text("value = 1\n")
+                (repo / ".guard/config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+                _git(repo, "add", ".")
+                _git(repo, "commit", "-m", f"upstream {scenario}")
+                _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+                _git(repo, "switch", "topic")
+                merged_cfg = json.loads(json.dumps(cfg))
+                x_deps = [] if scenario == "neighbour_retired" else ["services/b"]
+                merged_cfg["topology"]["modules"].append(
+                    {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": x_deps}
+                )
+                if scenario == "add_downstream":
+                    # Also touch services/c on branch so services/d is a new downstream neighbour.
+                    merged_cfg["topology"]["modules"][-1]["dependencies"] = ["services/b"]
+                self._rebase_topic_resolving_config(repo, merged_cfg)
+                if scenario == "add_downstream":
+                    # Start clean with services/c touched before main added services/d:
+                    # Re-verify cleanly with a new commit adding downstream caller of services/c.
+                    (repo / "services/c/main.py").write_text("value = 2\n")
+                    _git(repo, "commit", "-am", "touch services/c")
+                    first = run_architecture_review(repo, env=env, force=True)
+                    _git(repo, "switch", "main")
+                    cfg2 = json.loads((repo / ".guard/config.json").read_text())
+                    cfg2["topology"]["modules"].append(
+                        {"path": "services/e", "layer": "service", "role": "new caller", "dependencies": ["services/c"]}
+                    )
+                    (repo / "services/e").mkdir(parents=True)
+                    (repo / "services/e/main.py").write_text("value = 1\n")
+                    (repo / ".guard/config.json").write_text(json.dumps(cfg2, indent=2) + "\n")
+                    _git(repo, "add", ".")
+                    _git(repo, "commit", "-m", "add downstream caller of services/c")
+                    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                    _git(repo, "switch", "topic")
+                    merged2 = json.loads(json.dumps(cfg2))
+                    merged2["topology"]["modules"].append(
+                        {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": ["services/b"]}
+                    )
+                    self._rebase_topic_resolving_config(repo, merged2)
+
+                rebased = collect_review_scope(repo)
+                self.assertIsNone(resolve_or_carry_forward_receipt(repo, rebased))
+                second = run_architecture_review(repo, env=env)
+                meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                self.assertEqual((second.mode, meta["full_review_reason"]), (expected_mode, expected_reason))
+                if expected_mode == "incremental":
+                    self.assertEqual(second.session_id, first.session_id)
+                    prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+                    if scenario == "neighbour_role_comma_shift":
+                        self.assertIn("Declared module role changes", prompt)
+                        self.assertIn("`services/b` (upstream)", prompt)
+                        self.assertIn("Rebased branch patch unchanged", prompt)
+                    else:
+                        self.assertIn("docs/a-extra.md", prompt)
+                        self.assertIn("Extra boundary rule for a.", prompt)
+
+    def test_branch_editing_unrelated_module_or_unowned_rule_fails_closed(self) -> None:
+        for mode in ("same_base", "rebased"):
+            for mutation in ("unrelated_module", "neighbour_module", "remove_unowned_rule"):
+                with self.subTest(mode=mode, mutation=mutation), tempfile.TemporaryDirectory() as td:
+                    repo, env, _, first = self._init_branch_config_repo(Path(td), first_verdict="GO")
+                    prior = load_review_session(repo)
+                    assert prior is not None
+
+                    if mode == "rebased":
+                        _git(repo, "switch", "main")
+                        (repo / "README.md").write_text("# main advanced\n")
+                        _git(repo, "commit", "-am", "advance main")
+                        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                        _git(repo, "switch", "topic")
+                        _git(repo, "rebase", "main")
+
+                    cfg = json.loads((repo / ".guard/config.json").read_text())
+                    if mutation == "unrelated_module":
+                        next(m for m in cfg["topology"]["modules"] if m["path"] == "services/c")["role"] = "tampered c"
+                    elif mutation == "neighbour_module":
+                        next(m for m in cfg["topology"]["modules"] if m["path"] == "services/b")["role"] = "tampered b"
+                    else:
+                        cfg["topology"]["retired_tables"] = []
+                    (repo / ".guard/config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+                    _git(repo, "commit", "-am", f"branch {mutation}")
+
+                    scope = collect_review_scope(repo)
+                    current_digest = compute_review_contract_digest(
+                        load_policy(repo, revision=scope.head_sha),
+                        load_config(repo, revision=scope.head_sha),
+                        repo_root=repo,
+                        revision=scope.head_sha,
+                        scope=scope,
+                    )
+                    self.assertNotEqual(current_digest, prior.contract_digest)
+                    self.assertIsNone(resolve_or_carry_forward_receipt(repo, scope))
+
+                    second = run_architecture_review(repo, env=env)
+                    meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+                    self.assertEqual((second.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+                    self.assertEqual(meta["contract_change_causes"], [".guard/config.json"])
+
+    def test_policy_rule_scope_slicing_and_upstream_rule_detail_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, _ = self._init_repo(tmp)
+            _git(repo, "switch", "main")
+            (repo / ".guard").mkdir()
+            (repo / ".guard/config.json").write_text(json.dumps({
+                "review": {"rule_scope_globs": {"tool": ["**/tools/**"]}},
+                "topology": {
+                    "modules": [
+                        {"path": "services/a", "languages": ["Python"], "role": "backend owner"},
+                    ]
+                },
+            }, indent=2) + "\n")
+            (repo / "AGENTS.md").write_text(
+                "# Root\n\n"
+                "<!-- the-guard-policy:start -->\n"
+                "```yaml\n"
+                "schema: the-guard-policy/v1\n"
+                "rules:\n"
+                "  - id: guard.single-source-of-truth\n"
+                "    severity: block\n"
+                "    scope: [backend]\n"
+                "    summary: One canonical owner.\n"
+                "    details: docs/standards/rules/single-source-of-truth.md\n"
+                "    checker: static-plus-review\n"
+                "  - id: guard.frontend-only\n"
+                "    severity: block\n"
+                "    scope: [frontend]\n"
+                "    summary: Frontend UI rule.\n"
+                "    details: docs/standards/rules/frontend-only.md\n"
+                "    checker: review\n"
+                "  - id: guard.skill-only\n"
+                "    severity: block\n"
+                "    scope: [skill]\n"
+                "    summary: Skill authoring rule.\n"
+                "    details: docs/standards/rules/skill-only.md\n"
+                "    checker: review\n"
+                "  - id: guard.tool-authoring\n"
+                "    severity: block\n"
+                "    scope: [tool]\n"
+                "    summary: Tool authoring rule.\n"
+                "    details: docs/standards/rules/tool-authoring.md\n"
+                "    checker: review\n"
+                "```\n"
+                "<!-- the-guard-policy:end -->\n",
+                encoding="utf-8",
+            )
+            for rid, title, body in (
+                ("guard.frontend-only", "Frontend Only", "FRONTEND_RULE_MARKER"),
+                ("guard.skill-only", "Skill Only", "SKILL_RULE_MARKER"),
+                ("guard.tool-authoring", "Tool Authoring", "TOOL_RULE_MARKER"),
+            ):
+                slug = rid.removeprefix("guard.")
+                (repo / f"docs/standards/rules/{slug}.md").write_text(
+                    f"---\nid: {rid}\ntitle: {title}\nmanifest: AGENTS.md#engineering-quality-policy\n---\n\n{body}\n",
+                    encoding="utf-8",
+                )
+            (repo / "services/a").mkdir(parents=True)
+            (repo / "services/a/main.py").write_text("value = 1\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "configure scoped policy rules")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            (repo / "services/a/main.py").write_text("value = 2\n")
+            _git(repo, "commit", "-am", "backend only change")
+
+            env, _ = self._make_fake_claude_env(tmp, first_verdict="GO")
+            first = run_architecture_review(repo, env=env)
+            self.assertEqual((first.mode, first.verdict), ("full", "GO"))
+            full_prompt = Path(first.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+            self.assertIn("guard.single-source-of-truth", full_prompt)
+            self.assertNotIn("FRONTEND_RULE_MARKER", full_prompt)
+            self.assertNotIn("SKILL_RULE_MARKER", full_prompt)
+            self.assertNotIn("TOOL_RULE_MARKER", full_prompt)
+            self.assertIn("guard.tool-authoring", full_prompt.split("## Output contract", 1)[1])
+            prior = load_review_session(repo)
+            assert prior is not None
+
+            # 1) Upstream edits to out-of-scope rules keep digests unchanged and carry forward GO.
+            _git(repo, "switch", "main")
+            for slug in ("frontend-only", "skill-only", "tool-authoring"):
+                p = repo / f"docs/standards/rules/{slug}.md"
+                p.write_text(p.read_text() + "\nUpdated upstream.\n")
+            _git(repo, "commit", "-am", "update out-of-scope rules upstream")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            rebased = collect_review_scope(repo)
+            cfg = load_config(repo, revision=rebased.head_sha)
+            pol = load_policy(repo, revision=rebased.head_sha, config=cfg)
+            self.assertEqual(
+                compute_review_contract_digest(pol, cfg, repo_root=repo, revision=rebased.head_sha, scope=rebased),
+                prior.contract_digest,
+            )
+            self.assertEqual(
+                session.compute_session_contract_digest(pol, cfg, repo_root=repo, revision=rebased.head_sha, scope=rebased),
+                prior.session_contract_digest,
+            )
+            self.assertEqual(
+                contract_change_causes(repo, rebased, first.head_sha, cfg, pol),
+                ("contract_version_or_legacy",),
+            )
+            carried = run_architecture_review(repo, env={**env, "FAIL_IF_INVOKED": "1"})
+            self.assertEqual((carried.verdict, carried.mode), ("GO", "carried-forward"))
+
+            # 2) Upstream small edit to applicable rule detail resumes incremental with ## Updated Policy Rules.
+            _git(repo, "switch", "main")
+            ssot = repo / "docs/standards/rules/single-source-of-truth.md"
+            ssot.write_text(ssot.read_text() + "\nClarify canonical writer invariant.\n")
+            _git(repo, "commit", "-am", "small upstream edit to applicable rule")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            self.assertIsNone(resolve_or_carry_forward_receipt(repo, collect_review_scope(repo)))
+            refreshed = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(refreshed.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((refreshed.mode, meta["full_review_reason"]), ("incremental", ""))
+            self.assertEqual(refreshed.session_id, first.session_id)
+            inc_prompt = Path(refreshed.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+            self.assertIn("## Updated Policy Rules", inc_prompt)
+            self.assertIn("+Clarify canonical writer invariant.", inc_prompt)
+            self.assertIn("Rebased branch patch unchanged", inc_prompt)
+
+            # 3) Upstream >8,000-char diff on applicable rule fails closed to full with contract_change_causes.
+            _git(repo, "switch", "main")
+            ssot.write_text(ssot.read_text() + ("Expanded normative requirement line.\n" * 300))
+            _git(repo, "commit", "-am", "large upstream edit to applicable rule")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            large_fallback = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(large_fallback.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((large_fallback.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+            self.assertEqual(meta["contract_change_causes"], ["docs/standards/rules/single-source-of-truth.md"])
+
+            # 4) Budget overflow on small upstream rule diff also fails closed to full with contract_change_causes.
+            _git(repo, "switch", "main")
+            ssot.write_text(ssot.read_text() + "\nAnother short clause.\n")
+            _git(repo, "commit", "-am", "short upstream edit for budget test")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            with mock.patch("the_guard.review.prompt.MAX_SNAPSHOT_DOCS_TOTAL_BYTES", 220):
+                budget_fallback = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(budget_fallback.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((budget_fallback.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+            self.assertEqual(meta["contract_change_causes"], ["docs/standards/rules/single-source-of-truth.md"])
+
+            # 5) Branch starts touching a newly matched scope (.tsx) -> session_contract_digest changes -> full.
+            saved_topic_head = _git(repo, "rev-parse", "HEAD")
+            (repo / "services/a/view.tsx").write_text("export const View = () => <div />;\n")
+            _git(repo, "add", "services/a/view.tsx")
+            _git(repo, "commit", "-m", "touch frontend scope")
+            tsx_res = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(tsx_res.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((tsx_res.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+            self.assertIn("FRONTEND_RULE_MARKER", Path(tsx_res.log_path.replace(".events.jsonl", ".prompt.md")).read_text())
+
+            # 6) Branch-authored applicable rule edit & upstream AGENTS.md metadata edit both fail closed.
+            _git(repo, "reset", "--hard", saved_topic_head)
+            run_architecture_review(repo, env=env, force=True)
+            ssot.write_text(ssot.read_text() + "\nBranch-authored policy edit.\n")
+            _git(repo, "commit", "-am", "branch edits applicable rule")
+            branch_rule_res = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(branch_rule_res.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((branch_rule_res.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+
+            _git(repo, "reset", "--hard", saved_topic_head)
+            run_architecture_review(repo, env=env, force=True)
+            _git(repo, "switch", "main")
+            agents = repo / "AGENTS.md"
+            agents.write_text(agents.read_text().replace("One canonical owner.", "One canonical owner strictly."))
+            _git(repo, "commit", "-am", "upstream AGENTS.md rule metadata edit")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            meta_edit_res = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(meta_edit_res.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((meta_edit_res.mode, meta["full_review_reason"]), ("full", "contract_changed"))
+            self.assertEqual(meta["contract_change_causes"], ["AGENTS.md"])
+
+    def test_go_branch_rebase_with_conflict_resolution_resumes_incremental_with_guardrails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            repo, env, _, _ = self._init_branch_config_repo(tmp, first_verdict="GO")
+            _git(repo, "switch", "main")
+            (repo / "migrations").mkdir(exist_ok=True)
+            (repo / "migrations/929_init.sql").write_text("CREATE TABLE items (id INT);\n")
+            (repo / "services/b/enums.py").write_text("STATUSES = [\n    'open',\n]\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "baseline migration and enum")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+            _git(repo, "switch", "topic")
+            _git(repo, "rebase", "main")
+            (repo / "migrations/930_add_col.sql").write_text("ALTER TABLE items ADD COLUMN x INT;\n")
+            (repo / "services/b/enums.py").write_text("STATUSES = [\n    'open',\n    'branch_status',\n]\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "branch migration and enum")
+            first = run_architecture_review(repo, env=env, force=True)
+            self.assertEqual((first.mode, first.verdict), ("full", "GO"))
+
+            # Main lands a conflicting migration number, enum entry, and unrelated config role edit.
+            _git(repo, "switch", "main")
+            (repo / "migrations/930_other.sql").write_text("CREATE TABLE other (id INT);\n")
+            (repo / "services/b/enums.py").write_text("STATUSES = [\n    'open',\n    'main_status',\n]\n")
+            cfg = json.loads((repo / ".guard/config.json").read_text())
+            next(m for m in cfg["topology"]["modules"] if m["path"] == "services/c")["role"] = "unrelated updated"
+            (repo / ".guard/config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "main lands 930 migration, enum entry, and unrelated role edit")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+            # Rebase topic onto main and resolve conflicts: rename 930->932, merge enum, keep services/x unchanged.
+            _git(repo, "switch", "topic")
+            proc = subprocess.run(["git", "rebase", "main"], cwd=repo, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                (repo / "services/b/enums.py").write_text(
+                    "STATUSES = [\n    'open',\n    'main_status',\n    'branch_status',\n]\n"
+                )
+                merged_cfg = json.loads(json.dumps(cfg))
+                merged_cfg["topology"]["modules"].append(
+                    {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": ["services/b"]}
+                )
+                (repo / ".guard/config.json").write_text(json.dumps(merged_cfg, indent=2) + "\n")
+                _git(repo, "add", "services/b/enums.py", ".guard/config.json")
+                subprocess.run(
+                    ["git", "rebase", "--continue"],
+                    cwd=repo,
+                    env={**os.environ, "GIT_EDITOR": "true"},
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            _git(repo, "mv", "migrations/930_add_col.sql", "migrations/932_add_col.sql")
+            _git(repo, "commit", "-m", "renumber migration 930 to 932 after rebase")
+
+            rebased = collect_review_scope(repo)
+            self.assertIsNone(resolve_or_carry_forward_receipt(repo, rebased))
+            second = run_architecture_review(repo, env=env)
+            meta = json.loads(Path(second.log_path.replace(".events.jsonl", ".meta.json")).read_text())
+            self.assertEqual((second.mode, second.verdict, meta["full_review_reason"]), ("incremental", "GO", ""))
+            self.assertEqual(second.session_id, first.session_id)
+
+            prompt = Path(second.log_path.replace(".events.jsonl", ".prompt.md")).read_text()
+            self.assertIn("## Prior-GO Scope Guardrail", prompt)
+            self.assertIn("## High-Signal Blocking & Anti-Escalation", prompt)
+            self.assertIn("Anti-Escalation:", prompt)
+            inc_section = prompt.split("## Verified incremental scope", 1)[1].split("\n## ", 1)[0]
+            self.assertIn("migrations/932_add_col.sql", inc_section)
+            self.assertIn("services/b/enums.py", inc_section)
+            self.assertNotIn("services/x/main.py", inc_section)
+            self.assertNotIn(".guard/config.json", inc_section)
+
+    def test_go_receipt_reused_when_session_contract_digest_changes_on_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, env, calls_file, first = self._init_branch_config_repo(Path(td), first_verdict="GO")
+            prior = load_review_session(repo)
+            assert prior is not None
+            save_review_session(repo, replace(prior, session_contract_digest="legacy-digest-format"))
+
+            with redirect_stderr(StringIO()) as stderr:
+                reused = run_architecture_review(repo, env={**env, "FAIL_IF_INVOKED": "1"})
+            self.assertEqual((reused.verdict, reused.provider), ("GO", "reused:claude"))
+            self.assertEqual(reused.patch_digest, first.patch_digest)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(len(calls_file.read_text().splitlines()), 1)
+
+    def test_applicable_policy_rules_matches_globs_builtins_and_fail_closed_tags(self) -> None:
+        rules = (
+            Rule("guard.backend", "block", ("backend",), "b", "docs/r/b.md", "review", "b"),
+            Rule("guard.frontend", "block", ("frontend",), "f", "docs/r/f.md", "review", "f"),
+            Rule("guard.skill", "block", ("skill",), "s", "docs/r/s.md", "review", "s"),
+            Rule("guard.tool", "block", ("tool",), "t", "docs/r/t.md", "review", "t"),
+            Rule("guard.custom", "block", ("custom_unknown",), "c", "docs/r/c.md", "review", "c"),
+        )
+        policy = Policy("the-guard-policy/v1", rules)
+        config = GuardConfig(
+            review={"rule_scope_globs": {"tool": ["**/tools/**", "apps/**"]}},
+            topology={"modules": [{"path": "ios_app", "languages": ["Swift"]}]},
+        )
+
+        def ids_for(files: tuple[str, ...], touched: set[str] | None = None) -> tuple[str, ...]:
+            scope = ReviewScope(
+                base_ref="main", merge_base="a" * 40, head_sha="b" * 40,
+                changed_files=files, reviewable_files=files,
+                submodule_changes=(), patch_digest="p",
+            )
+            return tuple(
+                r.id for r in session.applicable_policy_rules(policy, scope, config, touched or set())
+            )
+
+        # Pure backend Python excludes frontend, skill, tool; keeps backend and unknown custom fail-closed.
+        self.assertEqual(ids_for(("services/billing/main.py",)), ("guard.backend", "guard.custom"))
+        # **/tools/** matches root tools/ and nested services/agent/tools/.
+        self.assertIn("guard.tool", ids_for(("tools/run.py",)))
+        self.assertIn("guard.tool", ids_for(("services/agent/tools/search.py",)))
+        # apps/** matches touched module path "apps".
+        self.assertIn("guard.tool", ids_for(("services/other/main.py",), touched={"apps"}))
+        # Built-in frontend matches extension, path part, or declared module language.
+        self.assertIn("guard.frontend", ids_for(("services/x/view.tsx",)))
+        self.assertIn("guard.frontend", ids_for(("web/config.py",)))
+        self.assertIn("guard.frontend", ids_for(("ios_app/data.py",), touched={"ios_app"}))
+        # Built-in skill matches prefix, marker, or SKILL.md basename.
+        self.assertIn("guard.skill", ids_for(("skills/my-skill/run.py",)))
+        self.assertIn("guard.skill", ids_for(("packages/foo/SKILL.md",)))
+        # Editing a rule's own details file makes that rule applicable.
+        self.assertIn("guard.frontend", ids_for(("docs/r/f.md",)))
+        # Editing manifest_file fails closed to all rules.
+        self.assertEqual(ids_for(("AGENTS.md",)), tuple(r.id for r in rules))

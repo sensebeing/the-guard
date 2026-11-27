@@ -167,6 +167,27 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(modules=modules), self.assertRaisesRegex(ValueError, "[Rr]etired"):
                 validate_config({"topology": {"modules": modules}})
 
+    def test_review_rule_scope_globs_validation(self):
+        valid = {"tool": ["**/tools/**", "tools/**"], "empty": []}
+        config = validate_config({"review": {"rule_scope_globs": valid}})
+        self.assertEqual(config.review["rule_scope_globs"], valid)
+        for bad in (
+            "**/tools/**",
+            ["**/tools/**"],
+            123,
+            {"": ["a/**"]},
+            {"   ": ["a/**"]},
+            {"tool": "**/tools/**"},
+            {"tool": [""]},
+            {"tool": ["/abs/**"]},
+            {"tool": ["C:\\abs"]},
+            {"tool": ["../escape/**"]},
+            {"tool": ["a\x00b"]},
+            {"tool": [42]},
+        ):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "rule_scope_globs"):
+                validate_config({"review": {"rule_scope_globs": bad}})
+
     def test_check_and_edit_guard_reject_new_unregistered_source(self):
         self.write(".guard/config.json", json.dumps({"topology": {"enforce_module_dependencies": True}}))
         self.write("packages/new/main.py", "value = 1\n")

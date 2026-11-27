@@ -48,6 +48,8 @@ from .session import (
     ReviewResult,
     ReviewSessionState,
     active_guard_runtime,
+    applicable_policy_rules,
+    branch_config_delta_equal,
     compute_review_contract_digest,
     list_review_sessions,
     receipt_payload,
@@ -355,11 +357,12 @@ def _is_unchanged_rebuttal_round(
 def _is_boundary_refresh_round(
     repo_root: Path, scope: ReviewScope, session: ReviewSessionState | None, *,
     receipt_contract_changed: bool,
+    same_branch_patch: bool = False,
 ) -> bool:
     return (
         session is not None
         and receipt_contract_changed
-        and session.last_patch_digest == scope.patch_digest
+        and (session.last_patch_digest == scope.patch_digest or same_branch_patch)
         and session.last_head_sha != scope.head_sha
         and (
             session.merge_base == scope.merge_base
@@ -684,6 +687,18 @@ def _collect_branch_delta(
                 path=path,
             ):
                 continue
+            if (
+                path == ".guard/config.json"
+                and path in old_blobs
+                and branch_config_delta_equal(
+                    repo_root,
+                    session.merge_base,
+                    session.last_head_sha,
+                    scope.merge_base,
+                    scope.head_sha,
+                )
+            ):
+                continue
             changed_files.append(path)
             if is_reviewable_path(path, config, contract_paths=contract_paths):
                 reviewable_files.append(path)
@@ -763,7 +778,10 @@ def contract_change_causes(
 ) -> tuple[str, ...]:
     touched, _, _ = resolve_scope_modules(repo_root, scope, config, revision=scope.head_sha)
     declared_modules = {module["path"]: module for module in config.topology.get("modules", ())}
-    candidates = architecture_document_paths(config) | {rule.details for rule in policy.rules}
+    applicable = applicable_policy_rules(
+        policy, scope, config, touched, repo_root=repo_root, revision=scope.head_sha,
+    )
+    candidates = architecture_document_paths(config) | {rule.details for rule in applicable}
     candidates.add(".guard/config.json")
     for module in touched:
         candidates.update(boundary_document_paths(declared_modules.get(module, {"path": module})))

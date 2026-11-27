@@ -15,8 +15,9 @@ Layer ceilings do not grant dependencies: each module has a minimal explicit all
 import package exports or CLI. `config.VERSION` owns the version re-exported by the surface.
 
 
-- `config` validates repository-owned settings (including optional `review.integration_mode` and
-  `review.github_publish_mode`) and reads committed configuration through `git_helpers`.
+- `config` validates repository-owned settings (including optional `review.integration_mode`,
+  `review.github_publish_mode` and `review.rule_scope_globs`) and reads committed configuration
+  through `git_helpers`.
   `policy` validates manifest and rule documents.
 - `finding` defines the static diagnostic contract. `git_helpers` owns Git subprocess repository
   isolation, batched tree and blob reads, safe snapshot reads, stable patch-ID streaming, and
@@ -53,23 +54,32 @@ import package exports or CLI. `config.VERSION` owns the version re-exported by 
 - `auto_update` owns checkout selection, package-tree digest verification, package activation, `guard self-update`, installed uv-tool repair, global skill symlink repair, and background update state in `~/.config/the-guard`. The default installation migrates legacy update metadata and rotates the update log at 512 KiB, keeping one backup. Both CLI entry points use the same checkout selection as package bootstrap. A Git source compares against its own HEAD, and a VCS install compares against its PEP 610 commit. Without per-install provenance, an installed package can use a clean `~/the-guard` checkout at the globally installed commit if its own package digest differs. Bootstrap redirects submodule imports to the checkout, then reloads the Git helpers and updater in dependency order. The original package remains the baseline for CLI delegation. CLI workflows and hooks schedule background updates. Snapshot-bound inspection of the guard checkout from its worktree remains local.
 - Review Contract `v2` retains the first reviewed head and binding task blueprint revisions.
   Receipt reuse and carry-forward require the scoped `contract_digest`, which covers
-  `REVIEW_CONTRACT_VERSION`, repository configuration, policy rules, root instructions,
-  architecture documents, touched-module boundary documents and touched and one-hop module
-  declarations. Routine upgrades preserve `GO` receipts when the version and scoped contract
-  match. Scoped retired-table, forbidden-pattern and forbidden-import rules affect receipts for
-  the applicable modules. The session digest covers `REVIEW_CONTRACT_VERSION`, global rules,
-  root configuration (including `topology.architecture_docs` declarations) and root
+  `REVIEW_CONTRACT_VERSION`, repository configuration, applicable policy rules, root instructions,
+  architecture documents, touched-module boundary documents, touched and one-hop module
+  declarations, and any branch-authored `.guard/config.json` delta (`branch_changed` modules and
+  `branch_changed_rules` scoped-rule diffs) computed against the merge base. Unrelated upstream
+  module declarations and unrelated scoped rules stay outside the digest even when the branch
+  itself edits `.guard/config.json`, and mechanical `.guard/config.json` rebases with semantically
+  identical branch deltas carry forward `GO` receipts and resume incremental sessions without false
+  `contract_changed` resets. Routine upgrades preserve `GO` receipts whenever `contract_digest`
+  matches (independent of `session_contract_digest` format changes). Scoped retired-table,
+  forbidden-pattern and forbidden-import rules affect receipts for the applicable modules. Policy
+  rule scope slicing filters out-of-scope rules using optional `review.rule_scope_globs` plus
+  fail-closed built-in matchers for `frontend` and `skill` tags (all other tags and manifest/rule
+  edits fail closed as applicable). The session digest covers `REVIEW_CONTRACT_VERSION`,
+  applicable policy rules' structural metadata (without `detail_body`), global rules, root
+  configuration (including `topology.architecture_docs` and `review.rule_scope_globs`) and root
   instructions (`manifest_file`). Narrative architecture blueprint bodies
-  (`architecture_blueprint_paths`) and touched or one-hop-neighbour `role` prose edits preserve
-  an eligible warm session while still invalidating the receipt and delivering bounded deltas
-  for incremental refresh, failing closed to a full review on document-budget overflow or
-  unreadable history. Branch configuration edits can resume when the changed declarations and
-  scoped rules belong to currently or previously touched modules. A rebase also checks touched
-  modules and one-hop neighbours for structural changes. Upstream changes limited to a touched
-  module's declared `boundary_docs`, architecture blueprint bodies, or touched/one-hop-neighbour
-  `role` prose preserve an eligible session and require a new receipt. Sessions saved before
-  the root digest was introduced require an exact scoped digest match to continue. A full
-  review retains binding blueprint revisions for a valid branch baseline.
+  (`architecture_blueprint_paths`), touched or one-hop-neighbour `role` prose edits, and strictly
+  upstream applicable rule-detail prose edits preserve an eligible warm session while invalidating
+  the receipt and delivering bounded deltas (`## Updated Policy Rules` for rule details) for
+  incremental refresh, failing closed to a full review on >8,000-char rule diffs, document-budget
+  overflow, branch-authored rule edits, or unreadable history. Branch configuration edits can
+  resume when branch-authored declaration and scoped-rule deltas outside currently or previously
+  touched modules are unchanged, and across rebases when upstream structural projections on
+  touched modules and one-hop neighbours are unchanged. Sessions saved before the root digest was
+  introduced require an exact scoped digest match to continue. A full review retains binding
+  blueprint revisions for a valid branch baseline.
 
 Without a local checkout, `guard self-update` runs `uv tool upgrade the-guard` and records the
 installed package's PEP 610 commit, package-tree digest and CLI update status.
@@ -122,11 +132,17 @@ module boundaries. Root instructions, root `ARCHITECTURE.md` and touched module
 documents have a 24,000 UTF-8 byte limit. The document section has a 180,000 UTF-8 byte budget.
 Oversized documents use a heading index with line numbers and a snapshot read command.
 Incremental prompts send prior findings, rebuttal evidence, the verified change, and new or
-changed boundary, architecture blueprint, declared module `role`, and task blueprint context.
-A same-patch rebase with updated touched boundaries, architecture blueprints, or
-touched/one-hop-neighbour `role` prose resumes when the verified session can inspect the
-bounded delta without overflowing the document budget (failing closed to a full review
-otherwise). The prompt shows declared boundary additions and removals by module, including
+changed boundary, architecture blueprint, declared module `role`, applicable policy rule detail
+(`## Updated Policy Rules`), and task blueprint context.
+A same-patch rebase (including mechanical `.guard/config.json` rebases with semantically identical
+branch deltas) with updated touched boundaries, architecture blueprints, touched/one-hop-neighbour
+`role` prose, or upstream applicable policy rule details resumes when the verified session can
+inspect the bounded delta without exceeding the 8,000-character rule-diff limit or document budget
+(failing closed to a full review with `contract_change_causes` otherwise). Both full and
+incremental prompts enforce High-Signal Blocking tiering (separating hard-blocking defects from
+non-blocking suggestions); incremental prompts add anti-escalation guardrails and, when continuing
+from a prior `GO` round, a prior-`GO` scope guardrail keeping untouched approved code settled. The
+prompt shows declared boundary additions and removals by module, including
 transfers of unchanged documents, as well as declared module role changes and bounded
 architecture blueprint diffs. An unchanged-head rebuttal uses the session history.
 The manifest supplies the allowed finding IDs for prompts, output schemas and verdict validation.
