@@ -17,7 +17,7 @@ from ..config import GuardConfig, load_config
 from ..git_helpers import clean_git_env
 from ..policy import Policy, load_policy
 from .contract import ReviewOutput, ReviewScope, validate_review_output
-from .documents import resolve_module_neighbours, resolve_scope_modules
+from .documents import resolve_scope_modules, resolved_document_paths
 from .prompt import (
     _PriorModuleContextUnavailable,
     _sanitize_reviewer_note,
@@ -32,7 +32,7 @@ from .provider import (
     resolve_provider_order,
 )
 from .repository import (
-    _git,
+    _collect_branch_delta,
     _is_boundary_refresh_round,
     _is_unchanged_rebuttal_round,
     collect_incremental_scope,
@@ -58,9 +58,9 @@ from .session import (
     ReviewResult,
     ReviewRunLogger,
     ReviewSessionState,
-    _scoped_config_payload,
+    applicable_policy_rules,
     compute_session_contract_digest,
-    config_changes_outside_modules,
+    session_config_invalidated,
 )
 
 
@@ -117,6 +117,7 @@ def _session_contract_changed(
     repo_root: Path,
     scope: ReviewScope,
     config: GuardConfig,
+    policy: Policy,
     prior_session: ReviewSessionState | None,
     *,
     session_contract_digest: str,
@@ -128,48 +129,67 @@ def _session_contract_changed(
         return receipt_contract_changed
     if prior_session.session_contract_digest != session_contract_digest:
         return True
-    changed_branch_config = False
-    if ".guard/config.json" in scope.changed_files or (
-        receipt_contract_changed and prior_session.merge_base == scope.merge_base
-    ):
-        config_diff = _git(
-            repo_root, "diff", "--quiet", "--no-ext-diff", "--no-textconv",
-            f"{prior_session.last_head_sha}..{scope.head_sha}", "--", ".guard/config.json",
-            check=False,
-        )
-        if config_diff.returncode not in (0, 1):
-            return True
-        changed_branch_config = config_diff.returncode == 1
-    if not changed_branch_config and (
-        prior_session.merge_base == scope.merge_base or not receipt_contract_changed
-    ):
+    if not receipt_contract_changed:
         return False
 
     try:
-        if changed_branch_config:
-            prior_scope, prior_config = previous_review_scope(repo_root, prior_session)
-            prior_touched, _, _ = resolve_scope_modules(repo_root, prior_scope, prior_config)
-        else:
-            prior_config = load_config(
-                repo_root, revision=prior_session.last_head_sha, allow_historical=True
-            )
+        prior_scope, prior_config = previous_review_scope(repo_root, prior_session)
+        prior_policy = load_policy(
+            repo_root, revision=prior_session.last_head_sha, config=prior_config
+        )
+        prior_base_config = load_config(
+            repo_root, revision=prior_session.merge_base, allow_historical=True
+        )
+        curr_base_config = load_config(
+            repo_root, revision=scope.merge_base, allow_historical=True
+        )
+        prior_touched, prior_upstream, prior_downstream = resolve_scope_modules(
+            repo_root, prior_scope, prior_config, revision=prior_session.last_head_sha
+        )
+        touched, upstream, downstream = resolve_scope_modules(
+            repo_root, scope, config, revision=scope.head_sha
+        )
     except (OSError, RuntimeError, ValueError, CalledProcessError):
-        # An unavailable historical declaration cannot establish safe continuation.
+        # An unavailable historical contract cannot establish safe continuation.
         return True
-    touched, upstream, downstream = resolve_scope_modules(
-        repo_root, scope, config, revision=scope.head_sha
-    )
-    if changed_branch_config:
-        return config_changes_outside_modules(prior_config, config, touched | prior_touched)
-    prior_declarations = {m["path"]: m for m in prior_config.topology.get("modules", [])}
-    prior_upstream, prior_downstream = resolve_module_neighbours(touched, prior_declarations)
-    modules = touched, upstream | prior_upstream, downstream | prior_downstream
-    return _scoped_config_payload(
-        prior_config, scope, *modules,
-        include_touched_boundary_docs=False, include_module_roles=False,
-    ) != _scoped_config_payload(
-        config, scope, *modules,
-        include_touched_boundary_docs=False, include_module_roles=False,
+
+    same_merge_base = prior_session.merge_base == scope.merge_base
+    curr_applicable = {
+        rule.id: rule
+        for rule in applicable_policy_rules(
+            policy, scope, config, touched,
+            repo_root=repo_root, revision=scope.head_sha,
+        )
+    }
+    prior_applicable = {
+        rule.id: rule
+        for rule in applicable_policy_rules(
+            prior_policy, prior_scope, prior_config, prior_touched,
+            repo_root=repo_root, revision=prior_session.last_head_sha,
+        )
+    }
+    changed_branch_files = set(scope.changed_files)
+    for rule_id, curr_rule in curr_applicable.items():
+        prior_rule = prior_applicable.get(rule_id)
+        if prior_rule is None:
+            return True
+        if prior_rule.detail_body != curr_rule.detail_body:
+            if same_merge_base or (
+                resolved_document_paths(repo_root, scope.head_sha, {curr_rule.details})
+                & changed_branch_files
+            ):
+                return True
+
+    return session_config_invalidated(
+        prior_base_config,
+        prior_config,
+        curr_base_config,
+        config,
+        owned=touched | prior_touched,
+        touched=touched,
+        upstream=upstream | prior_upstream,
+        downstream=downstream | prior_downstream,
+        same_merge_base=same_merge_base,
     )
 
 
@@ -256,7 +276,7 @@ def run_architecture_review(
         policy, contract_config, repo_root=repo_root, revision=scope.head_sha, scope=scope
     )
     current_session_contract_digest = compute_session_contract_digest(
-        policy, contract_config, repo_root=repo_root, revision=scope.head_sha
+        policy, contract_config, repo_root=repo_root, revision=scope.head_sha, scope=scope
     )
     branch = current_branch_name(repo_root)
     stored_session = load_review_session(repo_root, branch)
@@ -264,21 +284,7 @@ def run_architecture_review(
     receipt_contract_changed = prior_session is not None and (
         not prior_session.contract_digest or prior_session.contract_digest != current_contract_digest
     )
-    session_contract_changed = _session_contract_changed(
-        repo_root, scope, contract_config, prior_session,
-        session_contract_digest=current_session_contract_digest,
-        receipt_contract_changed=receipt_contract_changed,
-    )
-    change_causes = ()
-    if session_contract_changed and prior_session is not None:
-        if not force:
-            change_causes = contract_change_causes(
-                repo_root, scope, prior_session.last_head_sha, contract_config, policy,
-            )
-            print("[arch-review] review contract changed: " + ", ".join(change_causes), file=sys.stderr)
-        prior_session = None
-
-    if force or not (receipt_contract_changed or session_contract_changed):
+    if force or not receipt_contract_changed:
         existing = resolve_or_carry_forward_receipt(
             repo_root,
             scope,
@@ -306,14 +312,35 @@ def run_architecture_review(
     else:
         existing = None
 
-    inc_scope = collect_incremental_scope(
-        repo_root, scope, prior_session, config=contract_config
+    session_contract_changed = _session_contract_changed(
+        repo_root, scope, contract_config, policy, prior_session,
+        session_contract_digest=current_session_contract_digest,
+        receipt_contract_changed=receipt_contract_changed,
     )
+    change_causes = ()
+    if session_contract_changed and prior_session is not None:
+        if not force:
+            change_causes = contract_change_causes(
+                repo_root, scope, prior_session.last_head_sha, contract_config, policy,
+            )
+            print("[arch-review] review contract changed: " + ", ".join(change_causes), file=sys.stderr)
+        prior_session = None
+
+    try:
+        branch_delta = _collect_branch_delta(
+            repo_root, scope, prior_session, config=contract_config
+        )
+    except RuntimeError:
+        branch_delta = None
+    inc_scope = branch_delta if (branch_delta is not None and branch_delta.has_changes) else None
+    same_branch_patch = branch_delta is not None and not branch_delta.has_changes
     can_incremental = prior_session is not None and (
         inc_scope is not None
         or _is_unchanged_rebuttal_round(scope, prior_session, eff_note)
         or _is_boundary_refresh_round(
-            repo_root, scope, prior_session, receipt_contract_changed=receipt_contract_changed,
+            repo_root, scope, prior_session,
+            receipt_contract_changed=receipt_contract_changed,
+            same_branch_patch=same_branch_patch,
         )
     )
     if force:
@@ -365,11 +392,16 @@ def run_architecture_review(
                 inc_scope,
                 snapshot_context=snapshot_context,
                 receipt_contract_changed=receipt_contract_changed,
+                same_branch_patch=same_branch_patch,
                 reviewer_note=eff_note,
                 policy=policy,
                 config=contract_config,
             )
         except _PriorModuleContextUnavailable:
+            if not force and not change_causes:
+                change_causes = contract_change_causes(
+                    repo_root, scope, prior_session.last_head_sha, contract_config, policy,
+                )
             prior_session = None
             inc_scope = None
 

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from collections.abc import Collection, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
@@ -21,10 +22,15 @@ from ..auto_update import (
     compute_package_tree_digest,
     load_auto_update_status,
 )
-from ..config import GuardConfig
+from ..config import GuardConfig, load_config
 from ..git_helpers import git_stdout
-from ..policy import Policy
-from .contract import REVIEW_CONTRACT_VERSION, BlockingFinding, ReviewScope
+from ..policy import Policy, Rule
+from .contract import (
+    PROMPT_SKILL_PATH_MARKERS,
+    REVIEW_CONTRACT_VERSION,
+    BlockingFinding,
+    ReviewScope,
+)
 from .documents import (
     architecture_document_paths,
     boundary_document_paths,
@@ -48,6 +54,20 @@ MAX_RETAINED_SESSIONS = 12
 MAX_RETAINED_RECEIPTS = 200
 _LOGGER = logging.getLogger(__name__)
 _SCOPED_RULE_KEYS = ("retired_tables", "forbidden_patterns", "forbidden_imports")
+_FRONTEND_EXTENSIONS = frozenset({
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+    ".swift", ".kt", ".kts",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".htm", ".vue", ".svelte", ".astro",
+    ".strings", ".stringsdict", ".xcstrings", ".storyboard", ".xib", ".svg",
+})
+_FRONTEND_PATH_PARTS = frozenset({
+    "frontend", "web", "ui", "client", "ios", "macos", "android", "mobile", "apps",
+})
+_FRONTEND_LANGUAGES = frozenset({
+    "swift", "typescript", "javascript", "kotlin", "dart", "objective-c", "html", "css",
+})
+_SKILL_PREFIXES = ("skills/", ".agents/", ".claude/", ".codex/")
 
 
 def _snapshot_document_bodies(
@@ -109,56 +129,310 @@ def scoped_topology_rules(
     }
 
 
-def config_changes_outside_modules(
-    prior: GuardConfig, current: GuardConfig, owned: set[str],
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _root_config_projection(config: GuardConfig) -> dict[str, Any]:
+    payload = asdict(config)
+    topology = payload.get("topology", {})
+    topology.pop("modules", None)
+    topology.update(scoped_topology_rules(topology, ()))
+    return payload
+
+
+@dataclass(frozen=True)
+class BranchConfigDelta:
+    root_diff: tuple[str, str] | None
+    changed_modules: dict[str, tuple[dict[str, Any] | None, dict[str, Any] | None]]
+    changed_scoped_rules: dict[str, tuple[tuple[str, ...], tuple[str, ...]]]
+
+
+def branch_config_delta(
+    base_config: GuardConfig, head_config: GuardConfig,
+) -> BranchConfigDelta:
+    base_root = _canonical_json(_root_config_projection(base_config))
+    head_root = _canonical_json(_root_config_projection(head_config))
+    root_diff = None if base_root == head_root else (base_root, head_root)
+
+    base_modules = {m["path"]: m for m in base_config.topology.get("modules", ())}
+    head_modules = {m["path"]: m for m in head_config.topology.get("modules", ())}
+    changed_modules: dict[str, tuple[dict[str, Any] | None, dict[str, Any] | None]] = {}
+    for path in sorted(base_modules.keys() | head_modules.keys()):
+        base_decl = base_modules.get(path)
+        head_decl = head_modules.get(path)
+        if base_decl != head_decl:
+            changed_modules[path] = (base_decl, head_decl)
+
+    changed_scoped_rules: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+    for key in _SCOPED_RULE_KEYS:
+        base_counts = Counter(
+            _canonical_json(rule) for rule in _rule_entries(base_config.topology, key)
+        )
+        head_counts = Counter(
+            _canonical_json(rule) for rule in _rule_entries(head_config.topology, key)
+        )
+        removed = tuple(sorted((base_counts - head_counts).elements()))
+        added = tuple(sorted((head_counts - base_counts).elements()))
+        if removed or added:
+            changed_scoped_rules[key] = (removed, added)
+
+    return BranchConfigDelta(
+        root_diff=root_diff,
+        changed_modules=changed_modules,
+        changed_scoped_rules=changed_scoped_rules,
+    )
+
+
+def branch_config_delta_equal(
+    repo_root: Path, old_base: str, old_head: str, new_base: str, new_head: str,
 ) -> bool:
-    def outside_projection(config: GuardConfig) -> tuple[dict[str, Any], dict[str, Any]]:
-        topology = config.topology
-        outside = {
-            module["path"]: module for module in topology.get("modules", [])
-            if module["path"] not in owned
-        }
+    try:
+        old_base_cfg = load_config(repo_root, revision=old_base, allow_historical=True)
+        old_head_cfg = load_config(repo_root, revision=old_head, allow_historical=True)
+        new_base_cfg = load_config(repo_root, revision=new_base, allow_historical=True)
+        new_head_cfg = load_config(repo_root, revision=new_head, allow_historical=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return branch_config_delta(old_base_cfg, old_head_cfg) == branch_config_delta(
+        new_base_cfg, new_head_cfg
+    )
 
-        def is_owned(rule: Mapping[str, Any]) -> bool:
-            prefixes = rule.get("scope_prefixes", ())
-            return bool(prefixes) and not rule_applies_to_modules(rule, outside.keys()) and all(
-                rule_applies_to_modules({"scope_prefixes": (prefix,)}, owned) for prefix in prefixes
+
+def _glob_matches_path(path: str, pattern: str) -> bool:
+    norm_path = path.strip("/")
+    norm_pattern = pattern.strip("/")
+    if not norm_path or not norm_pattern:
+        return False
+    if not any(ch in norm_pattern for ch in "*?["):
+        return norm_path == norm_pattern or norm_path.startswith(norm_pattern + "/")
+    if fnmatchcase(norm_path, norm_pattern):
+        return True
+    path_parts = norm_path.split("/")
+    pattern_parts = norm_pattern.split("/")
+    failed: set[tuple[int, int]] = set()
+
+    def _match(pi: int, qi: int) -> bool:
+        if (pi, qi) in failed:
+            return False
+        start = (pi, qi)
+        while pi < len(path_parts) and qi < len(pattern_parts):
+            if pattern_parts[qi] == "**":
+                while qi + 1 < len(pattern_parts) and pattern_parts[qi + 1] == "**":
+                    qi += 1
+                if qi == len(pattern_parts) - 1:
+                    return True
+                for skip in range(pi, len(path_parts) + 1):
+                    if _match(skip, qi + 1):
+                        return True
+                failed.add(start)
+                return False
+            if not fnmatchcase(path_parts[pi], pattern_parts[qi]):
+                failed.add(start)
+                return False
+            pi += 1
+            qi += 1
+        while qi < len(pattern_parts) and pattern_parts[qi] == "**":
+            qi += 1
+        if pi == len(path_parts) and qi == len(pattern_parts):
+            return True
+        failed.add(start)
+        return False
+
+    return _match(0, 0)
+
+
+def applicable_policy_rules(
+    policy: Policy,
+    scope: ReviewScope | None,
+    config: GuardConfig,
+    touched: Collection[str],
+    *,
+    repo_root: Path | None = None,
+    revision: str | None = None,
+) -> tuple[Rule, ...]:
+    """Filter manifest policy rules to those applicable to the reviewed scope (fail-closed)."""
+    if scope is None or scope.submodule_changes:
+        return policy.rules
+    changed = set(scope.changed_files)
+    eff_rev = revision or scope.head_sha
+    if repo_root is not None:
+        modes: dict[str, str] = {}
+        doc_paths = {config.manifest_file, *(rule.details for rule in policy.rules)}
+        existing_document_paths(repo_root, doc_paths, eff_rev, snapshot_modes=modes)
+
+        def _doc_aliases(path: str) -> set[str]:
+            aliases = {path}
+            if modes.get(path) == "120000":
+                read_document(
+                    repo_root, path, eff_rev, loaded_paths=aliases, snapshot_modes=modes
+                )
+            return aliases
+    else:
+        def _doc_aliases(path: str) -> set[str]:
+            return {path}
+
+    if _doc_aliases(config.manifest_file) & changed:
+        return policy.rules
+
+    rule_scope_globs = config.review.get("rule_scope_globs", {})
+    touched_set = set(touched)
+    reviewable = scope.reviewable_files
+    candidate_paths = (*reviewable, *sorted(touched_set))
+    declared_modules = {m["path"]: m for m in config.topology.get("modules", ())}
+    has_frontend_language = any(
+        lang.strip().lower() in _FRONTEND_LANGUAGES
+        for module_path in touched_set
+        for lang in declared_modules.get(module_path, {}).get("languages", ())
+        if isinstance(lang, str)
+    )
+    has_frontend_path = has_frontend_language or any(
+        PurePosixPath(path).suffix.lower() in _FRONTEND_EXTENSIONS
+        or any(part.lower() in _FRONTEND_PATH_PARTS for part in PurePosixPath(path).parts)
+        for path in reviewable
+    ) or any(
+        any(part.lower() in _FRONTEND_PATH_PARTS for part in PurePosixPath(path).parts)
+        for path in touched_set
+    )
+    has_skill_path = any(
+        any(marker in f"/{path}" for marker in PROMPT_SKILL_PATH_MARKERS)
+        or path.startswith(_SKILL_PREFIXES)
+        or PurePosixPath(path).name == "SKILL.md"
+        for path in reviewable
+    )
+
+    tag_cache: dict[str, bool] = {}
+
+    def _tag_matches(tag: str) -> bool:
+        if tag in tag_cache:
+            return tag_cache[tag]
+        if tag in rule_scope_globs:
+            globs = rule_scope_globs[tag]
+            matched = any(
+                _glob_matches_path(path, pattern)
+                for path in candidate_paths
+                for pattern in globs
             )
+        elif tag == "frontend":
+            matched = has_frontend_path
+        elif tag == "skill":
+            matched = has_skill_path
+        else:
+            matched = True
+        tag_cache[tag] = matched
+        return matched
 
-        rules = {
-            key: [rule for rule in _rule_entries(topology, key) if not is_owned(rule)]
-            for key in _SCOPED_RULE_KEYS
-        }
-        return outside, rules
+    return tuple(
+        rule
+        for rule in policy.rules
+        if (_doc_aliases(rule.details) & changed)
+        or any(_tag_matches(tag) for tag in rule.scope)
+    )
 
-    return outside_projection(prior) != outside_projection(current)
+
+def session_config_invalidated(
+    prior_base_config: GuardConfig,
+    prior_config: GuardConfig,
+    curr_base_config: GuardConfig,
+    curr_config: GuardConfig,
+    *,
+    owned: set[str],
+    touched: set[str],
+    upstream: set[str],
+    downstream: set[str],
+    same_merge_base: bool,
+) -> bool:
+    """Return True when config changes invalidate warm session continuation."""
+    prior_delta = branch_config_delta(prior_base_config, prior_config)
+    curr_delta = branch_config_delta(curr_base_config, curr_config)
+
+    for module_path in (
+        prior_delta.changed_modules.keys() | curr_delta.changed_modules.keys()
+    ) - owned:
+        if prior_delta.changed_modules.get(module_path) != curr_delta.changed_modules.get(module_path):
+            return True
+
+    outside_modules = {
+        module["path"]
+        for cfg in (prior_base_config, prior_config, curr_base_config, curr_config)
+        for module in cfg.topology.get("modules", ())
+        if module["path"] not in owned
+    }
+
+    def _is_owned_rule(rule: Mapping[str, Any]) -> bool:
+        prefixes = rule.get("scope_prefixes", ())
+        return (
+            bool(prefixes)
+            and not rule_applies_to_modules(rule, outside_modules)
+            and all(
+                rule_applies_to_modules({"scope_prefixes": (prefix,)}, owned)
+                for prefix in prefixes
+            )
+        )
+
+    def _non_owned_rule_delta(
+        delta: BranchConfigDelta, key: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        removed, added = delta.changed_scoped_rules.get(key, ((), ()))
+        return (
+            tuple(raw for raw in removed if not _is_owned_rule(json.loads(raw))),
+            tuple(raw for raw in added if not _is_owned_rule(json.loads(raw))),
+        )
+
+    for key in _SCOPED_RULE_KEYS:
+        if _non_owned_rule_delta(prior_delta, key) != _non_owned_rule_delta(curr_delta, key):
+            return True
+
+    if not same_merge_base:
+        prior_upstream_projection = _scoped_config_payload(
+            prior_base_config,
+            touched,
+            upstream,
+            downstream,
+            include_touched_boundary_docs=False,
+            include_module_roles=False,
+        )
+        curr_upstream_projection = _scoped_config_payload(
+            curr_base_config,
+            touched,
+            upstream,
+            downstream,
+            include_touched_boundary_docs=False,
+            include_module_roles=False,
+        )
+        if prior_upstream_projection != curr_upstream_projection:
+            return True
+
+    return False
 
 
 def _scoped_config_payload(
     config: GuardConfig,
-    scope: ReviewScope,
     touched: set[str],
     upstream: set[str],
     downstream: set[str],
     *,
     include_touched_boundary_docs: bool = True,
     include_module_roles: bool = True,
+    branch_delta: BranchConfigDelta | None = None,
 ) -> dict[str, Any]:
     """Keep the reviewed module contract while dropping unrelated module declarations."""
     payload = asdict(config)
     topology = payload.get("topology", {})
     modules = topology.pop("modules", [])
     declared_modules = {module["path"]: module for module in modules}
-    if ".guard/config.json" in scope.changed_files:
-        topology["modules"] = [
-            {key: value for key, value in module.items() if key != "boundary_docs"}
-            if module["path"] not in touched
-            else module
-            for module in modules
-        ]
-        return payload
 
-    topology.update(scoped_topology_rules(topology, touched))
+    rule_modules = (
+        touched | branch_delta.changed_modules.keys()
+        if branch_delta is not None
+        else touched
+    )
+    topology.update(scoped_topology_rules(topology, rule_modules))
+    if branch_delta is not None and branch_delta.changed_scoped_rules:
+        topology["branch_changed_rules"] = {
+            key: {"removed": list(removed), "added": list(added)}
+            for key, (removed, added) in sorted(branch_delta.changed_scoped_rules.items())
+        }
 
     def neighbour_projection(module_path: str) -> dict[str, Any]:
         declared = declared_modules.get(module_path)
@@ -174,24 +448,42 @@ def _scoped_config_payload(
             projection["role"] = declared.get("role")
         return projection
 
-    touched_modules = [declared_modules.get(module, {"path": module}) for module in sorted(touched)]
+    touched_modules = [dict(declared_modules.get(module, {"path": module})) for module in sorted(touched)]
     if not include_touched_boundary_docs:
         for module in touched_modules:
             module.pop("boundary_docs", None)
     if not include_module_roles:
         for module in touched_modules:
             module.pop("role", None)
-    topology["modules"] = {
+    modules_payload: dict[str, Any] = {
         "touched": touched_modules,
         "upstream": [neighbour_projection(module) for module in sorted(upstream)],
         "downstream": [neighbour_projection(module) for module in sorted(downstream)],
     }
+    if branch_delta is not None:
+        branch_changed: list[dict[str, Any]] = []
+        for module_path in sorted(branch_delta.changed_modules):
+            if module_path in touched:
+                continue
+            _, head_decl = branch_delta.changed_modules[module_path]
+            if head_decl is None:
+                branch_changed.append({"path": module_path, "removed": True})
+            else:
+                entry = dict(head_decl)
+                if not include_touched_boundary_docs:
+                    entry.pop("boundary_docs", None)
+                if not include_module_roles:
+                    entry.pop("role", None)
+                branch_changed.append(entry)
+        if branch_changed:
+            modules_payload["branch_changed"] = branch_changed
+    topology["modules"] = modules_payload
     return payload
 
 
 def _scoped_contract_payload(
     repo_root: Path, config: GuardConfig, scope: ReviewScope, revision: str | None
-) -> tuple[dict[str, str], dict[str, Any]]:
+) -> tuple[dict[str, str], dict[str, Any], set[str]]:
     eff_rev = revision or scope.head_sha
     modes: dict[str, str] = {}
     touched, upstream, downstream = resolve_scope_modules(
@@ -203,11 +495,26 @@ def _scoped_contract_payload(
         paths.update(
             boundary_document_paths(declared_modules.get(module, {"path": module}))
         )
+    documents = _snapshot_document_bodies(
+        repo_root, paths, eff_rev, snapshot_modes=modes
+    )
+    branch_delta: BranchConfigDelta | None = None
+    if ".guard/config.json" in scope.changed_files:
+        if scope.merge_base == eff_rev:
+            return documents, asdict(config), touched
+        try:
+            base_config = load_config(
+                repo_root, revision=scope.merge_base, allow_historical=True
+            )
+        except (OSError, RuntimeError, ValueError):
+            return documents, asdict(config), touched
+        branch_delta = branch_config_delta(base_config, config)
     return (
-        _snapshot_document_bodies(
-            repo_root, paths, eff_rev, snapshot_modes=modes
+        documents,
+        _scoped_config_payload(
+            config, touched, upstream, downstream, branch_delta=branch_delta
         ),
-        _scoped_config_payload(config, scope, touched, upstream, downstream),
+        touched,
     )
 
 
@@ -217,19 +524,25 @@ def _hash_contract(
     documents: dict[str, str],
     *,
     include_rule_checker: bool,
+    include_rule_detail_body: bool = True,
+    rules: Collection[Rule] | None = None,
 ) -> str:
-    rules = [asdict(rule) for rule in policy.rules]
+    selected_rules = policy.rules if rules is None else rules
+    rule_payloads = [asdict(rule) for rule in selected_rules]
     if not include_rule_checker:
         # The existing receipt payload never included the checker field.
-        for rule in rules:
+        for rule in rule_payloads:
             del rule["checker"]
+    if not include_rule_detail_body:
+        for rule in rule_payloads:
+            del rule["detail_body"]
     payload = {
         "contract_version": REVIEW_CONTRACT_VERSION,
         "documents": documents,
         "config": config_payload,
         "policy": {
             "manifest_schema": policy.schema,
-            "rules": rules,
+            "rules": rule_payloads,
         },
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -246,19 +559,30 @@ def compute_review_contract_digest(
 ) -> str:
     """Hash the review contract version and the applicable repository contract.
 
-    With a review scope, the configuration and document contract is limited to the touched
-    modules and their one-hop dependency neighbours so unrelated changes cannot invalidate it.
+    With a review scope, the configuration, policy rules and document contract are limited to
+    the touched modules, branch-authored config deltas and one-hop dependency neighbours so
+    unrelated changes cannot invalidate it.
     """
     if repo_root is not None and scope is not None:
-        documents, config_payload = _scoped_contract_payload(
+        documents, config_payload, touched = _scoped_contract_payload(
             repo_root, config, scope, revision
+        )
+        rules = applicable_policy_rules(
+            policy, scope, config, touched,
+            repo_root=repo_root, revision=revision or scope.head_sha,
         )
     else:
         documents = _snapshot_document_bodies(
             repo_root, contract_document_paths(config), revision
         )
         config_payload = asdict(config)
-    return _hash_contract(policy, config_payload, documents, include_rule_checker=False)
+        rules = policy.rules
+    return _hash_contract(
+        policy, config_payload, documents,
+        include_rule_checker=False,
+        include_rule_detail_body=True,
+        rules=rules,
+    )
 
 
 def compute_session_contract_digest(
@@ -267,15 +591,33 @@ def compute_session_contract_digest(
     *,
     repo_root: Path | None = None,
     revision: str | None = None,
+    scope: ReviewScope | None = None,
 ) -> str:
     """Hash the review contract version and root contract for provider session continuation."""
-    config_payload = asdict(config)
-    config_payload["topology"].pop("modules", None)
-    config_payload["topology"].update(scoped_topology_rules(config_payload["topology"], ()))
+    config_payload = _root_config_projection(config)
+    eff_rev = revision or (scope.head_sha if scope is not None else None)
     documents = _snapshot_document_bodies(
-        repo_root, {config.manifest_file}, revision
+        repo_root, {config.manifest_file}, eff_rev
     )
-    return _hash_contract(policy, config_payload, documents, include_rule_checker=True)
+    if scope is not None:
+        if repo_root is not None:
+            touched, _, _ = resolve_scope_modules(
+                repo_root, scope, config, revision=eff_rev
+            )
+        else:
+            touched = set()
+        rules = applicable_policy_rules(
+            policy, scope, config, touched,
+            repo_root=repo_root, revision=eff_rev,
+        )
+    else:
+        rules = policy.rules
+    return _hash_contract(
+        policy, config_payload, documents,
+        include_rule_checker=True,
+        include_rule_detail_body=False,
+        rules=rules,
+    )
 
 
 def contract_digest_matches(

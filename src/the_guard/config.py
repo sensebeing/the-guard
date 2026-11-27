@@ -173,6 +173,20 @@ def _validate_sections(data: dict[str, Any]) -> None:
             not isinstance(review[key], list) or not all(map(is_valid, review[key]))
         ):
             raise ValueError(f"review.{key} must be an array of safe repository-relative {label}")
+    if "rule_scope_globs" in review:
+        rule_scope_globs = review["rule_scope_globs"]
+        if not isinstance(rule_scope_globs, dict) or any(
+            not isinstance(tag, str) or not tag.strip()
+            for tag in rule_scope_globs
+        ):
+            raise ValueError(
+                "review.rule_scope_globs must be an object mapping nonempty scope tags to glob arrays"
+            )
+        for tag, globs in rule_scope_globs.items():
+            if not isinstance(globs, list) or not all(map(_relative_glob, globs)):
+                raise ValueError(
+                    f"review.rule_scope_globs.{tag} must be an array of safe repository-relative globs"
+                )
     topology = data.get("topology", {})
     production_scopes = ("python_prod_prefixes", "swift_prod_prefixes")
     rule_groups = (

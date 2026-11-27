@@ -19,10 +19,18 @@ Updater state and reviewer discovery default to `~/.config/the-guard`. The updat
 legacy metadata on first default-path use and retains one rotated 512 KiB log backup.
 Background checks skip Git and hashing for 30 seconds after scheduling. The six-hour interval
 applies when the global installation is current, including when delegation serves a stale project venv.
-Review Contract `v2` sends the verified delta, prior findings and changed boundary or blueprint
-context when resuming. A same-patch rebase with updated touched-module boundary documents or
-`boundary_docs` declarations can resume with the inspectable delta and requires a fresh receipt.
-Full prompts prioritize owner documents within a 180,000 UTF-8 byte
+Review Contract `v2` sends the verified delta, prior findings and changed boundary, policy rule
+detail, or blueprint context when resuming. Branch-authored `.guard/config.json` edits are sliced
+by merge-base delta so unrelated upstream module or scoped-rule edits do not trigger
+`contract_changed` resets, and mechanical `.guard/config.json` rebases with semantically identical
+branch deltas carry forward `GO` receipts directly. Optional `review.rule_scope_globs` plus
+fail-closed built-in `frontend` and `skill` matchers exclude out-of-scope policy rules from
+digests and full prompts. A same-patch rebase with updated touched-module boundary documents,
+`boundary_docs` declarations, touched/neighbour `role` prose, or strictly upstream applicable
+policy rule details can resume with the inspectable delta (failing closed to a full review on
+>8,000-char rule diffs, budget overflow, or branch-authored rule edits) and requires a fresh
+receipt. Incremental prompts enforce high-signal blocking, anti-escalation, and prior-`GO`
+anti-reopen guardrails. Full prompts prioritize owner documents within a 180,000 UTF-8 byte
 budget and use heading indexes with committed read commands for oversized documents. Findings
 use manifest rule IDs, and a `NO-GO` verdict requires a concrete blocking finding.
 
