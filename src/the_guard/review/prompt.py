@@ -1157,10 +1157,14 @@ def _render_module_context_delta(
             current_policy, context.scope, current_config, context.touched,
             repo_root=repo_root, revision=head,
         )
+        prior_applicable_rules = applicable_policy_rules(
+            prior_policy, previous_scope, prior_config, prior_touched,
+            repo_root=repo_root, revision=prior_head,
+        )
     except (OSError, RuntimeError, ValueError, CalledProcessError) as exc:
         raise _PriorModuleContextUnavailable(str(exc)) from exc
 
-    prior_rules_by_id = {rule.id: rule for rule in prior_policy.rules}
+    prior_rules_by_id = {rule.id: rule for rule in prior_applicable_rules}
     policy_rule_changes: list[tuple[Rule, str]] = []
     for rule in curr_applicable_rules:
         prior_rule = prior_rules_by_id.get(rule.id)

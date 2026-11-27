@@ -2791,6 +2791,10 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     (repo / "services/a/main.py").write_text("value = 2\n")
                     _git(repo, "commit", "-am", "touch services/a too")
                     first = run_architecture_review(repo, env=env, force=True)
+                elif scenario == "add_downstream":
+                    (repo / "services/c/main.py").write_text("value = 2\n")
+                    _git(repo, "commit", "-am", "touch services/c")
+                    first = run_architecture_review(repo, env=env, force=True)
 
                 _git(repo, "switch", "main")
                 cfg = json.loads((repo / ".guard/config.json").read_text())
@@ -2825,13 +2829,11 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                     cfg["topology"]["modules"][1]["dependencies"] = []
                     cfg["topology"]["modules"][0]["retired"] = True
                 elif scenario == "add_downstream":
-                    # Add a module depending on services/x? services/x is on branch, so add one depending on services/b?
-                    # Instead add services/a on main before or make topic touch services/c and main add a caller of services/c.
                     cfg["topology"]["modules"].append(
-                        {"path": "services/d", "layer": "service", "role": "caller of b", "dependencies": ["services/c"]}
+                        {"path": "services/e", "layer": "service", "role": "new caller", "dependencies": ["services/c"]}
                     )
-                    (repo / "services/d").mkdir(parents=True)
-                    (repo / "services/d/main.py").write_text("value = 1\n")
+                    (repo / "services/e").mkdir(parents=True)
+                    (repo / "services/e/main.py").write_text("value = 1\n")
                 (repo / ".guard/config.json").write_text(json.dumps(cfg, indent=2) + "\n")
                 _git(repo, "add", ".")
                 _git(repo, "commit", "-m", f"upstream {scenario}")
@@ -2843,33 +2845,7 @@ class ArchitectureReviewSessionTests(ArchitectureReviewTestCase):
                 merged_cfg["topology"]["modules"].append(
                     {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": x_deps}
                 )
-                if scenario == "add_downstream":
-                    # Also touch services/c on branch so services/d is a new downstream neighbour.
-                    merged_cfg["topology"]["modules"][-1]["dependencies"] = ["services/b"]
                 self._rebase_topic_resolving_config(repo, merged_cfg)
-                if scenario == "add_downstream":
-                    # Start clean with services/c touched before main added services/d:
-                    # Re-verify cleanly with a new commit adding downstream caller of services/c.
-                    (repo / "services/c/main.py").write_text("value = 2\n")
-                    _git(repo, "commit", "-am", "touch services/c")
-                    first = run_architecture_review(repo, env=env, force=True)
-                    _git(repo, "switch", "main")
-                    cfg2 = json.loads((repo / ".guard/config.json").read_text())
-                    cfg2["topology"]["modules"].append(
-                        {"path": "services/e", "layer": "service", "role": "new caller", "dependencies": ["services/c"]}
-                    )
-                    (repo / "services/e").mkdir(parents=True)
-                    (repo / "services/e/main.py").write_text("value = 1\n")
-                    (repo / ".guard/config.json").write_text(json.dumps(cfg2, indent=2) + "\n")
-                    _git(repo, "add", ".")
-                    _git(repo, "commit", "-m", "add downstream caller of services/c")
-                    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-                    _git(repo, "switch", "topic")
-                    merged2 = json.loads(json.dumps(cfg2))
-                    merged2["topology"]["modules"].append(
-                        {"path": "services/x", "layer": "service", "role": "x owner", "dependencies": ["services/b"]}
-                    )
-                    self._rebase_topic_resolving_config(repo, merged2)
 
                 rebased = collect_review_scope(repo)
                 self.assertIsNone(resolve_or_carry_forward_receipt(repo, rebased))
